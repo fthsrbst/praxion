@@ -9,8 +9,6 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
 - Project: **Praxion**, an autonomous game-playing bot system that writes its own skills
   while it plays. First demo: Minecraft only; the core must stay game-agnostic.
 - Phase 0, research. Scope and architecture are not decided yet. Research lives in `docs/research/`.
-- This is a fresh start. An earlier, deleted project (hub project `minecraft-agent`) is not a
-  source of decisions; do not reuse its hub records.
 - Do not scaffold, add dependencies or write product code until the decisions are
   recorded in this repo. A later session makes the decisions and drafts the architecture.
 - When this section is stale, fix it in the same change that makes it stale.
