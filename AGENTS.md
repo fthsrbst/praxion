@@ -13,6 +13,21 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
   recorded in this repo. A later session makes the decisions and drafts the architecture.
 - When this section is stale, fix it in the same change that makes it stale.
 
+## The user owns the design
+
+The user must understand every part of the system: the architecture, every algorithm, every
+data structure and every interface. We build it together; agents never design alone.
+
+- **Consult before deciding.** Any choice about architecture, algorithms, data models, interfaces,
+  dependencies or trade-offs goes to the user first, as a recommendation with its reasoning and
+  the main alternative. Do not implement it until the user agrees.
+- **Explain as you go.** For each piece, explain what it does, how it works, why it is built this
+  way and where it fits in the whole. Use small examples and diagrams where they help.
+- **Check understanding.** At the end of each step, make sure the user can explain the piece back.
+  If something is unclear, stop and clarify before building on it.
+- **No silent decisions.** If you must pick something minor to proceed, say what you picked and why,
+  so the user can overrule it. Record agreed decisions in the repo.
+
 ## Communication
 
 - Talk to the user in Turkish. Write every file in English.
