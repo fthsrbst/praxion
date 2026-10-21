@@ -19,4 +19,11 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Choose a license
+- Source: Claude Opus 5.5, 2026-10-21
+- State: The repo is public with no license (all rights reserved). Options compared in chat:
+  MIT, Apache-2.0, AGPL-3.0, FSL/BSL. Leaning open-core (Apache-2.0 core, commercial parts closed).
+- Remaining: Decide together with the business model, before the first code is committed.
+- Pointers: `README.md` → License
+
 ## Done

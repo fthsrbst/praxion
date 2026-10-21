@@ -32,6 +32,8 @@ data structure and every interface. We build it together; agents never design al
 
 - Talk to the user in Turkish. Write every file in English.
 - Give the user a recommendation, not a list of options you will not pursue.
+- Suggest proactively. The user wants ideas, better approaches, risks and missing pieces even when
+  not asked. Say what you would do and why. A suggestion is a proposal, not a decision: the user decides.
 - Say "unknown" when you do not know. Never present a guess as a fact.
 
 ## Session protocol
