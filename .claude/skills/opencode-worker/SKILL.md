@@ -53,6 +53,8 @@ macOS has no `timeout`; `perl -e 'alarm N; exec @ARGV'` is the portable substitu
 
 Verified under `--auto`:
 - Denied: `git push`, `git commit`, `git reset`, `git checkout`, `git rebase`, `rm -rf`.
+  Each git rule also has a `git * <cmd> *` twin, because `git commit *` alone misses
+  global options such as `git -c user.name=x commit ...`.
 - Denied: the read/edit tools on any path outside the repo, and shell commands with absolute outside paths.
 - **Not caught:** shell commands using `~` paths (e.g. `ls ~/Desktop` ran). v2 shell path checks are best effort.
   So the brief must still forbid touching anything outside the repo.
