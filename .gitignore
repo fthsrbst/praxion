@@ -1,0 +1,3 @@
+.DS_Store
+# OpenCode worker logs (oc-run.sh)
+logs/
