@@ -9,6 +9,8 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
 - Project: **Praxion**, an autonomous game-playing bot system that writes its own skills
   while it plays. First demo: Minecraft only; the core must stay game-agnostic.
 - Phase 0, research. Scope and architecture are not decided yet. Research lives in `docs/research/`.
+- Next: topic-by-topic discussion sessions (`docs/discussion-plan.md`). Agreed decisions go to
+  `docs/decisions.md`; per-session notes go to `docs/sessions/NN-topic.md`.
 - Do not scaffold, add dependencies or write product code until the decisions are
   recorded in this repo. A later session makes the decisions and drafts the architecture.
 - When this section is stale, fix it in the same change that makes it stale.
@@ -122,6 +124,8 @@ Use the cheapest agent that does the job well, and always verify its output your
 | `CLAUDE.md` | Imports `AGENTS.md` for Claude Code. Do not edit beyond the import. |
 | `backlog.md` | Unfinished work. Deep items spill into `backlog/<slug>.md`. |
 | `notes.md` | Dump: user ideas, agent notes, proposals. Append-only, newest first. |
+| `docs/decisions.md` | Agreed decisions, newest first. |
+| `docs/discussion-plan.md` | Topics and order of the discussion sessions. |
 | `opencode.json` | OpenCode project config: default worker model and safety rules. |
 | `.claude/skills/` | Project skills. Claude Code and OpenCode both load them. |
 
