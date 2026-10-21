@@ -5,8 +5,8 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 | # | Sub-topic | State |
 |---|---|---|
 | 1.1 | Edition, version, vanilla or modded | Decided |
-| 1.2 | How game-agnostic the core is | Open |
-| 1.3 | Where it plays; cheat policy | Open |
+| 1.2 | How game-agnostic the core is | Decided: Minecraft only |
+| 1.3 | Where it plays; cheat policy | Where: decided (singleplayer). Cheats: open |
 | 1.4 | Ultimate goal when playing alone | Open |
 | 1.5 | First demo | Open |
 | 1.6 | How success is measured | Open |
@@ -70,3 +70,61 @@ range from day one (mineflayer shows the cost: version branches spread through e
 - ADTmag, Mojang to remove obfuscation (2025-11-04): https://adtmag.com/articles/2025/11/04/mojang-studios-to-remove-code-obfuscation-from-minecraft-java-edition.aspx
 - wiki.vg, Data Generators: https://wiki.vg/Data_Generators
 - 2026 numbering change: https://www.gameserverkings.com/knowledge-base/minecraft/updating-your-server-version/
+
+## 1.2 How game-agnostic the core is
+
+### Background
+- README and AGENTS.md said the core "must stay game-agnostic"; `docs/research/` lists a
+  game-agnostic skill layer as an open gap in the field.
+- What could be generic: skill contract and registry, reliability stats, verification framework,
+  priority arbiter, Jev/LLM layer, code sandbox, memory. What cannot: body, perception, action
+  primitives, voxel pathfinding, game knowledge, the skills themselves.
+- Risk: designing a generic world interface without a second game means guessing its needs
+  (AGENTS.md principle 3: no "for later" abstractions).
+
+### Decision
+- **Minecraft only. The second-game goal is dropped.** README and AGENTS.md updated.
+- **Layering stays, for Minecraft's own reasons.** The user accepted the boundary proposal; with
+  one game its purpose changes from "plug in other games" to: two bodies behind one brain,
+  version packs, and an in-memory fake world for offline tests. The agent layers do not import
+  the body or version-pack layers; this is enforced by tooling, not discipline.
+  (Interpretation recorded so the user can overrule it.)
+
+Rejected: a generic game-adapter interface up front.
+
+## 1.3 Where it plays (partial)
+
+### Decision
+- **Singleplayer only, for now.** Multiplayer servers (own or public) are out of scope until
+  decided otherwise. This also answers 1.1's open question about server software.
+
+### Consequence: one mod could serve both modes (proposal for session 2)
+- A singleplayer world runs an **integrated server inside the client process**. A Fabric mod in
+  the user's client therefore reaches both the client side (the user's own player) and the server
+  side (the world, its entities, its players).
+- **Player-bound mode:** the mod drives the user's client player (as Baritone and altoclef do).
+- **Companion mode:** the mod spawns a **server-side fake player** in the integrated server and
+  drives it. Precedent: Carpet's `/player` (gnembon/fabric-carpet, MIT, active, last commit
+  2026-10-18): `EntityPlayerMPFake extends ServerPlayer`, joined through
+  `PlayerList.placeNewPlayer` with a `FakeClientConnection`; `EntityPlayerActionPack` (~640 lines)
+  drives use, attack, jump, move and look. Carpet fake players count as real players for chunk
+  loading, mob spawning and random ticks, and can walk, mine and place.
+- What this removes for the demo: a network protocol client, the wire codec, and a second
+  Minecraft account. Joining an "Open to LAN" world with a protocol client would most likely need
+  a second licensed account, because LAN worlds authenticate joining players (unverified).
+- What it costs:
+  - **The server side is omniscient.** Every loaded block and entity is readable, so the fair-play
+    perception policy must be enforced by Praxion itself (session 3).
+  - **Server-side movement differs from client-side movement.** A fake player's physics run in the
+    server tick, not through the client's prediction and correction. Effect on "natural feel"
+    needs checking (sessions 2 and 13).
+  - **Multiplayer later needs another body.** A protocol client (or a client mod on a second
+    install) comes back when servers enter scope; the body port keeps that a contained addition.
+  - **Version coupling moves into the mod.** Since 26.1 the game is unobfuscated, which makes
+    porting the mod between versions easier, but it is still per-version work.
+- Singleplayer pauses when the game loses focus or opens the menu. altoclef turns off
+  `pauseOnLostFocus` while it runs; Praxion needs the same in both modes.
+
+### Sources
+- Carpet: https://github.com/gnembon/fabric-carpet ; fake players described at
+  https://modrinth.com/project/9FuEJ7Wg/version/Na1AglK8

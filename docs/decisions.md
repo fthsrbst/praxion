@@ -5,6 +5,11 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-21
 
+- **Minecraft only; the second-game goal is dropped.** Layering stays for Minecraft's own needs
+  (two bodies, version packs, offline fake world): agent layers do not import body or
+  version-pack layers, enforced by tooling. Session 1.2.
+- **Singleplayer only, for now.** Multiplayer servers are out of scope until decided otherwise.
+  Session 1.3.
 - **Java Edition, on Windows.** The demo targets the newest stable release; broad version
   support comes later. Vanilla first; block, item and recipe knowledge comes from data, not
   code. Version-specific code must stay in one layer so later versions are added, not patched
