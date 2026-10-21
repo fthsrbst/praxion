@@ -7,6 +7,7 @@ Phase 0 research for Praxion (2026-10-21). Nothing here is a decision yet.
 | Skill-writing game agents, general game agents, Minecraft interfaces and benchmarks | [game-agents.md](game-agents.md) |
 | Fast decision models: TypeSafe Jev and classifier LLMs | [decision-models.md](decision-models.md) |
 | Embeddings and rerankers: Gemini Embedding 2, Qwen | [embeddings.md](embeddings.md) |
+| Source-level review: mineflayer, pathfinder, Voyager, Odyssey, mindcraft, altoclef, Baritone, Craftonomous, agent-swarm | [systems-review.md](systems-review.md) |
 
 ## The picture in one page
 
@@ -25,6 +26,10 @@ Phase 0 research for Praxion (2026-10-21). Nothing here is a decision yet.
    Gemini Embedding 2 adds images, video and audio in one space. Skill retrieval needs structured
    filters plus reranking, not embeddings alone.
 5. **Minecraft tooling is ready.** Mineflayer is active, MIT and supports up to MC 26.1.
+6. **At source level, "done" is rarely verified.** Most systems treat "the function returned" as
+   success; mineflayer's own `dig()` resolves on a local prediction. Verifying skills against the
+   world, and knowing what a skill can be verified with, is a design problem of its own
+   ([systems-review.md](systems-review.md)).
 
 ## Open questions for the architecture phase
 

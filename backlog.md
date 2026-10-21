@@ -26,4 +26,12 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Remaining: Decide together with the business model, before the first code is committed.
 - Pointers: `README.md` → License
 
+### Finish the source-level systems review
+- Source: Claude Opus 5.5, 2026-10-21
+- State: Ten systems read; findings in `docs/research/systems-review.md`.
+- Remaining: Craftonomous `src/planning/` and `docs/ARCHITECTURE.md`; VillagerAgent, Plan4MC,
+  XENON, ADAM, MineLand, hermescraft, plancraft; mineflayer `blocks.js`/`entities.js`;
+  protocol version differences. Do each before the session that needs it.
+- Pointers: `docs/research/systems-review.md` §7
+
 ## Done
