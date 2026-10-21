@@ -21,6 +21,15 @@ the player mean) need a model that answers a bounded question in ~10–300 ms.
 - **Latency:** vendor 70–500 ms; third parties measured ~130–320 ms, Cloudflare measured 524 ms.
 - **Weak at:** counting, arithmetic, multi-hop questions, long irrelevant state; state text can
   steer answers (prompt injection); first-option bias (disputed by one paper). [V]
+- **Limits and answer shapes:** 64k tokens for state plus all questions, 32k for state plus the
+  longest question; 80 requests/s and 100k input tokens/s (HTTP 429 beyond). Questions are
+  evaluated independently and never see each other's answers; question IDs are not sent to the
+  model, so meaning must sit in `instructions` and `criteria`. `Score` returns the
+  probability-weighted level index plus the full distribution. Confidence measures how
+  concentrated the distribution is, not the probability of being right. No explanations. [U]
+- **Company:** TypeSafe AI, San Francisco, founded 2024 (Diogo Almeida, ex-OpenAI; Erik Gafni;
+  Sasha Sheng); $40M seed led by DCVC. Trained with RLCD (Reinforcement Learning for Calibrated
+  Decisions). [U]
 - **Games:** official Doom demo on text state (~10 decisions/s; vendor admits a scripted bot plays
   better). Community Minecraft repos (rmalde, teknium) pair a frontier planner with Jev picking
   bounded actions through Mineflayer: Ender Dragon in ~8 min on Peaceful with known routes. [V/3P]
