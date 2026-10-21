@@ -6,6 +6,40 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-10-21 · User (recorded by Claude Opus 5.5) · Goals for Praxion
+
+In the user's words, translated:
+1. **Technical plan:** Jev with LLMs behind it. A better proposal is welcome.
+2. **Feel:** the agent must feel like a natural player.
+3. **Aim:** an agent system that thinks for itself and plays on its own, in two ways:
+   - **Companion:** joins the user's world as a separate player.
+   - **Player-bound:** the user hands over their own screen, i.e. their own character, and the agent plays it.
+4. **Commands:** the player can give direct commands ("collect ore" and the like) and the agent must accomplish them.
+
+## 2026-10-21 · Claude Opus 5.5 · Implications of the goals (proposals, not decisions)
+
+- **Two modes mean two bodies.** Companion mode works through a separate protocol client (what
+  mineflayer does). Player-bound mode needs control from inside the user's real client: a client
+  mod (as Baritone and altoclef do on Fabric) or screen in, keyboard/mouse out. Mineflayer cannot
+  serve the second mode at all. A body port, so one brain plugs into either body, belongs in the
+  architecture from day one.
+- **"Natural player" decides perception.** Reading blocks through walls breaks the feel. This
+  points to a fair-play perception policy with provenance tags (Craftonomous). For movement,
+  mineflayer-pathfinder's `human.js` calibration and look quantization become product requirements.
+  No operator commands follows from the same goal.
+- **"Must accomplish commands" means reliability and verification.** Frequent commands (collect,
+  fetch, mine, craft) need deterministic, verified skills rather than LLM improvisation; Odyssey's
+  tech-tree solver and altoclef's `ResourceTask` are direct precedents. How to read an ambiguous
+  command is its own decision.
+- **Playing alone also needs goal generation, long-term memory and self-assessment.** Voyager's
+  curriculum does this but only proposes goals its inventory-based critic can check.
+- **Commands, the agent's own plan and reflexes must meet in one arbiter.** In altoclef the user
+  task sits at fixed priority 50, below survival reflexes.
+- **Jev fits the middle layer, not the tick loop.** A hosted round trip of 70–500 ms cannot serve
+  50 ms reflexes (lava, falling, low health); those stay in local code. Jev suits second-scale
+  tactical judgements: is this mob a threat, flee or fight, is a chat message a command and which
+  skill does it map to, does this need the big LLM.
+
 ## 2026-10-21 · Claude Opus 5.5 · Repo bootstrap
 
 - `AGENTS.md` is the single source of truth; `CLAUDE.md` only imports it (`@AGENTS.md`).
