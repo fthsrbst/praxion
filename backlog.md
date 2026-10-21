@@ -19,10 +19,4 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
-### Register the project in the hub
-- Source: Claude Opus 5.5, 2026-10-21
-- State: Not registered. There is no project name yet.
-- Remaining: Once named, create the hub project (summary, decisions, focus, next steps) and use it in the session protocol.
-- Pointers: global `~/.claude/CLAUDE.md` hub block
-
 ## Done
