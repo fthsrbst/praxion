@@ -19,12 +19,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
-### Write the public README
-- Source: Claude Opus 5.5, 2026-10-21
-- State: Not started on purpose. The project topic is not decided yet.
-- Remaining: Write an investor-grade `README.md` once topic, scope and architecture are decided.
-- Pointers: `AGENTS.md` → Documentation
-
 ### Register the project in the hub
 - Source: Claude Opus 5.5, 2026-10-21
 - State: Not registered. There is no project name yet.
