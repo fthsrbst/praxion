@@ -5,6 +5,9 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-21
 
+- **Survival, Normal difficulty, zero cheats.** The agent's action and perception APIs expose only
+  what a player can do and see; test setup goes through a separate, logged harness. Preference:
+  avoid mods; the body route is decided in session 2. Session 1.3.
 - **Minecraft only; the second-game goal is dropped.** Layering stays for Minecraft's own needs
   (two bodies, version packs, offline fake world): agent layers do not import body or
   version-pack layers, enforced by tooling. Session 1.2.

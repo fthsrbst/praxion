@@ -6,7 +6,7 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 |---|---|---|
 | 1.1 | Edition, version, vanilla or modded | Decided |
 | 1.2 | How game-agnostic the core is | Decided: Minecraft only |
-| 1.3 | Where it plays; cheat policy | Where: decided (singleplayer). Cheats: open |
+| 1.3 | Where it plays; cheat policy; difficulty | Decided (body route still open, session 2) |
 | 1.4 | Ultimate goal when playing alone | Open |
 | 1.5 | First demo | Open |
 | 1.6 | How success is measured | Open |
@@ -128,3 +128,38 @@ Rejected: a generic game-adapter interface up front.
 ### Sources
 - Carpet: https://github.com/gnembon/fabric-carpet ; fake players described at
   https://modrinth.com/project/9FuEJ7Wg/version/Na1AglK8
+
+## 1.3 (continued): cheats, game mode, difficulty, mods
+
+### Decision
+- **Survival, zero cheats.** The agent's action API offers only what a player can do; its
+  perception API only what a player can see. Test setup (world reset, test items) runs through a
+  separate, logged harness channel the agent cannot reach.
+- **Difficulty: Normal.** Hostile mobs, hunger and combat are in demo scope.
+- **User preference: avoid mods** ("solve it without getting into mods"). Recorded as a
+  preference; the body route is decided in session 2.
+
+### Consequences of avoiding mods (to settle in session 2)
+- **Companion mode needs a network client.** Without a mod, the only way into a singleplayer
+  world is "Open to LAN". Vanilla LAN worlds very likely require every joining client to have a
+  valid account: Fabric mods such as OfflineLAN and Quick-LAN exist precisely because vanilla
+  exposes no offline toggle (unverified against the wiki). A second licensed account would follow.
+- **Alternative: a private local server.** A vanilla dedicated server on the same PC with
+  `online-mode=false`. The user's normal client joins it; Praxion joins without a second account.
+  The world can be copied from an existing singleplayer save. To the user it plays like
+  singleplayer, but it is a server process, so "singleplayer" needs re-confirming.
+- **Either way Praxion needs its own protocol client** (what mineflayer does: codec, login,
+  chunk parsing, physics). This is the main cost of the no-mod route.
+- **Player-bound mode has no clean no-mod route.** Options:
+  1. Screen capture plus synthetic keyboard and mouse (SIMA 2, Lumine, Cradle). Most general,
+     slowest, and at odds with deterministic verified skills.
+  2. Hand-over through a proxy: Praxion holds the user's account connection and plays; the user
+     watches as a spectator and takes control by connecting. Precedent: ZenithProxy (bot mode when
+     no player is connected, spectators watch the bot; 1.12.2 for 2b2t, 1.20 port in progress).
+  3. On a private offline-mode server: Praxion logs in under the user's name when the user steps
+     away; the user watches from a spectator account.
+  4. A client mod after all.
+
+### Sources
+- OfflineLAN: https://modrinth.com/project/offlinelan · Quick-LAN: https://modrinth.com/mod/quick-lan
+- ZenithProxy: https://gittrend.io/repo/rfresh2/ZenithProxy
