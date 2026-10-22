@@ -3,6 +3,13 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-10-22
+
+- **First demo: Praxion plays the user's own character** (player-bound), watched on the user's
+  own screen with no visible change when control passes. Touching mouse or keyboard, or closing
+  Praxion, takes control back. A private local server counts as singleplayer. Implementation
+  effort is not a criterion; quality is. Body route still open. Session 1.5.
+
 ## 2026-10-21
 
 - **Survival, Normal difficulty, zero cheats.** The agent's action and perception APIs expose only

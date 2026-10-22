@@ -8,7 +8,7 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 | 1.2 | How game-agnostic the core is | Decided: Minecraft only |
 | 1.3 | Where it plays; cheat policy; difficulty | Decided (body route still open, session 2) |
 | 1.4 | Ultimate goal when playing alone | Open |
-| 1.5 | First demo | Open |
+| 1.5 | First demo | Mode decided: player-bound. Body route: proposal pending |
 | 1.6 | How success is measured | Open |
 
 ## 1.1 Edition, version, vanilla or modded
@@ -163,3 +163,42 @@ Rejected: a generic game-adapter interface up front.
 ### Sources
 - OfflineLAN: https://modrinth.com/project/offlinelan · Quick-LAN: https://modrinth.com/mod/quick-lan
 - ZenithProxy: https://gittrend.io/repo/rfresh2/ZenithProxy
+
+## 1.5 First demo (partial)
+
+### Decision (user, 2026-10-22)
+- **The first demo is player-bound: Praxion plays the user's own character.** Companion is not the first demo.
+- **The user watches on their own screen.** Switching from the user playing to Praxion playing
+  must not change anything about how the game window looks.
+- **Taking control back:** touching the mouse or keyboard, or closing Praxion.
+- **A private local server on the user's PC counts as singleplayer.**
+- **Implementation effort is not a criterion**: AI agents write the code. Quality and
+  reliability still are.
+
+### Consequence for the body route
+- Route B alone (Praxion logs in under the user's name, the user watches from another client)
+  fails the "screen must not change" requirement.
+- Route A alone (screen in, keyboard/mouse out) meets it but knows the world only from pixels.
+- Proposal under discussion: **eyes on the network, hands on the keyboard** (see below).
+
+### Proposal: eyes on the network, hands on the keyboard
+- The world runs on a private local vanilla server (`online-mode=false`). The user's normal client
+  connects to it **through a local, read-only proxy** run by Praxion.
+- **Perception:** the proxy reads every packet in both directions. In offline mode the
+  connection is not encrypted (encryption is negotiated only in online mode), so the proxy decodes
+  the exact world state: chunks, entities, inventory, health, and the player's own position and
+  rotation as the client reports them. It never alters or injects packets.
+- **Action:** Praxion drives the real game window with operating-system keyboard and mouse input.
+  The client behaves exactly as if the user played: same camera, same animations, same screen.
+- **Closed loop:** every input is checked against what the client then reports (rotation and
+  position packets) and what the server answers (block changes, inventory updates).
+- **Take-over:** Windows low-level input hooks flag injected events (`LLKHF_INJECTED`,
+  `LLMHF_INJECTED`), so any physical keyboard or mouse event can be told apart from Praxion's and
+  can stop Praxion immediately.
+- **Fair play comes free:** the proxy sees exactly what the user's client receives. Occlusion and
+  sight range still need enforcing (session 3).
+- **Risks to verify (session 2):** synthetic mouse input reaching Minecraft's raw-input path;
+  dependence on sensitivity, FOV, GUI scale and window size; GUI clicks (inventory, crafting)
+  need exact slot coordinates; the window must keep focus and the PC is unusable for anything
+  else while Praxion plays; frame-rate and input timing jitter; future versions changing GUI layout.
+- **Fallback if the risks prove too costly:** a client mod (route C).
