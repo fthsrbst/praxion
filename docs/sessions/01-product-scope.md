@@ -8,7 +8,7 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 | 1.2 | How game-agnostic the core is | Decided: Minecraft only |
 | 1.3 | Where it plays; cheat policy; difficulty | Decided (body route still open, session 2) |
 | 1.4 | Ultimate goal when playing alone | Open |
-| 1.5 | First demo | Mode decided: player-bound. Body route: proposal pending |
+| 1.5 | First demo | Mode and body direction decided; demo content open |
 | 1.6 | How success is measured | Open |
 
 ## 1.1 Edition, version, vanilla or modded
@@ -202,3 +202,27 @@ Rejected: a generic game-adapter interface up front.
   need exact slot coordinates; the window must keep focus and the PC is unusable for anything
   else while Praxion plays; frame-rate and input timing jitter; future versions changing GUI layout.
 - **Fallback if the risks prove too costly:** a client mod (route C).
+
+### Decision (user, 2026-10-23)
+- **Direction accepted: eyes on the network, hands on the keyboard.** Details and the risk
+  experiments belong to session 2; a client mod stays the fallback.
+- **Never change the user's game settings.** Praxion adapts to sensitivity, FOV, GUI scale,
+  window size and key bindings as they are.
+- **The PC being unusable for other work while Praxion plays is acceptable.**
+
+### How Praxion adapts without touching settings (proposal)
+1. **Read, never write, the client's own config.** `.minecraft/options.txt` holds mouse
+   sensitivity, FOV, GUI scale, raw-input flag and every key binding (`key_key.forward`, ...).
+   Praxion uses the user's own keys. Window client size comes from the Win32 API. A file watcher
+   picks up changes the user makes in the options screen.
+2. **Self-calibrate from the proxy.** Every mouse movement Praxion sends is followed by the
+   rotation the client reports to the server, so the counts-to-degrees gain is measured, not
+   assumed, and re-measured continuously. Vanilla's formula (sensitivity s: f = 0.6s + 0.2,
+   degrees per count = 8 * f^3 * 0.15) is a starting estimate to verify against the 26.x source.
+3. **Close every loop.** Turning: move, measure, correct until within tolerance; this also
+   absorbs Windows pointer acceleration if raw input is off. Clicking a slot: the client's
+   container-click packet carries the slot index, so a wrong click is detected at once.
+   Slot positions start from GUI scale and window size (vanilla auto scale: the largest scale
+   that fits width/320 and height/240, capped by the setting).
+4. **FOV does not affect perception**, which comes from the network. It only matters for deciding
+   what the player could see on screen (session 3).

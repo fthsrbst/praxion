@@ -3,6 +3,15 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-10-23
+
+- **Body direction: eyes on the network, hands on the keyboard.** A read-only local proxy
+  between the user's unmodified client and a private local server gives exact perception;
+  OS-level keyboard and mouse input drives the real game window. A client mod is the fallback.
+  Details in session 2. Session 1.5.
+- **Praxion never changes the user's game settings.** It reads them and calibrates itself.
+- **The PC is dedicated to the game while Praxion plays.**
+
 ## 2026-10-22
 
 - **First demo: Praxion plays the user's own character** (player-bound), watched on the user's
