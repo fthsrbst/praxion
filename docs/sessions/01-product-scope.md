@@ -1,6 +1,15 @@
 # Session 1: Product definition and scope
 
-Started 2026-10-21. Sub-topics are closed one at a time.
+Held 2026-10-21 to 2026-10-23. Closed.
+
+## Outcome in brief
+Praxion is a Minecraft-only agent (Java Edition, newest stable release, vanilla, Windows) that
+plays the user's own character in a private local world, Survival on Normal with zero cheats.
+It sees through a read-only network proxy and acts through OS keyboard and mouse input, so the
+user's screen never changes when control passes; touching the input takes control back. It puts
+the user's projects first, then its own, follows LLM-written rules that code enforces, and aims
+at the whole game up to the Ender Dragon. The first demo starts in a fresh world, must be
+flawless, and is measured by a milestone ladder, a command suite, smoothness, naturalness and cost.
 
 | # | Sub-topic | State |
 |---|---|---|
@@ -9,7 +18,7 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 | 1.3 | Where it plays; cheat policy; difficulty | Decided (body route still open, session 2) |
 | 1.4 | Ultimate goal when playing alone | Decided |
 | 1.5 | First demo | Decided; milestone ladder proposed |
-| 1.6 | How success is measured | Open |
+| 1.6 | How success is measured | Decided |
 
 ## 1.1 Edition, version, vanilla or modded
 
@@ -288,3 +297,22 @@ proxy's view of the world:
 - Licensing of RAG sources: Minecraft Wiki text is CC BY-NC-SA (non-commercial), which conflicts
   with an open-core business model; game facts can instead come from the server's data reports.
   To settle in the knowledge session.
+
+## 1.6 How success is measured
+
+### Decision (user, 2026-10-23)
+Five measures, all accepted:
+1. **Milestone ladder** (first night, iron, diamonds, Nether, stronghold and portal, Ender
+   Dragon): reach rate, time and deaths per rung over many fresh seeds, each rung verified from
+   the proxy. The demo video is one of the measured runs; a hand-picked best run is labelled as such.
+2. **Command suite:** a fixed list of commands, each with a proxy-verified success condition.
+3. **Smoothness:** Praxion never freezes while an LLM thinks; the fast layer keeps playing.
+   Measured as the longest gap without input, camera jumps at hand-over, and take-over latency.
+   This is an architecture requirement, not only a metric.
+4. **Naturalness:** movement statistics against recorded human play, and a **blind test**
+   (viewers guess which clips are Praxion).
+5. **Cost:** hosted-model cost per hour, tracked. No cap for now.
+
+- **Target numbers are set after the first baseline measurements.** Starting points to test
+  against: command suite ≥ 95 %, longest freeze < 1 s, take-over < 50 ms.
+- **Context:** a course project; the schedule is not a constraint on design.

@@ -29,7 +29,7 @@ fast-decision layer. Session 13 (natural feel) is its own session but is also a 
 
 ## Topics
 
-### 1. Product definition and scope
+### 1. Product definition and scope (done, see sessions/01-product-scope.md)
 - Java or Bedrock; versions; vanilla or modded?
 - Which worlds: your own world, your own server, other servers? (Most public servers ban bots.)
 - Cheat policy: none at all, or a visible test switch?
@@ -39,6 +39,8 @@ fast-decision layer. Session 13 (natural feel) is its own session but is also a 
 - How is success measured (command success rate, time, a criterion for "natural feel")?
 
 ### 2. Body and connection layer
+Direction from session 1: read-only proxy for perception, OS keyboard and mouse for action,
+private local server, client mod as fallback. This session verifies the risks and designs it.
 Background: client-server model, protocol states, client-authoritative movement, version
 differences. Three routes: protocol client (what mineflayer does), in-client mod (Baritone and
 altoclef on Fabric), screen plus keyboard/mouse. Mineflayer is studied in detail here.

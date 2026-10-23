@@ -9,7 +9,7 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
 - Project: **Praxion**, an autonomous Minecraft agent that writes its own skills while it plays.
   Minecraft only (Java Edition, singleplayer, Windows); see `docs/decisions.md`.
 - Phase 0, research. Scope and architecture are not decided yet. Research lives in `docs/research/`.
-- Next: topic-by-topic discussion sessions (`docs/discussion-plan.md`). Agreed decisions go to
+- Discussion sessions (`docs/discussion-plan.md`): session 1 done; session 2 (body) is next. Agreed decisions go to
   `docs/decisions.md`; per-session notes go to `docs/sessions/NN-topic.md`.
 - Do not scaffold, add dependencies or write product code until the decisions are
   recorded in this repo. A later session makes the decisions and drafts the architecture.

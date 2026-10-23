@@ -5,6 +5,11 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-23
 
+- **Success measures:** milestone ladder to the Ender Dragon over many fresh seeds; a
+  proxy-verified command suite; smoothness (never freeze while an LLM thinks, instant take-over);
+  naturalness (human movement statistics and a blind test); hosted cost per hour, no cap yet.
+  Targets are set after baseline measurements. Course project; schedule does not constrain
+  design. Session 1.6.
 - **First demo:** fresh survival world; the opening scenario is hand-over, a verified chat
   command, instant take-over, and an autonomous first night. Capability target is the whole game
   up to the Ender Dragon. Hand-over by chat command, global hotkey or a separate interface.
