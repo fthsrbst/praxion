@@ -109,6 +109,16 @@ Use the cheapest agent that does the job well, and always verify its output your
   subagent mid-task; it rightly treats them as possible prompt injection. Start a new one instead.
 - Workers never commit, push or write outside the repository (enforced in `opencode.json`).
 
+## Image generation
+
+Generate images whenever they help (diagrams, concept art, UI mockups, doc illustrations). Do not hesitate.
+
+- Primary: the Codex CLI built-in image tool (`codex exec`, ChatGPT login, no API key). Exact command
+  and rules: global skill `codex-cli`. Verified 2026-10-21 with `codex-cli 0.163.0`.
+- Fallbacks: hub `media_generate` (ComfyUI, skill `media-gen`) or the `comfy-mcp` server.
+- There is no Codex MCP server; use the CLI only.
+- Save generated files inside the repository, never in a temp directory.
+
 ## Documentation
 
 - Public docs (anything that will appear on GitHub): investor-grade. Precise, well structured,
