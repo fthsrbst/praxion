@@ -7,7 +7,7 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 | 1.1 | Edition, version, vanilla or modded | Decided |
 | 1.2 | How game-agnostic the core is | Decided: Minecraft only |
 | 1.3 | Where it plays; cheat policy; difficulty | Decided (body route still open, session 2) |
-| 1.4 | Ultimate goal when playing alone | Open |
+| 1.4 | Ultimate goal when playing alone | Decided |
 | 1.5 | First demo | Mode and body direction decided; demo content open |
 | 1.6 | How success is measured | Open |
 
@@ -226,3 +226,32 @@ Rejected: a generic game-adapter interface up front.
    that fits width/320 and height/240, capped by the setting).
 4. **FOV does not affect perception**, which comes from the network. It only matters for deciding
    what the player could see on screen (session 3).
+
+## 1.4 Ultimate goal when playing alone
+
+### Background
+- No built-in end: altoclef fixes one goal (kill the Ender Dragon) and plays like a speedrun
+  machine; Voyager chases novelty and never settles; benchmarks use single tasks.
+- Human players layer needs (survive, food, shelter, tools), projects (base, farm, mine,
+  storage) and aspirations (Nether, enchanting, the dragon).
+- Player-bound play adds a permission question: it is the user's character and the user's world.
+
+### Decision (user, 2026-10-23)
+- **The user's projects come first, then Praxion's own ideas.**
+- **Long-term goals arrive three ways:** in-game chat, a separate interface, or, in autonomous
+  mode, inferred by Praxion itself.
+- **Death is acceptable.** Praxion plays the game normally, risks included.
+- **The ruleset (protected areas, items, limits) may be written with an LLM.**
+- **Completion-oriented:** Praxion plays toward finishing the game, and an LLM may decide to keep
+  playing beyond it.
+
+### Technical consequences (proposal)
+- **LLM writes the ruleset; code enforces it.** The user states rules in plain language; an LLM
+  translates them into a structured ruleset (regions as boxes, protected blocks and items, risk
+  limits), which is shown back for the user to confirm. Enforcement is deterministic in the
+  action layer: an action that would break a protected block is refused before input is sent,
+  never left to a model's judgement in the moment. Same principle as zero cheats: what is not
+  allowed is not reachable.
+- **Goal layers:** needs, projects, aspirations. The aspiration arc follows the game's
+  progression to the Ender Dragon; that arc needs long-horizon planning (stronghold location by
+  eyes of ender, portal, the fight) and is not first-demo scope.

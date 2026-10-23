@@ -5,6 +5,11 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-23
 
+- **Goals when alone:** the user's projects first, then Praxion's own ideas. Goals come from
+  in-game chat, a separate interface, or Praxion's own inference in autonomous mode. Death is
+  acceptable. Rules (protected areas, items, limits) may be written with an LLM; proposal: code
+  enforces them deterministically after the user confirms. Plays toward finishing the game; an
+  LLM may decide to continue past it. Session 1.4.
 - **Body direction: eyes on the network, hands on the keyboard.** A read-only local proxy
   between the user's unmodified client and a private local server gives exact perception;
   OS-level keyboard and mouse input drives the real game window. A client mod is the fallback.
