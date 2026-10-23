@@ -121,8 +121,10 @@ process, seccomp, quotas), static pre-checks, Wilson reliability, retirement les
 - Versioning and rollback.
 - Is learning by watching the user still a goal?
 
-### 12. Memory
+### 12. Memory and knowledge (RAG)
 - What is remembered across sessions: the world, the user, events, its own experience?
+- Background game knowledge through RAG: which sources, how retrieved, how kept current?
+- Source licensing (Minecraft Wiki is CC BY-NC-SA) versus first-party data reports.
 - How does it relate to Mnema?
 
 ### 13. Natural player feel

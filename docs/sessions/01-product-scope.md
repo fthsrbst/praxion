@@ -8,7 +8,7 @@ Started 2026-10-21. Sub-topics are closed one at a time.
 | 1.2 | How game-agnostic the core is | Decided: Minecraft only |
 | 1.3 | Where it plays; cheat policy; difficulty | Decided (body route still open, session 2) |
 | 1.4 | Ultimate goal when playing alone | Decided |
-| 1.5 | First demo | Mode and body direction decided; demo content open |
+| 1.5 | First demo | Decided; milestone ladder proposed |
 | 1.6 | How success is measured | Open |
 
 ## 1.1 Edition, version, vanilla or modded
@@ -255,3 +255,36 @@ Rejected: a generic game-adapter interface up front.
 - **Goal layers:** needs, projects, aspirations. The aspiration arc follows the game's
   progression to the Ender Dragon; that arc needs long-horizon planning (stronghold location by
   eyes of ender, portal, the fight) and is not first-demo scope.
+
+## 1.5 First demo (continued)
+
+### Proposed scenario (accepted as a base)
+Fresh survival world, Normal. The user plays, hands control over (screen unchanged), gives a chat
+command ("collect wood, make a crafting table and a stone pickaxe"), Praxion executes with
+proxy-verified steps, the user touches the mouse mid-task and Praxion stops at once, the user
+hands over again and says "carry on", Praxion survives the first night alone (food, shelter,
+mobs) and moves toward iron tools by its own choice next morning.
+
+### Decision (user, 2026-10-23)
+- **Capability target is the whole game: Praxion must be able to reach and kill the Ender
+  Dragon.** The scenario above is the opening, not the ceiling.
+- **Background knowledge via RAG** is part of the design; discussed in a later session.
+- **Hand-over can start three ways:** in-game chat command, a global hotkey the game never sees,
+  and a button in a separate interface.
+- **The demo starts in a fresh world.**
+- **The demo must be flawless and smooth.** Audience: the community and the user's professor.
+
+### Proposal: milestone ladder (to confirm in 1.6)
+The full run is measured as a ladder; each rung is a checkpoint that can be verified from the
+proxy's view of the world:
+1. First night survived (tools, food, shelter).
+2. Iron tools and armour.
+3. Diamonds.
+4. Nether: blaze rods, ender pearls.
+5. Stronghold located, End portal activated.
+6. Ender Dragon killed.
+
+### Open
+- Licensing of RAG sources: Minecraft Wiki text is CC BY-NC-SA (non-commercial), which conflicts
+  with an open-core business model; game facts can instead come from the server's data reports.
+  To settle in the knowledge session.

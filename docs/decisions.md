@@ -5,6 +5,10 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-23
 
+- **First demo:** fresh survival world; the opening scenario is hand-over, a verified chat
+  command, instant take-over, and an autonomous first night. Capability target is the whole game
+  up to the Ender Dragon. Hand-over by chat command, global hotkey or a separate interface.
+  Must be flawless; audience: the community and the user's professor. Session 1.5.
 - **Goals when alone:** the user's projects first, then Praxion's own ideas. Goals come from
   in-game chat, a separate interface, or Praxion's own inference in autonomous mode. Death is
   acceptable. Rules (protected areas, items, limits) may be written with an LLM; proposal: code
