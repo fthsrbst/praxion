@@ -39,7 +39,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - State: Session 1 closed; these were raised and not settled.
 - Remaining:
   - May a "Praxion is active" indicator exist outside the game window (separate window, phone)? Ask the user.
-  - Verify that vanilla "Open to LAN" requires authenticated accounts (minecraft.wiki).
   - Session 2 experiments: synthetic mouse input reaching Minecraft's raw-input path on Windows;
     proxy decoding of an offline-mode connection; mouse gain formula against the 26.x source.
 - Pointers: `docs/sessions/01-product-scope.md`
