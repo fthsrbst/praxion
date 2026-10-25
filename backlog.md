@@ -34,6 +34,14 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   protocol version differences. Do each before the session that needs it.
 - Pointers: `docs/research/systems-review.md` §7
 
+### Session 2.2 decisions pending (proxy)
+- Source: Claude Opus 5.5, 2026-10-25
+- State: 2.2 presented in chat; the user paused it for a deep research survey (`docs/research/survey/`).
+- Remaining: user decides (1) proxy as a small separate process that forwards bytes untouched and
+  decodes a copy, (2) game data from Mojang data generator reports, (3) MCProtocolLib vs own decoder
+  (if MCProtocolLib: add a passive-decoding spike to 2.7). Record the outcome in `docs/sessions/02-body-connection.md`.
+- Pointers: `docs/sessions/02-body-connection.md`
+
 ### Open points carried from session 1
 - Source: Claude Opus 5.5, 2026-10-23
 - State: Session 1 closed; these were raised and not settled.
