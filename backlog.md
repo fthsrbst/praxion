@@ -19,13 +19,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
-### Choose a license
-- Source: Claude Opus 5.5, 2026-10-21
-- State: The repo is public with no license (all rights reserved). Options compared in chat:
-  MIT, Apache-2.0, AGPL-3.0, FSL/BSL. Leaning open-core (Apache-2.0 core, commercial parts closed).
-- Remaining: Decide together with the business model, before the first code is committed.
-- Pointers: `README.md` → License
-
 ### Finish the source-level systems review
 - Source: Claude Opus 5.5, 2026-10-21
 - State: Ten systems read; findings in `docs/research/systems-review.md`.
@@ -34,21 +27,102 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   protocol version differences. Do each before the session that needs it.
 - Pointers: `docs/research/systems-review.md` §7
 
-### Session 2.2 decisions pending (proxy)
-- Source: Claude Opus 5.5, 2026-10-25
-- State: 2.2 presented in chat; the user paused it for a deep research survey (`docs/research/survey/`).
-- Remaining: user decides (1) proxy as a small separate process that forwards bytes untouched and
-  decodes a copy, (2) game data from Mojang data generator reports, (3) MCProtocolLib vs own decoder
-  (if MCProtocolLib: add a passive-decoding spike to 2.7). Record the outcome in `docs/sessions/02-body-connection.md`.
-- Pointers: `docs/sessions/02-body-connection.md`
+### Session 3 leftovers
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 3 decided; see `docs/sessions/03-perception-world-model.md`.
+- Remaining: object identity, TTLs per fact kind, briefing contract (session 8 and 12); lessons,
+  cross-world memory, LLM-written lessons, storage (session 12); check in a 2.7 packet capture
+  whether container contents arrive only when opened; transparent blocks in the line-of-sight walk.
+- Pointers: `docs/research/memory-review/explainer.md` §6
 
-### Open points carried from session 1
-- Source: Claude Opus 5.5, 2026-10-23
-- State: Session 1 closed; these were raised and not settled.
-- Remaining:
-  - May a "Praxion is active" indicator exist outside the game window (separate window, phone)? Ask the user.
-  - Session 2 experiments: synthetic mouse input reaching Minecraft's raw-input path on Windows;
-    proxy decoding of an offline-mode connection; mouse gain formula against the 26.x source.
-- Pointers: `docs/sessions/01-product-scope.md`
+### Session 4 tests to build with the action layer
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 4 decided; see `docs/sessions/04-action-verification.md`.
+- Remaining: fault-injection test (refused digs, dropped acks, stale inventories; false `confirmed`
+  must be 0); take-over at every phase of bridging, pillaring, eating, chest and bucket use
+  (zero fall damage, zero stuck keys, under 50 ms); measure settle windows per action kind.
+- Pointers: `docs/research/survey/01-minecraft-agents-2026.md` idea 3, `survey/03-reactive-control-arbitration.md` idea 3
+
+### Session 5 measurements
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 5 decided; see `docs/sessions/05-skills.md`.
+- Remaining: 20 obtain/ensure skills in the fake world with undo-perturbations at step boundaries
+  (0 duplicate placements, 0 wasted crafts, derived guards equal hand-written ones); check the
+  format stays readable at 20 to 30 rules; measure effect-declaration accuracy for random drops and
+  tool-dependent yields; test 50 skill tasks with and without composition templates on a frontier
+  and a cheaper model (adopt templates if the cheaper model gains 20 points or more).
+- Pointers: `docs/research/survey/03-reactive-control-arbitration.md` ideas 1, 2, 7
+
+### Session 8 measurements
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 8 decided; see `docs/sessions/08-jev-llm-brain.md`.
+- Remaining: p50/p95/p99 latency of Jev and the candidate LLMs from the user's PC; does
+  cancelling a call stop billing; do the APIs stream structured JSON while reasoning; is Jev
+  calibrated with 5 to 80 options and look-alike skills; latency sweeps (Jev +0/150/300/600 ms,
+  LLM +0/2/5/10/20 s on 10 seeds) with a paused and a slowed baseline through the logged harness.
+- Pointers: `docs/research/decision-models.md`, `docs/research/survey/02-fast-slow-architectures.md`
+
+### Session 7 tests and numbers
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 7 decided; see `docs/sessions/07-reflexes-arbiter.md`.
+- Remaining: build the reflex coverage matrix with refereed fixtures; arbiter tests (no A-B-A
+  within 5 s, preemption within one tick, no starvation death in 30-minute commands); find `k` and
+  the hunger and sleep thresholds by measurement; write Nether and End reflexes before their rungs.
+- Pointers: `docs/research/survey/01-minecraft-agents-2026.md` idea 2, `survey/03-reactive-control-arbitration.md` ideas 4 and 5
+
+### Session 6 spike and numbers
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 6 decided; see `docs/sessions/06-movement.md`.
+- Remaining: spike to see whether Azalea's `astar`, `moves` and `costs` can be lifted out of its
+  Bevy ECS and client types; tune costs, maximum drop, progress limits and N tries by measurement;
+  test that replans looping over the same cells are detected.
+- Pointers: `docs/research/systems-review.md` §3.3 and the Baritone section
+
+### Session 11 gate tests and learning test
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 11 decided; see `docs/sessions/11-skill-learning.md`.
+- Remaining: feed the gate 50 mutants (no-op, wrong count, side effect, protected-block write) and
+  50 good refactors (0 mutants admitted, at most 10% of good refactors rejected); red-team test
+  (20 broken skills, 0 bypasses incl. chat injection); measure fixture restore time (above 30 s
+  means a nightly batch); rollback test (injected degraded version rolled back within 10 uses, no
+  false rollbacks across 20 healthy versions); pre-registered learning test at equal compute.
+- Pointers: `docs/research/survey/04-skill-library-learning.md` ideas 1 to 6
+
+### Session 10 curriculum comparison
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 10 decided; see `docs/sessions/10-autonomy.md`. The user chose a free curriculum
+  against the recommendation (ladder spine).
+- Remaining: add an arm "ladder spine with code-listed options" next to the free curriculum in the
+  equal-compute learning test; check how often free goals end up `unverifiable`; log goals that keep
+  Praxion away from the next rung.
+- Pointers: `docs/sessions/11-skill-learning.md` (learning test)
+
+### Session 12 checks before building memory and RAG
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Session 12 decided; see `docs/sessions/12-memory-rag.md`. The user chose a wiki RAG against
+  the recommendation.
+- Remaining: check whether the Minecraft Wiki offers a dump and what its terms allow before
+  building the index; settle the licence question with the business model (`Choose a license`);
+  memory test suite on a scripted world; retrieval test with real questions to confirm the
+  embedding model; ask the user what Mnema is, to confirm the separation.
+- Pointers: `docs/research/memory-review/critic-simplicity.md` §7, `docs/research/embeddings.md`
+
+### Architecture review round
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: `docs/architecture.md` (draft 1) written from the decisions; it has not been reviewed.
+- Remaining: review round by a model other than the writer (AGENTS.md); fix findings or log them
+  here; the user confirms the [P] and [O] items. Then the 2.7 experiments and the first code. Also
+  decide whether `spikes/` may be committed now that the licence is chosen.
+- Pointers: `docs/architecture.md` §11 (risks and open points)
+
+### Run the session 2.7 experiments
+- Source: Claude Sonnet 5.5, 2026-10-29
+- State: Experiments E1-E14 and thresholds agreed; no code written yet.
+- Remaining: write throwaway spikes in untracked `spikes/` (the free OpenCode worker may draft
+  them; another model reviews), run round 1 on macOS, rounds 2-4 at the physical Windows PC,
+  write results into `docs/sessions/02-body-connection.md`. Stop and ask the user on any miss.
+- Pointers: `docs/sessions/02-body-connection.md` §2.7
 
 ## Done
+
+- Choose a license: Apache-2.0 for the open core, 2026-10-29 (session 15). Open: which parts are commercial.

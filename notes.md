@@ -6,6 +6,20 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-10-29 · User, answered by Claude Sonnet 5.5 · Reinforcement learning for some skills (idea, not a decision)
+
+The user asked whether to train an RL model for some jobs. Not part of the first demo (session 8).
+Candidates, in order of fit: (1) combat micro, bridging, water-bucket clutch: narrow, 20 Hz,
+could replace hand-written Rust primitives, which stay swappable; (2) imitation of the user's own
+motor style for naturalness (survey/01 idea 1; imitation, not RL); (3) a high-level decision
+policy: not realistic for this project. Obstacles: Minecraft is slow to train on, "zero cheats"
+limits shortcuts, RL policies tend to look robotic, and the user must understand every part.
+Revisit after baseline measurements, for the primitive where the hand-written version falls short.
+Unchecked: tick acceleration with `/tick rate`, existing RL environments (MineRL, MineDojo,
+Craftium), VPT and PLAICraft data licenses.
+
+---
+
 ## 2026-10-21 · User (recorded by Claude Opus 5.5) · Goals for Praxion
 
 In the user's words, translated:

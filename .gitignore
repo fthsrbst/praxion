@@ -1,3 +1,5 @@
 .DS_Store
 # OpenCode worker logs (oc-run.sh)
 logs/
+# Throwaway experiment code (session 2.7); untracked until the license is chosen
+spikes/

@@ -38,7 +38,7 @@ fast-decision layer. Session 13 (natural feel) is its own session but is also a 
 - What does the first demo look like?
 - How is success measured (command success rate, time, a criterion for "natural feel")?
 
-### 2. Body and connection layer
+### 2. Body and connection layer (discussion done, see sessions/02-body-connection.md; experiments pending)
 Direction from session 1: read-only proxy for perception, OS keyboard and mouse for action,
 private local server, client mod as fallback. This session verifies the risks and designs it.
 Background: client-server model, protocol states, client-authoritative movement, version
@@ -51,7 +51,7 @@ altoclef on Fabric), screen plus keyboard/mouse. Mineflayer is studied in detail
 - Write the protocol layer ourselves or adapt an MIT/BSD library? Which language?
 - Tick timing on Windows.
 
-### 3. Perception and world model
+### 3. Perception and world model (done, see sessions/03-perception-world-model.md)
 Background: chunk and entity data, occlusion, provenance tags and profiles (Craftonomous),
 world caches (Baritone 2-bit chunks, altoclef container cache).
 - Should the agent know only what a player could see?
@@ -59,7 +59,7 @@ world caches (Baritone 2-bit chunks, altoclef container cache).
 - In player-bound mode, are screenshots part of perception?
 - Where and how is world memory stored?
 
-### 4. Action layer and verification
+### 4. Action layer and verification (done, see sessions/04-action-verification.md)
 Background: how dig, place and inventory actions work in the protocol; optimistic prediction,
 server confirmation, sequence acks (1.19+), inventory `stateId` and forced resync; evidence
 levels; typed failure kinds.
@@ -67,7 +67,7 @@ levels; typed failure kinds.
 - What is the failure taxonomy?
 - How are tasks the inventory cannot show (building, planting) verified?
 
-### 5. Skill definition and execution model
+### 5. Skill definition and execution model (done, see sessions/05-skills.md)
 Background: script model (Voyager, mindcraft) next to the reactive task tree (altoclef);
 Craftonomous's skill contract; altoclef's `isFinished` and `isEqual`.
 - What goes in the skill contract (expected effect, side-effect declaration, time estimate,
@@ -76,14 +76,14 @@ Craftonomous's skill contract; altoclef's `isFinished` and `isEqual`.
 - How do skills call each other and declare dependencies?
 - What form does LLM-written skill code take?
 
-### 6. Movement and pathfinding
+### 6. Movement and pathfinding (done, see sessions/06-movement.md)
 Background: A*, cost models (Baritone: expected ticks), time-sliced search, segmented plans,
 forward physics simulation, stuck detection, blacklists.
 - When may a path change the world (dig through, bridge)?
 - How are stuck loops and endless retries prevented?
 - Is human-like movement part of pathfinding or a separate layer?
 
-### 7. Fast-decision layer: reflexes and priority arbitration
+### 7. Fast-decision layer: reflexes and priority arbitration (done, see sessions/07-reflexes-arbiter.md)
 Background: mindcraft modes (fixed order), altoclef chains (dynamic priority), Baritone processes
 (commands, temporary vs permanent, safe-to-cancel). Reflexes, player commands and the agent's own
 plan meet in one arbiter.
@@ -91,7 +91,7 @@ plan meet in one arbiter.
 - How does interrupted work continue?
 - Where does Jev sit in this layer?
 
-### 8. Jev and the LLM brain
+### 8. Jev and the LLM brain (done, see sessions/08-jev-llm-brain.md)
 Background: [research/decision-models.md](research/decision-models.md): Jev's API, question types,
 calibration, latency and weaknesses; LLM roles (planner, chat, coder, critic); latency budget and
 cost; turning game state into text.
@@ -100,7 +100,7 @@ cost; turning game state into text.
 - How is state prepared given Jev's weakness with numbers?
 - What happens when Jev is confident and wrong?
 
-### 9. Player commands and task management
+### 9. Player commands and task management (done, see sessions/09-commands.md)
 Input: Odyssey's tech-tree solver, altoclef's `ResourceTask`.
 - Command channel: in-game chat, voice, a separate interface?
 - Ambiguous commands ("collect ore"): ask or guess?
@@ -108,14 +108,14 @@ Input: Odyssey's tech-tree solver, altoclef's `ResourceTask`.
 - Reporting: when and how?
 - Which commands must work from day one?
 
-### 10. Autonomy: goal generation and long-horizon planning
+### 10. Autonomy: goal generation and long-horizon planning (done, see sessions/10-autonomy.md)
 Background: Voyager's curriculum and its limit, task DAGs (VillagerAgent), backward
 decomposition (BAR), tech-tree graphs.
 - What does the agent want to do on its own, and how does it decide?
 - How does it behave toward the user as a companion?
 - How do long projects (a base, the Nether) continue across sessions?
 
-### 11. Skill learning and LLM-written code
+### 11. Skill learning and LLM-written code (done, see sessions/11-skill-learning.md)
 Background: Voyager's loop, agent-swarm's candidate/approval pipeline, sandboxes (SES, separate
 process, seccomp, quotas), static pre-checks, Wilson reliability, retirement lessons, storage and retrieval.
 - What evidence admits a new skill into the library? Can it enter without the user's approval?
@@ -123,13 +123,13 @@ process, seccomp, quotas), static pre-checks, Wilson reliability, retirement les
 - Versioning and rollback.
 - Is learning by watching the user still a goal?
 
-### 12. Memory and knowledge (RAG)
+### 12. Memory and knowledge (RAG) (done, see sessions/12-memory-rag.md)
 - What is remembered across sessions: the world, the user, events, its own experience?
 - Background game knowledge through RAG: which sources, how retrieved, how kept current?
 - Source licensing (Minecraft Wiki is CC BY-NC-SA) versus first-party data reports.
 - How does it relate to Mnema?
 
-### 13. Natural player feel
+### 13. Natural player feel (done, see sessions/13-natural-feel.md)
 Background: `human.js` calibration (recorded players), look quantization, reaction delay,
 personality, chat.
 - Priority for naturalness: movement, decisions or conversation?
@@ -137,13 +137,13 @@ personality, chat.
 - Personality, name, language, voice?
 - Are superhuman abilities (speed, never tiring) allowed?
 
-### 14. Testing, evaluation and observability
+### 14. Testing, evaluation and observability (done, see sessions/14-testing.md)
 Background: offline tests against a fake world (Craftonomous), a live test server, benchmark
 reliability, run reports.
 - How do we prove that something works?
 - How do we watch what the agent is thinking?
 
-### 15. Infrastructure and operations
+### 15. Infrastructure and operations (done, see sessions/15-infrastructure.md)
 - Where does it run (Windows PC, Pi, cloud)? Language and repository layout?
 - Monitoring and limiting hosted-model cost.
 - Keys and security.

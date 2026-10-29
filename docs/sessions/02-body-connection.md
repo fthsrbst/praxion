@@ -1,6 +1,6 @@
 # Session 2: Body and connection layer
 
-Opened 2026-10-23. In progress.
+Opened 2026-10-23. Discussion closed 2026-10-29; experiments (2.7) not yet run.
 
 Direction from session 1: the user's unmodified client connects to a private local vanilla server
 (`online-mode=false`) through a read-only Praxion proxy (perception); Praxion acts through OS
@@ -9,12 +9,12 @@ keyboard and mouse input (action); physical input takes control back. Client mod
 | # | Sub-topic | State |
 |---|---|---|
 | 2.1 | How the connection works (background) | Presented |
-| 2.2 | Proxy: placement, decoding, own code or library, version pack | Open |
-| 2.3 | Hands: Windows input, calibration, focus, GUI clicks | Open |
-| 2.4 | Hand-over and take-over; "Praxion is active" indicator | Open |
-| 2.5 | Body port: the interface between brain and body | Open |
-| 2.6 | Language, runtime, Windows tick timing | Open |
-| 2.7 | Risk experiments: what we measure, pass criteria | Open |
+| 2.2 | Proxy: placement, decoding, own code or library, version pack | Decided (D1, D2); library Azalea, verified in 2.7 |
+| 2.3 | Hands: Windows input, calibration, focus, GUI clicks | Decided (H1-H3); experiments in 2.7 |
+| 2.4 | Hand-over and take-over; "Praxion is active" indicator | Decided; experiments in 2.7 |
+| 2.5 | Body port: the interface between brain and body | Decided; message catalog in sessions 3-4 |
+| 2.6 | Language, runtime, Windows tick timing | Languages decided (Python + Rust); timing and process boundary open |
+| 2.7 | Risk experiments: what we measure, pass criteria | Decided; experiments not yet run |
 
 ## 2.1 How the connection works
 
@@ -131,3 +131,147 @@ cinematic camera: smoothed (SmoothDouble); invertMouseX/Y negate
 - Waitable timers: https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw
 - Low-level hooks: https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
 - IntegratedServer (26.2 mirror): https://github.com/Renekovski/26.2-mcp/blob/main/src/net/minecraft/client/server/IntegratedServer.java
+
+## 2.2 and 2.6: proxy and languages (2026-10-29)
+
+### Decided 2026-10-29 (D1, D2: user confirmed)
+- **D1: separate proxy process.** It forwards bytes untouched and decodes a copy. The forwarding
+  path never encodes packets, so "read-only" holds structurally. A decoder that loses sync marks
+  perception invalid and Praxion stops safely; the game is unaffected. Rejected: terminate both
+  connections and re-encode (ZenithProxy style): a codec bug could corrupt the game.
+- **D2: game data from the Mojang data generator** (`--reports`: blocks, packets, registries).
+  `minecraft-data` stays the backup (26.2/26.3 PRs open, license unstated in its README).
+
+### Decided: languages (user, 2026-10-29; Rust pick confirmed)
+- **Python and a native language.** The user chose a mix. Claude picked **Rust** over C++ (user
+  confirmed): Azalea gives a Rust packet decoder, chunk, block and inventory crates
+  under MIT; no maintained 26.x decoder exists in C++ or Python. Checked 2026-10-29: Python
+  `mcproto` covers handshake, login and status only, so Python has no Play-state decoder.
+- **Proposed split rule (to confirm in 2.5):** anything on the wire or the input path, or with a
+  deadline under ~10 ms, is Rust; brain, skills, LLM and Jev calls are Python. The exact
+  boundary (PyO3 module or local socket) is the body port, 2.5.
+- **Library:** Azalea protocol/world/block/inventory crates (not its bot framework), verified in
+  2.7 on 26.3 (its `26.3` branch was last pushed 2026-10-16). Fallback: MCProtocolLib (Java,
+  master has 26.3) or an own decoder for the needed packets only.
+- Body process is Windows-only (input injection); proxy and decoder are portable, so they can be
+  developed on macOS against recorded packet captures.
+
+## 2.3 Hands (2026-10-29)
+
+Verified in GLFW `win32_window.c` (master): keys are read from the scan code in `lParam` (virtual
+key only as a fallback); `WM_INPUT` is processed only while the cursor is disabled (in the
+world); menus use the normal cursor; `WM_KILLFOCUS` releases the cursor at once.
+
+### Decided (user, 2026-10-29)
+- **H1:** `SendInput` with scan codes; bindings read from `options.txt`, never written. Rejected:
+  driver-level injectors (no benefit; they hide the injected flag that take-over needs). Held
+  movement keys last at least one 50 ms tick.
+- **H2:** two mouse modes. World: relative `MOUSEEVENTF_MOVE`, gain estimated from `options.txt`
+  (default 0.15 deg per count) and corrected from the rotation the proxy sees. Menus: absolute
+  positioning from GUI scale and window size. Praxion runs per-monitor-v2 DPI aware.
+- **H3:** on focus loss release all keys, stop safely and tell the user; never force focus back.
+  Praxion windows use `WS_EX_NOACTIVATE`. If the game runs elevated, `SendInput` is blocked
+  (UIPI): Praxion checks the integrity level at start and refuses with a clear message.
+- Mineflayer is the reference model: `controlState`, rate-limited and quantized look, `human.js`.
+
+### Experiments for 2.7
+1. Relative `SendInput` reaches `WM_INPUT`. 2. Raw input bypasses pointer acceleration.
+3. Input-to-packet latency, a one-tick key hold, aiming within 1 degree in 150 ms.
+4. Where the cursor lands after a menu closes. 5. Focus loss in fullscreen (GLFW may iconify).
+
+## 2.4 Hand-over and take-over (2026-10-29)
+
+### Decided (user, 2026-10-29)
+- **Take-over sensitivity:** key or mouse-button press, wheel, or clear mouse movement takes
+  control back; tiny jitter is ignored. Threshold set in 2.7 from measured idle noise.
+- **Interrupted work waits** for "carry on" (survey/02 idea 3, warm resume): the program is
+  frozen, remaining work is recomputed from proxy-verified state, never from Praxion's own memory.
+- **Indicator:** a separate small window outside the game area (second monitor if present),
+  `WS_EX_NOACTIVATE`; shows who plays, current task, last command.
+
+### Minor picks by Claude (user may overrule)
+- A low-level hook on its own thread keeps a table of physically held keys, using the
+  `LLKHF_INJECTED` / `LLMHF_INJECTED` flags. `GetAsyncKeyState` cannot be used because it merges
+  injected and physical state. On the first physical event the hook sets a flag; the input
+  thread checks it before every send. Target: take-over under 50 ms.
+- On take-over Praxion releases only keys it holds and the user does not physically hold. The
+  user's own event still reaches the game untouched.
+- Hand-over starts only when no physical key or button is held (wait up to ~2 s, then tell the user).
+- Every held key has a short lease that the input thread renews. A tiny watchdog process
+  releases all injected keys if the main process dies, because Windows does not.
+- The global hand-over hotkey is registered with `RegisterHotKey` (the game should not see it;
+  inferred from the docs, to test in 2.7). The key combination is configurable.
+
+### Experiments for 2.7
+1. Hook-to-flag latency and total take-over latency. 2. Idle and resting-hand mouse noise, to set
+the jitter threshold. 3. The hotkey never reaches the game. 4. Watchdog releases keys after a
+forced kill of the main process. 5. A physically held key is not released by Praxion.
+
+## 2.5 Body port (2026-10-29)
+
+### Shape
+Three message kinds: **observations** (body to brain: deltas and events), **commands** (brain to
+body, each with an id and an owner token), **receipts** (body to brain: pending, then settled with
+the evidence the body itself observed). Model: Mine AI MCP's submit/pending/settled protocol
+(survey/01 mechanism 1) and Cairn's `ok / failed / preempted` results with owner tokens
+(survey/03 mechanism 6). A receipt never rests on the brain's own claim. The same port serves the
+real body, the in-memory fake world and recorded replays (decision 1.2: agent layers do not
+import body layers).
+
+### Decided (user, 2026-10-29)
+- Separate programs, local connection.
+- Brain may run on another computer; default loopback, remote needs an explicit key.
+- Brain silent: safe stop and notify (body finishes the step to a safe point, stands still, keeps
+  basic survival reactions on).
+
+### Minor picks by Claude (user may overrule)
+- Silence is declared after a heartbeat gap, default about 3 s, tuned in 2.7.
+- Take-over and reflexes preempt without a handshake; a preempted command settles as `preempted`,
+  not as a failure.
+- Message format and transport are chosen when the first code is written; they are an
+  implementation detail behind this contract.
+
+### Left open on purpose
+- Who holds the world model (body or brain): session 3. The port carries both an event stream and
+  queries, so either answer fits.
+- The command and failure catalog, and evidence levels per action: session 4.
+- Which reflexes stay on: session 7.
+
+## 2.7 Risk experiments (2026-10-29)
+
+### Decided (user, 2026-10-29)
+- **Thresholds accepted as listed.** A threshold that is missed stops the work and goes to the
+  user; Claude never switches route (for example to a client mod) on its own. Rows marked
+  "measure only" are recorded, not judged.
+- **Hands experiments run at the physical Windows PC** (Remote Desktop blocks raw relative input).
+  Round 1 runs on macOS first.
+- **Experiment code lives in `spikes/`, untracked, until the license is chosen.** Reports and
+  measurements are committed as documents. `spikes/` is in `.gitignore` (minor pick by Claude).
+
+### Experiments
+| Round | # | Measures | Pass |
+|---|---|---|---|
+| 1 Eyes (also on macOS) | E1 | Latency added by the forwarding proxy | p99 < 1 ms; 10 min of play without disconnect or desync |
+| | E2 | Azalea decodes a 26.3 offline-mode session (fallback MCProtocolLib) | 10 min, zero decode errors; sampled blocks match server commands |
+| | E3 | Packet arrival to state update | p99 < 5 ms steady state; chunk bursts reported apart and must not delay forwarding |
+| | E4 | How often the client reports its pose | measure only |
+| 2 Hands (Windows, physical) | E5 | Relative SendInput turns the camera; degrees per count | within 2% of the formula, raw input on and off measured separately |
+| | E6 | Aim within 1 degree in 150 ms | at least 95 of 100 |
+| | E7 | One-tick key hold | at least 95 of 100 give exactly one tick (proxy-verified) |
+| | E8 | Tick-aligned click, then the water-bucket save | click at least 95%; save at least 90% of 50 falls |
+| | E9 | Input-to-packet latency | measure only |
+| 3 Menus and focus | E10 | Menu click lands on the intended slot (GUI scale 1-4, two window sizes) | at least 99 of 100 |
+| | E11 | Focus loss in fullscreen, borderless, windowed | keys released within 100 ms; no stuck key |
+| 4 Take-over and timing | E12 | Physical event to last injected event; idle mouse noise; hotkey hidden from the game; watchdog | p99 < 50 ms; user-held keys never released; hotkey never reaches the game; watchdog releases keys within 1 s of a kill |
+| | E13 | Jitter of the 50 ms loop with the game running | p99 < 2 ms |
+| | E14 | Written comparison of the two decoder libraries | report |
+
+Also in round 2: `hDevice` of injected events (informational), and the mouse gain formula against
+the 26.x source.
+
+### Order
+Round 1 first: it is cheap and decides the decoder. Rounds 2 to 4 follow at the Windows PC. All
+rounds run before session 3, because a failure changes the route (client-mod fallback).
+
+Update from session 4: the rule "release all keys on take-over" has an exception for dangerous
+moments (bridge-edge sneak, mid-air jump); see `docs/sessions/04-action-verification.md`.

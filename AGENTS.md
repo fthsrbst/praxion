@@ -8,11 +8,15 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
 
 - Project: **Praxion**, an autonomous Minecraft agent that writes its own skills while it plays.
   Minecraft only (Java Edition, singleplayer, Windows); see `docs/decisions.md`.
-- Phase 0, research. Scope and architecture are not decided yet. Research lives in `docs/research/`.
-- Discussion sessions (`docs/discussion-plan.md`): session 1 done; session 2 (body) is next. Agreed decisions go to
-  `docs/decisions.md`; per-session notes go to `docs/sessions/NN-topic.md`.
-- Do not scaffold, add dependencies or write product code until the decisions are
-  recorded in this repo. A later session makes the decisions and drafts the architecture.
+- Phase 0, research and design. All 15 discussion sessions are done; their decisions are in
+  `docs/decisions.md`. Research lives in `docs/research/`.
+- Discussion sessions (`docs/discussion-plan.md`): all done. Session 2's experiments (2.7) have not run
+  yet. Next: an architecture draft that consolidates the decisions, a review round by a model
+  other than the writer, the 2.7 experiments (throwaway code in untracked `spikes/`), then the
+  first product code. Agreed decisions go to `docs/decisions.md`; per-session notes go to
+  `docs/sessions/NN-topic.md`.
+- Do not scaffold, add dependencies or write product code until the architecture draft is
+  reviewed and the 2.7 experiments have passed. Throwaway experiment code in `spikes/` is allowed.
 - When this section is stale, fix it in the same change that makes it stale.
 
 ## The user owns the design
@@ -136,6 +140,7 @@ Generate images whenever they help (diagrams, concept art, UI mockups, doc illus
 | `notes.md` | Dump: user ideas, agent notes, proposals. Append-only, newest first. |
 | `docs/decisions.md` | Agreed decisions, newest first. |
 | `docs/discussion-plan.md` | Topics and order of the discussion sessions. |
+| `docs/architecture.md` | Architecture draft consolidating the decisions. Tags: decided, proposed, open. |
 | `opencode.json` | OpenCode project config: default worker model and safety rules. |
 | `.claude/skills/` | Project skills. Claude Code and OpenCode both load them. |
 
