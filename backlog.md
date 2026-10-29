@@ -107,18 +107,14 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   embedding model; ask the user what Mnema is, to confirm the separation.
 - Pointers: `docs/research/memory-review/critic-simplicity.md` §7, `docs/research/embeddings.md`
 
-### Architecture draft 2: confirm the [P] items
+### Architecture open points after draft 2
 - Source: Claude Opus 5.5, 2026-10-29
-- State: Review round 1 done and its questions decided. `docs/architecture.md` draft 2 written,
-  reviewed by GLM, DeepSeek and Beam (`docs/reviews/2026-10-29-arch-d2/`), all findings folded in.
-- Remaining: walk the user through the [P] items of draft 2 by section (§5.1 perception mechanism,
-  §5.2 frame fields and HoldGuard, §5.4 port details and stop/resume table, §5.5 planner goals and
-  frontier, §6.1 interpreter order, until and composition) and record what they accept; still
-  [O]: lesson trigger, transparent-material table, interface technology, commercial parts, wiki RAG
-  licence; Mojang EULA and Usage Guidelines check before any release; dependency licences in the
-  version manifest; log the round-1 minor IDs (synthesis.md "Minor and dropped"); decide whether
-  `spikes/` may be committed.
-- Pointers: `docs/architecture.md`, `docs/reviews/2026-10-29-arch-r1/`, `docs/reviews/2026-10-29-arch-d2/`
+- State: Draft 2 accepted in full by the user (decisions.md); review round 1 and the draft-2 review closed.
+- Remaining: still [O]: lesson trigger, transparent-material table, interface technology, which
+  parts are commercial, wiki RAG licence; Mojang EULA and Usage Guidelines check before any
+  release; log the round-1 minor IDs (synthesis.md "Minor and dropped"); decide whether `spikes/`
+  may be committed.
+- Pointers: `docs/architecture.md` §11 and Appendix A
 
 ### Later ideas from review round 1
 - Source: Claude Opus 5.5, 2026-10-29
@@ -132,7 +128,7 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Source: Claude Sonnet 5.5, 2026-10-29
 - State: Experiments E1-E14 and thresholds agreed; no code written yet. Blocked: review round 1
   found that 26.3 uses SDL, not GLFW; the user accepted the amended plan (round 0, E15, E16, Q11),
-  see `docs/decisions.md`. Start with round 0 after architecture draft 2 is reviewed.
+  see `docs/decisions.md`. Draft 2 is reviewed and accepted: round 0 (desk) can start.
 - Remaining: write throwaway spikes in untracked `spikes/` (the free OpenCode worker may draft
   them; another model reviews), run round 1 on macOS, rounds 2-4 at the physical Windows PC,
   write results into `docs/sessions/02-body-connection.md`. Stop and ask the user on any miss.

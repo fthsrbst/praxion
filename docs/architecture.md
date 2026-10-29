@@ -5,6 +5,7 @@ by Claude Opus 5.5 from `decisions.md`, `sessions/02` to `sessions/15` and revie
 ([reviews/2026-10-29-arch-r1/](reviews/2026-10-29-arch-r1/README.md)). The writer does not review
 this draft (AGENTS.md). Draft 2 has been reviewed once by GLM-5.3-Flash, DeepSeek v4.1 Flash and Beam
 ([reviews/2026-10-29-arch-d2/](reviews/2026-10-29-arch-d2/)); their findings are folded in below.
+On 2026-10-29 the user accepted every proposal in this draft, so its former [P] items are now [D].
 
 Tags: **[D]** decided with the user (source in `decisions.md`), **[P]** proposed, not yet agreed,
 **[O]** open. Anything untagged is explanation. Review-round IDs (R1-…) point to
@@ -29,12 +30,12 @@ client, writes its own skills while it plays, verifies them against the world an
   flawless. The capability target is the whole game up to the Ender Dragon.
 - **Success measures** [D]: milestone ladder over many fresh seeds, a proxy-verified command suite,
   smoothness (starvation gap, instant take-over), naturalness (movement statistics and a blind
-  test; session 13 picks KS / energy distance, AUC ≤ 0.6 and a paired forced choice [P]), hosted cost per hour. Targets are set after baseline measurements.
+  test; session 13 picks KS / energy distance, AUC ≤ 0.6 and a paired forced choice [D]), hosted cost per hour. Targets are set after baseline measurements.
 - **Out of scope for now** [D]: other games, multiplayer, Bedrock, mods, local decision models
   (a local embedding model for the wiki RAG is allowed, session 12), voice,
   reinforcement learning, personalised movement.
 
-### 1.1 First slices **[P]**
+### 1.1 First slices **[D]**
 
 Engineering principle 3 needs a gate for "first code". Proposed, in dependency order:
 
@@ -45,7 +46,7 @@ Engineering principle 3 needs a gate for "first code". Proposed, in dependency o
 | Demo-2 | brain: Jev and LLM clients, curriculum, skill writer and admission, memory briefing | Praxion writes and admits its own skills |
 
 First product code is gated on the reviewed draft and the passed 2.7 experiments [D], and then
-starts with Demo-0 only [P].
+starts with Demo-0 only [D].
 
 ## 2. System overview
 
@@ -83,7 +84,7 @@ Process boundaries [D]:
 - **Brain:** a separate program joined by the body port. It runs on the same PC by default and may
   run remotely with a key.
 - **Watchdog:** its own process. It waits on the body's process handle and releases every held key
-  and mouse button from a shared held-key table if the body dies [P, R1-M5].
+  and mouse button from a shared held-key table if the body dies [D, R1-M5].
 - **Indicator and interface:** fed by the body for status, so they work with the brain down.
   Neither ever takes focus.
 
@@ -103,14 +104,14 @@ on the brain or the network.
 
 Reaction floor [D]: the reflex layer may react within 50 ms, but only reflexes tagged
 `lethal_fast` may act faster than the 150 ms human floor. Every reflex in the coverage matrix
-carries `latency_class: human_floor | lethal_fast` [P].
+carries `latency_class: human_floor | lethal_fast` [D].
 
-**Call classes** [P, numbers by measurement]: each class (command mapping, wake decision, interim
+**Call classes** [D, numbers by measurement]: each class (command mapping, wake decision, interim
 pick, plan, skill writing, chat reply) gets a model role, a reasoning effort, a deadline and a
 fallback. Model latencies come from session 8's measurements; reasoning models may take 10 to 100 s,
 so the plan role must start early or use low effort.
 
-**Brain outage** [D]: if the brain is silent for about 3 s (heartbeat gap, a 2.5 pick [P]), the body finishes the
+**Brain outage** [D]: if the brain is silent for about 3 s (heartbeat gap, a 2.5 pick [D]), the body finishes the
 current primitive, runs a hand-written shelter or retreat skill, then holds with reflexes on and
 tells the user through the indicator. Control verbs keep working.
 
@@ -122,33 +123,33 @@ user, pauses autonomous LLM work while reflexes and the core keep running.
 
 | Component | Lang | Responsibility | Source |
 |---|---|---|---|
-| Version manifest | data | pins client, server jar, protocol 777, Azalea commit, toolchain date, [D]; plus data-report hash and dependency licences [P]; the forwarder refuses a handshake with another protocol number [P] | Q4 |
+| Version manifest | data | pins client, server jar, protocol 777, Azalea commit, toolchain date, [D]; plus data-report hash and dependency licences [D]; the forwarder refuses a handshake with another protocol number [D] | Q4 |
 | Forwarder | Rust | forwards bytes untouched; tees a copy to the body over loopback with a bounded queue that never blocks forwarding | 2.2, Q3 |
 | Decoder | Rust | packet field layouts from the pinned Azalea commit; ids and registries from Mojang data reports; tracks Handshake, Login, Configuration (with Known Packs) and Play, including re-entry into Configuration; loss of sync marks perception invalid | 2.2, R1-B2 |
 | Raw store | Rust | everything the decoder receives; readable only by perception (module boundary plus lint) | R1-M3 |
 | Perception API | Rust | deny-by-default queries under the line-of-sight rule (§5.1); `unknown` is a typed value; denied attempts go to the ledger | 3, R1-M3 |
 | Reflexes | Rust | `evaluate(world) -> action`, about 10 typed settings the user can edit, first-night set growing per rung | 7 |
-| Arbiter | Rust | tiers survival, command, maintenance, projects; soft and hard thresholds; owns the intent stack; all quantities in expected ticks [P] | 7, HOL-8 |
+| Arbiter | Rust | tiers survival, command, maintenance, projects; soft and hard thresholds; owns the intent stack; all quantities in expected ticks [D] | 7, HOL-8 |
 | Rule-list interpreter | Rust | three-valued teleo-reactive execution (§6.1) | 5, R1-M2 |
 | Primitives | Rust | hand-written behaviours, one contract record each (§6.2) | 5, R1-M7 |
 | Planner | Rust | A* core and cost constants from Azalea; our own place, bridge and pillar moves; requests aims from movement style; contract in §5.5 | 6, R1-M10 |
-| Movement style | Rust | human camera, speed and timing above the planner; the only producer of look output [P] | 6, 13 |
+| Movement style | Rust | human camera, speed and timing above the planner; the only producer of look output [D] | 6, 13 |
 | Actuator | Rust | consumes a `ControlFrame` per tick; implementations: SendInput (real play), headless packet client (level 2, practice room), client mod (future fallback) | R1-B7 |
-| Hands (SendInput) | Rust | scan codes, two mouse modes, closed-loop gain calibration, the wrong-click slot check, a per-run nonce in `dwExtraInfo` [P]; targets SDL3 in 26.3, not GLFW | 2.3, R1-B1 |
-| Take-over | Rust | low-level hooks; physical vs injected input; hook-liveness probe [P]; command gesture; danger-held keys released last [P] | 2.4, 4, Q1 |
+| Hands (SendInput) | Rust | scan codes, two mouse modes, closed-loop gain calibration, the wrong-click slot check, a per-run nonce in `dwExtraInfo` [D]; targets SDL3 in 26.3, not GLFW | 2.3, R1-B1 |
+| Take-over | Rust | low-level hooks; physical vs injected input; hook-liveness probe [D]; command gesture; danger-held keys released last [D] | 2.4, 4, Q1 |
 | Control-verb parser | Rust | stop, cancel, status, carry on, hand-over parsed locally before any brain call | Q5 |
 | Receipts | Rust | per-action evidence contracts and causal attribution (§5.3) | 4, Q7 |
-| Ruleset | Rust | body-owned read-only file with a hash check; refuses before any input; brain only proposes changes [P] | 1.4, R1-M11 |
+| Ruleset | Rust | body-owned read-only file with a hash check; refuses before any input; brain only proposes changes [D] | 1.4, R1-M11 |
 | Event log | Rust | append-only, replayable, the single source of truth; every claim cites a receipt id | 14, R1-M4 |
 | Commands | Python | Jev maps non-control commands to a closed schema; code validates | 9 |
 | Curriculum | Python | free, Voyager-style goals with a computable completion condition, checked before a directive is sent | 10 |
-| Obtain-X solver | Python | recipe and tech-tree solver from game data, compiled into a framework-generated rule list (not an LLM skill) [P, session 9/10 pick] | 9, 10 |
+| Obtain-X solver | Python | recipe and tech-tree solver from game data, compiled into a framework-generated rule list (not an LLM skill) [D, session 9/10 pick] | 9, 10 |
 | Jev and LLM clients | Python | role-based models, stamped directives, cost tracking, call-class deadlines | 8 |
-| Skill writer and admission | Python + harness | step programs compiled to rule lists; staged admission (§6.3); writer is a low-privilege process that writes only to a candidates directory [P, session 15 pick] | 5, 11 |
+| Skill writer and admission | Python + harness | step programs compiled to rule lists; staged admission (§6.3); writer is a low-privilege process that writes only to a candidates directory [D, session 15 pick] | 5, 11 |
 | Memory projections and briefing | Python | rebuilt from the event log: places, containers, ledger progress, skill statistics; briefing with a token cap | 12, R1-M4 |
-| Wiki RAG | Python | local index of Minecraft Wiki text for the LLM's knowledge questions; behind a flag, off the Demo-1 path [P] | 12 |
+| Wiki RAG | Python | local index of Minecraft Wiki text for the LLM's knowledge questions; behind a flag, off the Demo-1 path [D] | 12 |
 | Indicator and interface | **[O]** technology | indicator, reports, command box, live view, memory viewer; requirements [D] | 2.4, 9, 14, Q2 |
-| Watchdog | Rust | own process [D]; waits on the body's process handle and releases keys and buttons from the shared held-key table [P] | 2.4 |
+| Watchdog | Rust | own process [D]; waits on the body's process handle and releases keys and buttons from the shared held-key table [D] | 2.4 |
 | Test harness | Python + Rust | logged setup channel, referee, fixtures, practice room on a test server, server checklist, world backups | 14, 11 |
 
 Language split [D, with a note]: Python brain, Rust body. The "~10 ms" split rule in session 2.6 is
@@ -163,26 +164,26 @@ through the perception API [D]:
 
 - **Line of sight** within about 64 blocks in every direction; camera direction is ignored; F3
   information is allowed, everything else is denied [D].
-- **Query result** [P]: every query answers `Known(value, provenance, age) | Unknown(reason)`, with
+- **Query result** [D]: every query answers `Known(value, provenance, age) | Unknown(reason)`, with
   `reason` one of `out_of_sight`, `out_of_range`, `budget`, `denied`, `never_seen`.
-- **Block visibility** [P]: bounded ray tests per candidate at query time, cached per (eye cell,
+- **Block visibility** [D]: bounded ray tests per candidate at query time, cached per (eye cell,
   target). A block change in the target's chunk, any eye move to another cell or a chunk unload
   invalidates the affected entries. Precomputing visibility for a 64-block sphere (about 1.1
   million cells, 4/3·π·64³) does not fit the budget.
-- **Ray budget** [P]: a per-tick budget; reflexes get a reserved share no other caller can use.
+- **Ray budget** [D]: a per-tick budget; reflexes get a reserved share no other caller can use.
   When the budget is spent a query returns `Unknown(budget)`, never a stale value.
-- **Entity visibility** [P, decided before Demo-0]: one ray per tick per tracked entity, capped
+- **Entity visibility** [D, decided before Demo-0]: one ray per tick per tracked entity, capped
   (the cap is measured), cached per (eye cell, entity id, entity cell) and invalidated when either
   moves; entities beyond the cap are `Unknown(budget)` and the overflow is counted.
 - **Transparent materials** [O]: the table of see-through blocks is decided at first code.
-- **Hearing** is a sense [P, session 3 pick]: sound packets within about 16 blocks give facts with provenance `hearing`.
+- **Hearing** is a sense [D, session 3 pick]: sound packets within about 16 blocks give facts with provenance `hearing`.
 - **Provenance** on every fact: `sight`, `hearing`, `memory` (with age), `inference`, `privileged`
-  (ledgered) [P, session 3 pick].
+  (ledgered) [D, session 3 pick].
 - **`unknown`** is a value, not "absent" [D]. Out of sight, a query answers `unknown`.
-- **Ledger** [P]: denied access attempts are logged, not denied facts, at a bounded rate (the first
+- **Ledger** [D]: denied access attempts are logged, not denied facts, at a bounded rate (the first
   occurrence per (query, fact kind) per tick plus a counter).
 - **Containers** are live only while their window is open; otherwise they are seen facts with an
-  age. No identity is assumed across break plus place [P].
+  age. No identity is assumed across break plus place [D].
 
 ### 5.2 Action: frames, actuators and take-over
 
@@ -195,28 +196,28 @@ skills / reflexes / planner / movement style
 
 - Everything above the actuator produces only `ControlFrame`s [D]. Cancellation classes stay on
   actions; the frame carries only held state [D].
-- **Frame fields** [P]: `tick`, `generation`; `held: {control: down | up}` with each control's
+- **Frame fields** [D]: `tick`, `generation`; `held: {control: down | up}` with each control's
   hold or toggle mode read from `options.txt`; `look: Delta(Δyaw, Δpitch) | Aim(yaw, pitch)`;
   `clicks: [Attack | Use]`; `menu: Option<{window, slot, button, mode}>` for slot actions. The
   SendInput actuator spreads a tick's look over the render frames it spans and reports the
   applied counts back for gain calibration.
-- **Stale frames** [P]: the actuator drops any frame whose `generation` is not current. Take-over
+- **Stale frames** [D]: the actuator drops any frame whose `generation` is not current. Take-over
   increments the generation before it releases keys, so no frame built in that tick is injected.
-- **Danger-held keys** [P]: a second record beside the frame, `HoldGuard { tick, dangerous: {controls},
+- **Danger-held keys** [D]: a second record beside the frame, `HoldGuard { tick, dangerous: {controls},
   until_condition, max_ticks }`, is written by the running primitive. The take-over path reads it to
   know which held controls must not be released. It carries no control intent.
-- **One owner of look** [P]: movement style is the only producer of look output. The planner and
+- **One owner of look** [D]: movement style is the only producer of look output. The planner and
   primitives request an `Aim`; a path segment starts only once the aim tolerance is met.
 - **Hands under SDL3** [D for the facts, O for the effects]: 26.3 uses SDL, not GLFW; the
   `rawMouseInput` option is gone and key bindings use scancodes. Whether injected relative moves
   turn the camera (`hDevice = 0`), and how pointer speed affects the gain, is measured in round 0 and E5.
 - **Take-over** [D]: any physical key, button, wheel or clear mouse move takes control back within
   50 ms; tiny jitter is ignored; danger-held keys stay held until the user touches them or the
-  moment passes. No tier can revoke them [P].
+  moment passes. No tier can revoke them [D].
 - **Command gesture** [D]: a physical press of the bound chat or command key releases all keys
   except danger-held ones and waits while chat is open. If the next chat the client sends is a
   prefixed command, Praxion takes it and keeps control; anything else is a take-over.
-  Details [P]: chat closed with nothing sent resumes the task; the wait is bounded at 30 s, after
+  Details [D]: chat closed with nothing sent resumes the task; the wait is bounded at 30 s, after
   which Praxion says so and holds; reflexes stay armed and the pause heuristic is suppressed while
   the chat screen is open; the intent stays `suspended` during the wait; a prefixed control verb is
   still parsed by the body (§5.6).
@@ -225,12 +226,12 @@ skills / reflexes / planner / movement style
 - **Pause heuristic** [D]: no client movement packets for N ms while active means a safe stop.
   Praxion never injects into the pause, options, social or death screens; inventory, chest,
   crafting-table and other container screens are normal play and use the absolute menu mode [D].
-- **Ownership** [P]: every injected event carries a per-run nonce; an event without it is the user's.
+- **Ownership** [D]: every injected event carries a per-run nonce; an event without it is the user's.
   A periodic probe on an unbound key proves the hook is alive. If the hook is lost, Praxion releases
   all keys and stops.
 - **Hand-over** [D]: by chat command, global hotkey or the interface. It waits until no physical
-  key is held [P]. If no key is released for 5 s, the indicator names the held key and offers
-  "hand over anyway", which releases only Praxion's own holds [P]. After a hand-over with no command, Praxion resumes the
+  key is held [D]. If no key is released for 5 s, the indicator names the held key and offers
+  "hand over anyway", which releases only Praxion's own holds [D]. After a hand-over with no command, Praxion resumes the
   suspended task, or else chooses a goal and says so [D]. After a take-over, the interrupted task
   waits for "carry on", then the world is re-read [D].
 - **Physical operation only** [D]: remote-control tools are unsupported while Praxion plays.
@@ -244,14 +245,14 @@ A receipt reports what the server said. The required evidence is part of each pr
 | dig | block becomes air (level 2) |
 | place | block state changes (level 2) |
 | pickup, craft | inventory delta (level 3) |
-| move, look | no server correction within N ticks: settles `confirmed` with the note `unrefuted` [P] |
+| move, look | no server correction within N ticks: settles `confirmed` with the note `unrefuted` [D] |
 | slot click | client packet sent, slot number matches, no correction |
 
 - **Attribution** [D]: a receipt counts only if its evidence tick is at or after the intent's start
   tick on the body's single tick source (every observation is stamped on arrival), **and** the
   action's sequence number, or the injected-event nonce for non-block actions, matches the intent.
   Tick order alone never attributes; an unattributed receipt stays `unconfirmed`.
-- **Settlement** [P]: a receipt settles when its evidence arrives or its window closes, whichever is
+- **Settlement** [D]: a receipt settles when its evidence arrives or its window closes, whichever is
   first. Late evidence never reopens a receipt; it is logged as `late_evidence{receipt_id, kind}` and
   counts against the skill's reliability only if it refutes a settled `confirmed`.
 - **Outcomes** [D]: no confirmation gives `unconfirmed`; Praxion re-reads the world, then retries.
@@ -264,10 +265,10 @@ A receipt reports what the server said. The required evidence is part of each pr
 The brain and body exchange three kinds of message [D]:
 
 - **Observations**, body → brain: deltas and events.
-- **Commands**, brain → body: each with an id [D] and `expires_at_tick` [P]; an expired command
+- **Commands**, brain → body: each with an id [D] and `expires_at_tick` [D]; an expired command
   never starts and settles as `expired`.
 - **Receipts**, body → brain: `pending`, then settled.
-- **Liveness** [P]: `ping`/`pong` both ways at 1 Hz; any brain message counts as liveness. The 3 s
+- **Liveness** [D]: `ping`/`pong` both ways at 1 Hz; any brain message counts as liveness. The 3 s
   silence rule of §3 is measured on this.
 
 Rules [D]:
@@ -276,11 +277,11 @@ Rules [D]:
 |---|---|
 | Handshake | `hello{port_version, caps}`; a mismatch is refused |
 | Ordering | every body message has a `seq` |
-| Resync | the body answers `resync_request` with one `snapshot{state, generation, seq = S}`, then deltas after S. While a connection resyncs, the body buffers its deltas up to a bound; on overflow it discards the buffer, sends `dropped(n)` and requires a new snapshot [P] |
+| Resync | the body answers `resync_request` with one `snapshot{state, generation, seq = S}`, then deltas after S. While a connection resyncs, the body buffers its deltas up to a bound; on overflow it discards the buffer, sends `dropped(n)` and requires a new snapshot [D] |
 | Back-pressure | bounded queues; per-key coalescing (e.g. latest position only); `dropped(n)` when anything is dropped |
-| Generation | incremented only by the body: owner change, take-over, new user command, reflex preemption; directives of an old generation are rejected. A command is stamped with the generation the body returns in `command_accepted{id, generation}` (the body increments first, then accepts). If a reflex or take-over bumps the generation under a running directive, the body settles it `preempted`, keeps the intent entry and emits `replan_needed{intent_id}`. One counter only; session 7's "owner token" and "epoch" are this generation [P]. After a body restart the generation continues from the event log [P] |
-| Directives | stamped with generation, tick, state hash [P] and model; adopted only if the generation is unchanged and the guards hold on the actual state |
-| Transport | length-prefixed JSON over loopback TCP; remote access needs a pre-shared key [P]; MessagePack only if measured necessary |
+| Generation | incremented only by the body: owner change, take-over, new user command, reflex preemption; directives of an old generation are rejected. A command is stamped with the generation the body returns in `command_accepted{id, generation}` (the body increments first, then accepts). If a reflex or take-over bumps the generation under a running directive, the body settles it `preempted`, keeps the intent entry and emits `replan_needed{intent_id}`. One counter only; session 7's "owner token" and "epoch" are this generation [D]. After a body restart the generation continues from the event log [D] |
+| Directives | stamped with generation, tick, state hash [D] and model; adopted only if the generation is unchanged and the guards hold on the actual state |
+| Transport | length-prefixed JSON over loopback TCP; remote access needs a pre-shared key [D]; MessagePack only if measured necessary |
 | Fakes | the same port serves the real body, the fake world and replays |
 
 **Intent stack** [D]: the body owns one stack, persisted in the event log. Each entry is
@@ -288,7 +289,7 @@ Rules [D]:
 `frozen_for_carry_on` or `done`. The brain pushes and pops entries through the port. A new command
 suspends the old one, which resumes afterwards. Stop and cancel always work [D].
 
-Stop causes and resume triggers [P]:
+Stop causes and resume triggers [D]:
 
 | Cause | Intent state | Resumes when |
 |---|---|---|
@@ -306,16 +307,16 @@ is capped (number by measurement).
 ### 5.5 Planner contract
 
 - **Input** [D]: start, goal and the planning state (hotbar, best tool, protected blocks; known
-  blocks through the perception API [P]), plus a time budget per segment.
-- **Goal types** [P]: `Block(pos) | Region(min, max) | Entity(id) | Near(entity, r)`.
-- **Frontier** [P]: a goal whose corridor holds unknown cells is planned to the frontier and returns
+  blocks through the perception API [D]), plus a time budget per segment.
+- **Goal types** [D]: `Block(pos) | Region(min, max) | Entity(id) | Near(entity, r)`.
+- **Frontier** [D]: a goal whose corridor holds unknown cells is planned to the frontier and returns
   `partial` with the cell that ended it; the caller looks, then replans. A `partial` result
   transfers no state.
 - **Output** [D]: `success | partial | timeout | noPath`, with the path so far.
 - **Moves** [D]: walk, jump, dig, place, bridge, pillar; descend, climb, swim and parkour as
-  session 6 lists them [P]. World-changing moves cost more. Hard limits: protected blocks, no
+  session 6 lists them [D]. World-changing moves cost more. Hard limits: protected blocks, no
   digging straight down or into unknown blocks. Camera-then-move is a two-phase primitive.
-- **Single source** [P]: every move that digs or places invokes the matching primitive record
+- **Single source** [D]: every move that digs or places invokes the matching primitive record
   (§6.2), so its effects, cancellation class and evidence exist once; each changed block gets its
   own receipt and ledger entry.
 - **Stuck handling** [D]: retry counters, loop detection, a blacklist with reset conditions, typed
@@ -324,14 +325,14 @@ is capped (number by measurement).
 ### 5.6 Commands
 
 - **Sources** [D]: in-game chat with a prefix (read as a packet) or the interface.
-- **Sender check** [P]: the body drops chat from any sender other than the user's offline-mode UUID
+- **Sender check** [D]: the body drops chat from any sender other than the user's offline-mode UUID
   (taken from the login) before parsing. Free text never reaches a planner as an instruction [D].
 - **Control verbs** [D]: stop, cancel, status, carry on and hand-over are parsed by the body.
-- **Everything else** [D]: Jev maps to a closed schema [P: the use of Jev here is a minor pick],
+- **Everything else** [D]: Jev maps to a closed schema [D],
   then code validates.
 - **Risk** [D]: low-risk and ambiguous commands are guessed, started, and asked about without
   blocking; high-risk commands are asked first. A pending high-risk question shows in the
-  indicator with a "needs you" cue (sound plus taskbar flash, no focus change) [P]. After 60 s
+  indicator with a "needs you" cue (sound plus taskbar flash, no focus change) [D]. After 60 s
   without an answer Praxion cancels that command, says so in the interface and in chat, and resumes
   the previous task [D].
 - **Reports** [D]: go to the interface first; in-game chat gets only short acknowledgements at safe
@@ -341,10 +342,10 @@ is capped (number by measurement).
 
 - **Wake causes** [D]: program exhausted, monitor fired, skill failed, chat, new threat, take-over
   ended, ruleset refusal, plus a heartbeat of about 60 s with a rate limit per cause. The
-  heartbeat's "did anything change?" is a code diff over briefing facts, not a model call [P].
+  heartbeat's "did anything change?" is a code diff over briefing facts, not a model call [D].
 - **On a wake** [D]: the brain reads a briefing (facts with age and source, token cap), picks or
   writes a rule list, and sends it as a stamped directive.
-- **Prompt caching** [P]: a stable system prompt plus the primitive catalog form the cacheable
+- **Prompt caching** [D]: a stable system prompt plus the primitive catalog form the cacheable
   prefix; the briefing follows it.
 
 ## 6. Skills and learning
@@ -353,8 +354,8 @@ A skill is a teleo-reactive rule list `condition -> action`, interpreted by the 
 Actions are primitives or other skills. The LLM writes a step program and a goal; the compiler
 derives the guards and produces the rule list [D]. LLM-written skills only combine existing
 primitives and skills [D]. Size limits from sessions 5 and 11 apply: about 2 to 5 steps,
-more than 30 rules rejected, composition depth capped at 2 [P, session picks]. The obtain-X solver's output is
-framework-generated, comes only from verified tables, and has its own stated depth limit [P].
+more than 30 rules rejected, composition depth capped at 2 [D, session picks]. The obtain-X solver's output is
+framework-generated, comes only from verified tables, and has its own stated depth limit [D].
 
 ### 6.1 Interpreter semantics [D]
 
@@ -381,11 +382,11 @@ Each tick, in this order:
    timeout. Exploration therefore follows from the perception policy.
 5. If no rule is eligible, the result is `failed(no_rule)` and the brain is woken.
 
-`until` [P detail]: a commitment guard that keeps the current rule running only while that rule's
+`until` [D]: a commitment guard that keeps the current rule running only while that rule's
 own guard is still `T`, bounded by the action's `max_ticks`. The interpreter exports `until_active`
 for the arbiter's same-tier switch rule (session 7).
 
-Composition [P]: each running skill is a frame on a call stack; the deepest frame with a `T` guard
+Composition [D]: each running skill is a frame on a call stack; the deepest frame with a `T` guard
 fires. A child's `failed(kind)` makes the calling rule ineligible for that tick, so the parent falls
 to its next rule. A preemption suspends the whole stack; afterwards every frame re-evaluates from
 the top. A preempted discrete action is abandoned, not resumed; its receipt settles `preempted`.
@@ -415,7 +416,7 @@ primitive dig
 
 A fake-world conformance test compares declared effects with measured ones. Shortcomings of a
 primitive surface as a failure kind `suspected_primitive`. These are reported to the user, never
-patched by the LLM [P].
+patched by the LLM [D].
 
 ### 6.3 Admission [D]
 
@@ -435,10 +436,10 @@ candidate ─► static checks ─► practice room ─► probation ─► acti
 - **Never first tried in the user's world.** A skill learned in Praxion's own play becomes active
   without asking. A skill taught through chat needs the user's approval.
 - **Repair loop** [D for the cap]: a typed failure kind plus the trace go back to the writer, at
-  most 3 revisions per goal. The held-out fixtures are kept out of the writer's reach [P].
-- **Storage** [P]: versions in git with automatic rollback, in a per-installation data directory,
+  most 3 revisions per goal. The held-out fixtures are kept out of the writer's reach [D].
+- **Storage** [D]: versions in git with automatic rollback, in a per-installation data directory,
   not in the product repository. The skill writer is a low-privilege process that can write only to
-  a candidates directory [P, session 15 pick].
+  a candidates directory [D, session 15 pick].
 - **Lessons** [D]: general across worlds, proposed by the LLM, accepted by code after 3
   proxy-verified successful traces. Which condition triggers a lesson proposal is **[O]**.
 
@@ -455,14 +456,14 @@ restart.
 |---|---|---|
 | Zero cheats [D] | APIs expose only what a player can do and see; no operator commands, no `/tp`; test setup through a separate logged harness | raw store readable only by perception (module boundary plus lint) [D]; ledger of privileged reads |
 | Game connection [D] | no Praxion crash drops it | forwarder process with no game logic |
-| Take-over [D] | the user always wins within 50 ms | hooks, nonce [P], liveness probe [P], watchdog |
+| Take-over [D] | the user always wins within 50 ms | hooks, nonce [D], liveness probe [D], watchdog |
 | Network independence [D] | reflexes, take-over, ruleset, control verbs and the indicator never use the network | body-side implementation |
-| Ruleset [D] | written with an LLM, confirmed by the user, enforced before any input | body-owned read-only file with a hash check [P] |
-| Chat [D] | only the user's player is obeyed; free text is never an instruction | UUID sender filter [P] |
-| Keys [D] | in the OS credential store, with a `.env` file outside the repository as fallback; held only by the brain, never logged | brain; remote port needs its own pre-shared key [P] |
+| Ruleset [D] | written with an LLM, confirmed by the user, enforced before any input | body-owned read-only file with a hash check [D] |
+| Chat [D] | only the user's player is obeyed; free text is never an instruction | UUID sender filter [D] |
+| Keys [D] | in the OS credential store, with a `.env` file outside the repository as fallback; held only by the brain, never logged | brain; remote port needs its own pre-shared key [D] |
 | World [D] | backup before every autonomous session; clean server shutdown; keep the last N | harness |
-| Blocked input [P] | input that has no client packet echo within N ticks gives `input_blocked`, then stop | receipts |
-| Environment [P] | at start, read-only checks of integrity levels, Sticky/Filter/Toggle Keys, pointer settings, DPI, focus, sleep; refuse with a clear message, never change settings | body |
+| Blocked input [D] | input that has no client packet echo within N ticks gives `input_blocked`, then stop | receipts |
+| Environment [D] | at start, read-only checks of integrity levels, Sticky/Filter/Toggle Keys, pointer settings, DPI, focus, sleep; refuse with a clear message, never change settings | body |
 | Privacy [D] | recordings of the user's play and all logs stay local | — |
 
 ## 8. Memory and knowledge
@@ -473,18 +474,18 @@ restart.
 - **First memory** [D]: one JSON Lines projection per world plus an in-RAM index, places and
   containers, the event log with a read-only viewer, and a briefing with a token cap.
 - **Later** [D]: SQLite, vectors, lessons and the chunk cache each wait for a measured trigger. The
-  chunk cache is a stage-E snapshot (Unload Chunk with an allowlist) behind its trigger [P].
+  chunk cache is a stage-E snapshot (Unload Chunk with an allowlist) behind its trigger [D].
 - **Remembered facts** [D]: they carry age and provenance and are re-checked when in line of sight.
   Praxion says when it is unsure.
 - **Game data** [D]: comes from Mojang data reports; `minecraft-data` is the backup only.
 - **Minecraft Wiki RAG** [D]: feeds the LLM only. The index is local and never distributed, because
   the wiki is CC BY-NC-SA. Every passage carries a licence field, and a build check fails if an
-  NC passage reaches a distributable target [P]. The conflict with the open-core model is **[O]**.
+  NC passage reaches a distributable target [D]. The conflict with the open-core model is **[O]**.
 - **Separation** [D]: the game memory is separate from Mnema and the hub.
 
 ## 9. Testing and observability
 
-**Three levels** [D], with most tests at the bottom. What each level can test [P]:
+**Three levels** [D], with most tests at the bottom. What each level can test [D]:
 
 | Capability | L1 fake world | L2 protocol body | L3 real body |
 |---|---|---|---|
@@ -500,15 +501,15 @@ restart.
 - **When tests run** [D]: fast tests on every change; levels 2 and 3 nightly or on request.
 - **Observability** [D]: a live window plus the replayable event log; every claim cites a receipt id.
 - **Capture corpus** [D, round 0]: stock-client 26.3 sessions recorded before decoder work; every
-  replay and CI test reuses them. Not committed if the Mojang terms forbid it [P].
-- **Ideas** [P], with cost and the slice they first serve: a differential decode oracle on the corpus
+  replay and CI test reuses them. Not committed if the Mojang terms forbid it [D].
+- **Ideas** [D], with cost and the slice they first serve: a differential decode oracle on the corpus
   (S, Demo-0); a replay harness comparing Jev, a cheap LLM and rules on logged decision points
   (M, Demo-2); a planner-only control arm in the learning test (S, Demo-2). Shadow mode and the
   death-to-fixture factory are later work in `backlog.md`.
 
 The full inventory is in `sessions/14-testing.md`.
 
-## 10. Repository layout **[P]**
+## 10. Repository layout **[D]**
 
 One repository with the layers enforced by tooling [D]. Agent layers do not import body or
 version-pack layers [D]. Only the directories Demo-0 needs are created first:
@@ -523,7 +524,7 @@ spikes/      local experiment code (untracked)
 ```
 
 Other directories are added when their demo needs them: `brain/` and the interface for Demo-1 and
-Demo-2. Learned skills live outside the repository, in a per-installation data directory [P].
+Demo-2. Learned skills live outside the repository, in a per-installation data directory [D].
 
 ## 11. Risks and open points
 
@@ -586,6 +587,6 @@ before their rungs); voice commands; reinforcement learning; personalised moveme
 | Survival, Normal, zero cheats; Minecraft only with layering; singleplayer; Java on Windows (version rule amended by Q4) | §1, §7, §10 |
 | Jev with LLMs behind it; hosted models; LLMs may write code (narrowed by session 5); Mineflayer not a dependency | §3, §6 |
 
-Gaps: none found after the draft-2 review. Items decided only as minor picks inside session notes
-are tagged [P] in the text. Still **[O]**: the lesson trigger, the transparent-material table, the
+Gaps: none found after the draft-2 review. Every former [P] item, including minor picks from
+session notes, was accepted by the user on 2026-10-29 (decisions.md, "Architecture draft 2 accepted"). Still **[O]**: the lesson trigger, the transparent-material table, the
 interface technology, which parts are commercial, and the wiki RAG licence conflict.

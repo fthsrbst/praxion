@@ -5,6 +5,21 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-29
 
+- **Architecture draft 2 accepted.** The user accepted every item that draft 2 tagged [P], in four
+  groups: perception (query result type, cache invalidation, ray budget with a reflex reserve,
+  entity cap) and actuator (frame fields, stale-frame drop, `HoldGuard`, movement style as the only
+  look producer); port (liveness ping, command expiry, resync overflow, generation details), the
+  stop-cause table and the planner (goal types, frontier, extra moves, primitive records as the
+  single source); interpreter (`until` bounded by its own guard and `max_ticks`, call-stack
+  composition) and skills (size limits, obtain-X solver, storage outside the repository,
+  low-privilege writer, hidden fixtures, suspected-primitive reports to the user); safety and
+  structure (nonce, hook probe, watchdog, release order, stuck-key escape, gesture details,
+  "needs you" cue, ruleset hash, UUID filter, remote pre-shared key, blocked-input stop,
+  environment checks that refuse; first slices Demo-0/1/2 and the trimmed layout, latency classes,
+  call classes, ticks as the arbiter unit, code-level heartbeat diff, prompt caching, state hash,
+  receipt settlement, the session minor picks, wiki RAG flag and NC build check, test-level
+  matrix, manifest extras, staged chunk cache, corpus not committed if the terms forbid it). Details
+  in [architecture.md](architecture.md); the remaining [O] items stay open.
 - **"Never inject into a menu" means the pause, options, social and death screens only.**
   Inventory, chest, crafting-table and other container screens are normal play and use the
   absolute menu mode. Clarifies the dedicated-server pause heuristic. Draft-2 review (DeepSeek, finding 2).
