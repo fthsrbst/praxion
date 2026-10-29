@@ -7,6 +7,8 @@ Phase 0 research for Praxion (2026-10-21). Nothing here is a decision yet.
 | Skill-writing game agents, general game agents, Minecraft interfaces and benchmarks | [game-agents.md](game-agents.md) |
 | Fast decision models: TypeSafe Jev and classifier LLMs | [decision-models.md](decision-models.md) |
 | Embeddings and rerankers: Gemini Embedding 2, Qwen | [embeddings.md](embeddings.md) |
+| Memory and world state: remembering without stale facts, RAG or not (feeds session 3) | [memory-world-state.md](memory-world-state.md) |
+| Which decisions are still open and which block the first code | [decisions-to-code.md](decisions-to-code.md) |
 | Source-level review: mineflayer, pathfinder, Voyager, Odyssey, mindcraft, altoclef, Baritone, Craftonomous, agent-swarm | [systems-review.md](systems-review.md) |
 
 ## The picture in one page
