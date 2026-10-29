@@ -107,18 +107,26 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   embedding model; ask the user what Mnema is, to confirm the separation.
 - Pointers: `docs/research/memory-review/critic-simplicity.md` §7, `docs/research/embeddings.md`
 
-### Architecture review round 1: user decisions and draft 2
+### Architecture draft 2: confirm the [P] items
 - Source: Claude Opus 5.5, 2026-10-29
-- State: Review round 1 done (18 reviews, 45 clusters, 88 verdicts, Opus synthesis, Sonnet critic);
-  see `docs/reviews/2026-10-29-arch-r1/README.md`. 8 blockers, 12 majors. The user answered
-  Q1-Q11, the actuator seam, world backup and raw-data access; all recorded in `docs/decisions.md`.
-- Remaining: (1) still open from the critic: Mojang EULA and Usage Guidelines versus the commercial
-  parts; dependency and data-report licences in the version manifest; (2) the review's remaining
-  conflict-free fixes (port spec v0, three-valued guards, primitive contract, receipts, planner
-  contract, traceability table) are recommendations to explain to the user while writing draft 2; (3) write `architecture.md` draft 2 with the critic corrections in the
-  README; (4) review draft 2 with a model other than its writer; (5) log the minor IDs listed in
-  `synthesis.md` "Minor and dropped". Also decide whether `spikes/` may be committed.
-- Pointers: `docs/reviews/2026-10-29-arch-r1/synthesis.md`, `critic.md`, `README.md`
+- State: Review round 1 done and its questions decided. `docs/architecture.md` draft 2 written,
+  reviewed by GLM, DeepSeek and Beam (`docs/reviews/2026-10-29-arch-d2/`), all findings folded in.
+- Remaining: walk the user through the [P] items of draft 2 by section (§5.1 perception mechanism,
+  §5.2 frame fields and HoldGuard, §5.4 port details and stop/resume table, §5.5 planner goals and
+  frontier, §6.1 interpreter order, until and composition) and record what they accept; still
+  [O]: lesson trigger, transparent-material table, interface technology, commercial parts, wiki RAG
+  licence; Mojang EULA and Usage Guidelines check before any release; dependency licences in the
+  version manifest; log the round-1 minor IDs (synthesis.md "Minor and dropped"); decide whether
+  `spikes/` may be committed.
+- Pointers: `docs/architecture.md`, `docs/reviews/2026-10-29-arch-r1/`, `docs/reviews/2026-10-29-arch-d2/`
+
+### Later ideas from review round 1
+- Source: Claude Opus 5.5, 2026-10-29
+- State: proposals only, not decided.
+- Remaining: shadow mode while the user plays (check privacy of recording the user's input);
+  death-to-fixture factory with counterfactual replay; hidden rotating hold-out fixtures; a
+  player-bound fair-perception benchmark. Revisit after Demo-1.
+- Pointers: `docs/reviews/2026-10-29-arch-r1/synthesis.md` "Ideas worth adopting"
 
 ### Run the session 2.7 experiments
 - Source: Claude Sonnet 5.5, 2026-10-29

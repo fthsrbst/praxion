@@ -5,6 +5,50 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-29
 
+- **"Never inject into a menu" means the pause, options, social and death screens only.**
+  Inventory, chest, crafting-table and other container screens are normal play and use the
+  absolute menu mode. Clarifies the dedicated-server pause heuristic. Draft-2 review (DeepSeek, finding 2).
+- **Receipt attribution: tick `>=` plus a causal match.** A receipt counts only if its evidence
+  tick is at or after the intent's start tick on the body's single tick source, and the action's
+  sequence number (or, for non-block actions, the injected-event nonce) matches the intent;
+  otherwise it stays `unconfirmed`. Amends the epoch rule ("after the start tick") of the
+  per-action receipts decision. Draft-2 review (DeepSeek, finding 4).
+- **An unanswered high-risk question times out after 60 s:** Praxion cancels that command, says so
+  in the interface and in chat, and resumes the previous task. Adds a bound to session 9's
+  "high risk, ask first". Draft-2 review (DeepSeek, finding 22).
+- **Body port v0 rules.** `hello{port_version, caps}` handshake, refused on mismatch; a `seq` on
+  every body message; snapshot-plus-delta resync after a brain restart; bounded queues that
+  coalesce per key and send `dropped(n)` when they drop; the body alone increments `generation`
+  (owner change, take-over, new user command, reflex preemption) and rejects directives of an old
+  generation. Transport: length-prefixed JSON over loopback TCP (fits the remote-brain decision,
+  logs stay readable); MessagePack only if measurement demands it. Settles the 2.5 minor pick
+  "format chosen at first code". Review round 1, R1-B7.
+- **The body's append-only event log is the single source of truth.** Memory, ledger progress,
+  skill statistics and reports are projections rebuilt from it; the brain writes proposals only
+  (candidates, lesson text, ledger intents). Answers "who owns the memory file" (architecture
+  risk 10). Review round 1, R1-M4.
+- **One intent stack, owned by the body** and persisted in the event log: entries
+  `{intent_id, tier, skill_ref, args, state: running | suspended | frozen_for_carry_on | done}`.
+  The brain pushes and pops through the port; the project ledger keeps only long-horizon goals
+  that point to intent ids. Review round 1, HOL-8.
+- **Rule-list guards are three-valued (Kleene AND/OR).** A rule whose guard is `unknown` is not
+  eligible and offers an `observe(x)` subgoal; no eligible rule gives `failed(no_rule)`, which wakes
+  the brain; an in-flight discrete action blocks until its receipt or a timeout; `until` is a
+  commitment guard. Specified as a truth table and a state diagram in the architecture. Rules out
+  `unknown = false`. Review round 1, R1-M2.
+- **One versioned contract record per primitive:** effects generated from game data (produces,
+  consumes, changes, reveals, duration, tool tier, probability) plus a hand-written precondition
+  block (reach, support, free space, light, line of sight), cancellation class, required evidence
+  and cost. A fake-world conformance test compares declared with measured effects. The LLM writes
+  a step program that is compiled to a rule list. Review round 1, R1-M7.
+- **Receipts use per-action evidence contracts**, stored as data in the primitive record: dig →
+  block is air; place → block state; pickup → inventory delta; move and look → `unrefuted`; slot
+  click → client packet plus no correction. Epoch rule: a receipt counts only if its tick is after
+  the intent's start tick. Input-to-packet attribution is measured in E9. Review round 1, R1-M1.
+- **Planner contract:** a time budget per segment; statuses `success | partial | timeout | noPath`;
+  planning state includes hotbar, best tool and protected blocks; turning the camera then moving
+  is a two-phase primitive. Only Azalea's A* core and cost constants are reused; place, bridge and
+  pillar moves are written by us (to be confirmed in the session 6 spike). Review round 1, R1-M10.
 - **Version pinned: Minecraft Java 26.3 (protocol 777).** Client, server jar, Azalea commit and
   Rust toolchain are pinned together in one manifest until Demo-1 passes; every upgrade needs the
   user's approval. Reason: Mojang ships about quarterly and Azalea lags (its README names 26.2).
@@ -80,7 +124,7 @@ Proposals and ideas stay in `notes.md` until they are decided here.
   force. Praxion's own windows never take focus. Session 2.3.
 - **Take-over ignores tiny mouse jitter.** Any key or mouse-button press, wheel turn or clear
   mouse movement takes control back; very small drifts are ignored (threshold tuned in
-  experiment 2.7), so the user may rest a hand on the mouse. Session 2.4.
+  experiment 2.7), so the user may rest a hand on the mouse. Session 2.4. *Refined 2026-10-29 by the command gesture (Q1).*
 - **After a take-over, the interrupted task waits.** Praxion remembers it, does not play until the
   user says "carry on", then re-reads the world and re-plans if it changed. It never resumes from
   its own memory of the state. Session 2.4.
@@ -93,7 +137,7 @@ Proposals and ideas stay in `notes.md` until they are decided here.
   needs an explicit key. Session 2.5.
 - **If the brain goes silent, the body stops safely and tells the user:** finishes the current
   step to a safe point, stands still with basic survival reactions on. Which reactions: session 7.
-  Session 2.5.
+  Session 2.5. *Amended 2026-10-29 by "Safety does not depend on the brain" (Q5).*
 - **Seeing = line of sight in every direction within a distance limit** (about 64 blocks,
   tunable); a wall hides what is behind it. Camera direction is ignored. Session 3.
 - **Hidden data: what the F3 screen shows is allowed, everything else is denied** (a mob's exact
@@ -105,7 +149,7 @@ Proposals and ideas stay in `notes.md` until they are decided here.
   the user when it is unsure.** Session 3, [sessions/03-perception-world-model.md](sessions/03-perception-world-model.md).
 - **An action succeeds only with the server's word** (level 2 for world changes, level 3 when an
   effect is expected). No confirmation gives `unconfirmed`, then re-read the truth, then retry.
-  Session 4.
+  Session 4. *Refined 2026-10-29 for movement: `unrefuted` (Q7).*
 - **Unverifiable tasks (not computable within the perception policy) are marked `unverifiable`,
   never counted as successes.** Session 4.
 - **Safe take-over exception:** each action declares a cancellation class; in a dangerous moment
@@ -125,7 +169,7 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 - **The LLM is called by events (closed list of causes plus a ~60 s heartbeat), not by a clock.**
   Session 8.
 - **Cost brake: track and warn above a user-set threshold; never cut automatically.** Every call
-  class has a deadline and a fallback (stop safely). Session 8.
+  class has a deadline and a fallback (stop safely). Session 8. *Amended 2026-10-29 by "Cost brake: warn, cap and one hard stop" (Q9).*
 - **Smoothness is measured as a starvation gap** (goal active, no declared wait, no packets), not
   as the longest gap without input. Amends measure 3 of the 2026-10-23 success measures.
   Session 8, [sessions/08-jev-llm-brain.md](sessions/08-jev-llm-brain.md).
@@ -212,7 +256,7 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 - **Proxy: a separate process that forwards bytes untouched and decodes a copy.** The forwarding
   path never encodes packets, so read-only holds structurally. A decoder that loses sync marks
   perception invalid and Praxion stops safely; the game is unaffected. Rejected: terminate and
-  re-encode both connections (a codec bug could corrupt the game). Session 2.2.
+  re-encode both connections (a codec bug could corrupt the game). Session 2.2. *Clarified 2026-10-29 (Q3): the forwarder process has no decoder; it tees the copy to the body, which decodes.*
 - **Game data comes from the Mojang data generator reports** (blocks, packets, registries).
   `minecraft-data` is the backup only. Session 2.2.
 
@@ -258,7 +302,7 @@ Proposals and ideas stay in `notes.md` until they are decided here.
   Session 1.3.
 - **Java Edition, on Windows.** The demo targets the newest stable release; broad version
   support comes later. Vanilla first; block, item and recipe knowledge comes from data, not
-  code. Version-specific code must stay in one layer so later versions are added, not patched
+  code. *The "newest stable" rule is replaced for now by the 26.3 pin (2026-10-29, Q4).* Version-specific code must stay in one layer so later versions are added, not patched
   in. Rejected: Bedrock (no client mods, blocks player-bound mode). Session 1.1,
   [sessions/01-product-scope.md](sessions/01-product-scope.md).
 - **The decision layer uses TypeSafe Jev, with LLMs behind it.** How Jev and the LLMs split the
