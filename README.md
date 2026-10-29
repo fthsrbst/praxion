@@ -12,8 +12,9 @@ in a growing library. The more it plays, the less it needs to think from scratch
 ## Status
 
 Design phase. No code has been committed yet. Research is in [`docs/research/`](docs/research/);
-agreed decisions are in [`docs/decisions.md`](docs/decisions.md).
+agreed decisions are in [`docs/decisions.md`](docs/decisions.md); the architecture draft (awaiting review)
+is in [`docs/architecture.md`](docs/architecture.md).
 
 ## License
 
-To be decided.
+Apache-2.0 for the open core (see `LICENSE`). Commercial parts, if any, will be closed; which parts is not decided yet.
