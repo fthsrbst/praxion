@@ -107,17 +107,24 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   embedding model; ask the user what Mnema is, to confirm the separation.
 - Pointers: `docs/research/memory-review/critic-simplicity.md` §7, `docs/research/embeddings.md`
 
-### Architecture review round
-- Source: Claude Sonnet 5.5, 2026-10-29
-- State: `docs/architecture.md` (draft 1) written from the decisions; it has not been reviewed.
-- Remaining: review round by a model other than the writer (AGENTS.md); fix findings or log them
-  here; the user confirms the [P] and [O] items. Then the 2.7 experiments and the first code. Also
-  decide whether `spikes/` may be committed now that the licence is chosen.
-- Pointers: `docs/architecture.md` §11 (risks and open points)
+### Architecture review round 1: user decisions and draft 2
+- Source: Claude Opus 5.5, 2026-10-29
+- State: Review round 1 done (18 reviews, 45 clusters, 88 verdicts, Opus synthesis, Sonnet critic);
+  see `docs/reviews/2026-10-29-arch-r1/README.md`. 8 blockers, 12 majors. The user answered
+  Q1-Q11, the actuator seam, world backup and raw-data access; all recorded in `docs/decisions.md`.
+- Remaining: (1) still open from the critic: Mojang EULA and Usage Guidelines versus the commercial
+  parts; dependency and data-report licences in the version manifest; (2) the review's remaining
+  conflict-free fixes (port spec v0, three-valued guards, primitive contract, receipts, planner
+  contract, traceability table) are recommendations to explain to the user while writing draft 2; (3) write `architecture.md` draft 2 with the critic corrections in the
+  README; (4) review draft 2 with a model other than its writer; (5) log the minor IDs listed in
+  `synthesis.md` "Minor and dropped". Also decide whether `spikes/` may be committed.
+- Pointers: `docs/reviews/2026-10-29-arch-r1/synthesis.md`, `critic.md`, `README.md`
 
 ### Run the session 2.7 experiments
 - Source: Claude Sonnet 5.5, 2026-10-29
-- State: Experiments E1-E14 and thresholds agreed; no code written yet.
+- State: Experiments E1-E14 and thresholds agreed; no code written yet. Blocked: review round 1
+  found that 26.3 uses SDL, not GLFW; the user accepted the amended plan (round 0, E15, E16, Q11),
+  see `docs/decisions.md`. Start with round 0 after architecture draft 2 is reviewed.
 - Remaining: write throwaway spikes in untracked `spikes/` (the free OpenCode worker may draft
   them; another model reviews), run round 1 on macOS, rounds 2-4 at the physical Windows PC,
   write results into `docs/sessions/02-body-connection.md`. Stop and ask the user on any miss.

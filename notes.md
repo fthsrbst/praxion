@@ -6,6 +6,20 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-10-29 · Claude Opus 5.5 · Lessons from the first multi-model review round
+
+- OpenCode workers on free models ignore "read-only" in the brief: they wrote scratch files into
+  the repo root and one used Playwright MCP. Inspect `git status` after every batch. Proposal:
+  a read-only OpenCode agent (`.opencode/agents/reviewer.md` with edit denied) for review work.
+- OpenCode `websearch` failed in every run (19 errors); `webfetch` worked. Web research belongs to
+  the Claude subagents until this is fixed.
+- Free verifiers (Iceman, Beam) refuted 0 of 45 clusters and rated most as "partly". They are good
+  for severity down-ranking and for finding where the docs already answer a finding, but they are
+  no filter. Keep the Opus adjudicator.
+- Beam Free merged 204 findings with full ID coverage; Iceman missed 65. Prefer Beam for long-context merges.
+
+---
+
 ## 2026-10-29 · User, answered by Claude Sonnet 5.5 · Reinforcement learning for some skills (idea, not a decision)
 
 The user asked whether to train an RL model for some jobs. Not part of the first demo (session 8).

@@ -11,9 +11,9 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
 - Phase 0, research and design. All 15 discussion sessions are done; their decisions are in
   `docs/decisions.md`. Research lives in `docs/research/`.
 - Discussion sessions (`docs/discussion-plan.md`): all done. Session 2's experiments (2.7) have not run
-  yet. Next: an architecture draft that consolidates the decisions, a review round by a model
-  other than the writer, the 2.7 experiments (throwaway code in untracked `spikes/`), then the
-  first product code. Agreed decisions go to `docs/decisions.md`; per-session notes go to
+  yet. `docs/architecture.md` draft 1 exists; review round 1 is done (`docs/reviews/2026-10-29-arch-r1/`).
+  Next: the user decides the review questions, architecture draft 2 and its review, the 2.7
+  experiments (throwaway code in untracked `spikes/`), then the first product code. Agreed decisions go to `docs/decisions.md`; per-session notes go to
   `docs/sessions/NN-topic.md`.
 - Do not scaffold, add dependencies or write product code until the architecture draft is
   reviewed and the 2.7 experiments have passed. Throwaway experiment code in `spikes/` is allowed.

@@ -5,6 +5,68 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-10-29
 
+- **Version pinned: Minecraft Java 26.3 (protocol 777).** Client, server jar, Azalea commit and
+  Rust toolchain are pinned together in one manifest until Demo-1 passes; every upgrade needs the
+  user's approval. Reason: Mojang ships about quarterly and Azalea lags (its README names 26.2).
+  Replaces the rolling "newest stable at coding start" rule of 1.1 for now. Review round 1, Q4,
+  [reviews/2026-10-29-arch-r1/synthesis.md](reviews/2026-10-29-arch-r1/synthesis.md) R1-B2.
+- **Hard requirement: no body or decoder crash may drop the user's game connection.** The
+  forwarder is its own minimal process (forwards bytes, no decoder, no game logic) and tees a copy
+  to the body; decoder and world model live in the body. The "isolated thread inside the body"
+  fallback is ruled out; on a latency miss the decoder may move into the forwarder, never the
+  forwarder into the body. Restores D1. Review round 1, Q3, R1-B3.
+- **The 2.7 experiment plan is amended** as listed in synthesis.md "Changes to the 2.7 experiment
+  plan": a desk round 0 (version manifest, read the 26.3 SDL input path, stock-client capture
+  corpus); E1/E3 latency judged on Windows under co-load with p99 and p99.9 (macOS judges
+  correctness only); E5 drops the removed raw-input axis and checks injected relative moves under
+  SDL3; new E15 (integrated tick) and E16 (protocol-body fidelity); a missed threshold still stops
+  the work, and the report carries a fallback shortlist for the user. Reason: 26.3 replaced GLFW
+  with SDL, and nothing measured the whole loop. Review round 1, Q11.
+- **During play the PC is operated only physically.** Remote-control tools (Parsec, AnyDesk,
+  Remote Desktop) are unsupported while Praxion plays. Reason: take-over detection stays simple,
+  and Remote Desktop already blocks raw relative input (session 2). Review round 1, Q8.
+- **Actuator seam: a per-tick `ControlFrame`** (held controls, look delta or target, clicks and
+  slot actions). Reflexes, planner, primitives and movement style produce only frames; SendInput,
+  the headless packet client and a possible future client mod are interchangeable implementations
+  below it. Cancellation classes stay on actions (session 4); the frame carries only held state.
+  Rules out primitive-level abstraction (every primitive per body). Review round 1, R1-B7.
+- **Command gesture.** While Praxion plays, a physical press of the bound chat or command key
+  releases all keys except danger-held ones (session 4) and waits while the chat screen is open;
+  if the next chat the client sends is a prefixed command, Praxion takes it and keeps control;
+  anything else is a normal take-over. Refines the 2.4 rule "any key takes control back".
+  Tested in E12. Review round 1, Q1, R1-B5.
+- **Clicking into the interface's command box counts as a take-over.** The indicator never takes
+  focus; the command box is used while Praxion is not playing. Review round 1, Q2.
+- **Safety does not depend on the brain or the network.** (a) The body parses a fixed list of
+  control verbs (stop, cancel, status, carry on, hand-over) with a local grammar before any brain
+  call; Jev maps only other commands. (b) The indicator is fed by the body. (c) On brain silence
+  the body finishes the current primitive, runs a hand-written shelter or retreat skill, then
+  holds with reflexes on. (c) amends 2.5 ("stand still with basic survival reactions").
+  Review round 1, Q5, R1-B6.
+- **Dedicated-server trade-offs accepted.** No Esc pause; while Praxion is stopped, waiting for
+  "carry on" or unfocused, the world keeps ticking and the character may be defenceless (covered
+  by "death is acceptable"). Added: a pause heuristic (no client movement packets for N ms while
+  active means a safe stop; never inject into a menu) and a server setup checklist. Review round 1, Q6, R1-M6.
+- **Movement and looking are verified as `unrefuted`:** no server correction within N ticks.
+  World changes still need the server's word (level 2) and expected effects level 3. Refines
+  "an action succeeds only with the server's word" for client-authoritative movement. Review round 1, Q7, R1-M1.
+- **Cost brake: warn, cap and one hard stop.** Warn above the user's threshold as before; add at
+  most 3 repair attempts per goal, a global LLM call-rate breaker that degrades to code-only after
+  repeated failures, and one high hard stop set by the user that pauses autonomous LLM work while
+  reflexes and the core keep running. Amends "never cut automatically" (session 8). Review round 1, Q9, R1-M9.
+- **Skill admission evidence comes from the headless protocol body**, after it passes the E16
+  fidelity check. The k=3 practice run is a smoke test: 3/3 on the skill's own fixture, no
+  regression on pooled fixtures, at least one success on a held-out fixture from a different seed
+  or biome, no world-specific literals. Statistical confidence comes from probation on the test
+  server (Wilson bound, at least 8 uses). Reason: SendInput needs the foreground, and 3/3 has a 95%
+  Wilson lower bound of only 0.44. Review round 1, Q10, R1-M8.
+- **World backup before every autonomous session.** Zip the world folder before each session,
+  always shut the server down cleanly (save flush), keep the last N backups. Review round 1, critic 5.
+- **Raw world data is readable only by the perception module, enforced by tooling.** The body
+  stores everything the decoder receives (a chunk arrives once, so filtering at ingest would lose
+  blocks exposed later); visibility is enforced at a deny-by-default query API. A module boundary
+  and a lint rule stop any other module from reading the raw store. Remembered facts live in a
+  separate memory with age and source. Rules out filtering at ingest. Review round 1, R1-M3, critic 4.
 - **Languages: Python plus a Rust core.** Python for the brain (LLM and Jev calls, skills); Rust
   for the wire and input path. Rust chosen over C++ (Azalea decoder; user confirmed). Decoder
   library Azalea, to be verified in experiment 2.7. Exact boundary decided in 2.5.

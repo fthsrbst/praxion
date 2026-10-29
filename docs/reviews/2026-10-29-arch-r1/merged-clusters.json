@@ -1,0 +1,2245 @@
+{
+ "clusters": [
+  {
+   "cid": "C01",
+   "title": "Forwarder must be a separate OS process, not a thread",
+   "severity": "blocker",
+   "area": "architecture",
+   "where": "architecture.md \u00a72, \u00a711 #3; sessions/02 \u00a72.2 D1; decisions.md",
+   "claim": "The draft reopens the decided requirement that the proxy is its own OS process by marking it [O] whether the forwarder is its own process or an isolated thread inside the body. A thread is not isolated from a process abort: the body holds ~14 components including a planner and an interpreter running LLM-authored rule lists, so a panic there would drop the user's live TCP connection. The isolated-thread fallback contradicts D1's reason that the game stays unaffected when the decoder breaks.",
+   "recommendation": "Keep the forwarder as its own minimal process with no decoder and no game logic; tee bytes over a loopback socket or shared-memory ring to the body; measure tee cost in E1/E3; if budget fails, move the decoder into the forwarder, not the forwarder into the body; remove the [O].",
+   "sources": [
+    "HOL-1",
+    "CONS-1",
+    "BC-5",
+    "TIME-COST-004"
+   ],
+   "reviewer_count": 4,
+   "disagreements": ""
+  },
+  {
+   "cid": "C02",
+   "title": "No defined actuator contract (ControlFrame) inside the body",
+   "severity": "blocker",
+   "area": "input",
+   "where": "architecture.md \u00a72, \u00a74 Hands; sessions/14 level 2; decisions 1.2",
+   "claim": "The body has no defined seam for its largest unknown: synthetic input at endgame timing. The client-mod fallback, the level-2 protocol test body and the practice room all need a different actuator, and the protocol body also needs a different perception source, but Hands is a leaf behind planner, movement and primitives. The brain-body port is the wrong seam for swaps that happen inside the body.",
+   "recommendation": "Define an actuator contract now: per-tick ControlFrame {held controls, look delta/target, clicks, sneak/sprint mode} with three implementations (SendInput, headless packet client, later mod). Everything above it produces only ControlFrames; take-over and cancellation classes act on ControlFrames.",
+   "sources": [
+    "HOL-2",
+    "COMP-1"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C03",
+   "title": "Skill admission cannot run on the real body; practice-room body differs",
+   "severity": "blocker",
+   "area": "skills",
+   "where": "architecture.md \u00a76, \u00a710 practice room; sessions 11, 14; decisions PC dedicated",
+   "claim": "Skill admission cannot run on the real body while Praxion plays because SendInput goes to whatever window has focus, so the practice room must run on the headless body, which must simulate client physics itself and thus differs from production in movement, timing and menu clicks. The draft also never specifies how a copy of the world is taken from a running server without corrupting it.",
+   "recommendation": "State explicitly that admission evidence comes from the headless body; add a watched probation stage on the real body comparing receipts with the practice-room effect signature; schedule practice rooms only while the user is not playing or on a second machine; specify the world-copy mechanism (last autosave or harness-whitelisted console flush).",
+   "sources": [
+    "HOL-3"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C04",
+   "title": "Decoder strategy: Azalea is an active client, 26.3 on stale branch, nightly Rust",
+   "severity": "blocker",
+   "area": "protocol",
+   "where": "architecture.md \u00a72, \u00a74, \u00a711; sessions/02 \u00a72.2; decisions decoder",
+   "claim": "The design assumes Azalea can serve as the decoder, but Azalea is an active client framework, not a passive bidirectional codec; its 26.3 support sits on a stale branch maintained by one person; it requires nightly Rust and pulls Bevy/tokio; Mojang reports provide packet IDs/registries, not field layouts; and a passive decoder must track the full state machine and handle Known Packs where Registry Data may omit entries.",
+   "recommendation": "Decide the decoder strategy before E2: neutral passive codec or minimal own decoder for the consumed packet subset; pin and vendor the exact Azalea commit if used; bundle local vanilla registries or force full Registry Data; define state tracking and re-decode on Configuration re-entry; keep MCProtocolLib as test oracle not drop-in.",
+   "sources": [
+    "PM-1",
+    "BC-1",
+    "BC-2",
+    "BC-3",
+    "BC-4",
+    "PROTO-2",
+    "PROTO-3",
+    "PROTO-4",
+    "PROTO-6",
+    "SAF-PROXY-3",
+    "PLAN-8"
+   ],
+   "reviewer_count": 5,
+   "disagreements": ""
+  },
+  {
+   "cid": "C05",
+   "title": "Version coupling unmanaged across the stack",
+   "severity": "major",
+   "area": "architecture",
+   "where": "architecture.md \u00a74, \u00a711; decisions 1.1; sessions 01, 02",
+   "claim": "Version coupling is unmanaged: client, server jar, decoder, Mojang data reports, primitive effect tables, guards, fixtures and log schema are all tied to one game version, with no version-pack layer as decision 1.1 requires, and Azalea lags the target (26.2 vs 26.3). The demo pins 26.3 mid-paragraph while decisions.md has no version bullet, and 26.4 snapshots are already shipping.",
+   "recommendation": "Add a version_pack layer (decoder adapter, generated data/effect tables, protocol number); forwarder checks handshake protocol number and refuses on mismatch; pin launcher profile; stamp fixtures/skills/logs with pack id; record a dated version-baseline bullet in decisions.md.",
+   "sources": [
+    "HOL-10",
+    "PM-8",
+    "CONS-4"
+   ],
+   "reviewer_count": 3,
+   "disagreements": ""
+  },
+  {
+   "cid": "C06",
+   "title": "Decode budget and platform/co-load unverified",
+   "severity": "major",
+   "area": "latency",
+   "where": "sessions/02 \u00a72.7 E1, E3, E13; architecture.md \u00a72, \u00a73",
+   "claim": "The 5 ms decode budget and 50 ms loop jitter are unverified on the real target: macOS round-1 numbers do not represent Windows scheduling under game load, and no experiment measures decode under co-load (embedding, test server, OBS). Chunk bursts and world-model update time are not separated from per-packet decode.",
+   "recommendation": "Treat macOS round 1 as decode-correctness only; rerun E1/E3 on the Windows PC under worst-case co-load; report p99.9; use TCP_NODELAY, bounded coalescing queues, high-priority forwarder; define per-packet-class budgets and burst policy.",
+   "sources": [
+    "PROTO-5",
+    "PROTO-9",
+    "HOL-9"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C07",
+   "title": "Synthetic input path unverified (SDL3, SendInput, raw input, tick timing)",
+   "severity": "blocker",
+   "area": "input",
+   "where": "sessions/02 \u00a72.3, \u00a72.7 E5-E12; architecture.md \u00a711 #1",
+   "claim": "The central bet\u2014synthetic OS input reaching Minecraft's raw-input path with endgame precision\u2014is entirely untested, and 26.3 uses SDL3 not GLFW, so the verified input analysis (WM_INPUT, scan codes, raw input on/off) describes code 26.3 does not run. Relative SendInput, pointer acceleration, tick-synchronous holds and menu clicks all lack verified pass criteria or defined fallbacks.",
+   "recommendation": "Redo input analysis against SDL3 and 26.3 MouseHandler before E5-E11; run E5-E12 on the physical Windows PC as hard gates with pre-specified fallbacks (require Raw Input on or switch to client mod); add acceleration matrix, tick-synchronous scheduler, and pause heuristic.",
+   "sources": [
+    "PROTO-1",
+    "BC-7",
+    "WIN-6",
+    "WIN-7",
+    "PM-2",
+    "SAF-INPUT-2"
+   ],
+   "reviewer_count": 5,
+   "disagreements": ""
+  },
+  {
+   "cid": "C08",
+   "title": "Take-over sensor, watchdog and danger-held keys underspecified",
+   "severity": "major",
+   "area": "takeover",
+   "where": "sessions 02 \u00a72.4; architecture.md \u00a73, \u00a74, \u00a77",
+   "claim": "Take-over depends on a sensor that can fail silently and be defeated by driver-level injectors; low-level hooks are silently removed on timeout; the watchdog design does not react to crashes promptly and does not track mouse buttons; and ownership is all-or-nothing, so a reflex can destroy danger-held keys (e.g. sneak on a bridge edge), while take-over releasing keys on user touch can itself walk the character off.",
+   "recommendation": "Tag injected events with a per-run nonce in dwExtraInfo and treat anything else as the user; add a liveness probe; make watchdog wait on the body process handle and replay a shared held-key table including mouse buttons; give the input layer a per-key lease table with danger_held bits that no tier may revoke; release danger-held keys last.",
+   "sources": [
+    "WIN-1",
+    "WIN-2",
+    "WIN-5",
+    "BC-8",
+    "ALG-9",
+    "SAF-TAKEOVER-1"
+   ],
+   "reviewer_count": 4,
+   "disagreements": ""
+  },
+  {
+   "cid": "C09",
+   "title": "UIPI silent SendInput failure",
+   "severity": "major",
+   "area": "input",
+   "where": "sessions 02 \u00a72.3 H3; architecture.md \u00a74, \u00a77",
+   "claim": "A start-time integrity check is insufficient: SendInput gives no error under UIPI blocking, and an elevated app can take the foreground mid-session, so evidence level 0 ('sent') can be false without detection. UIAccess is not a viable workaround (needs Authenticode + install).",
+   "recommendation": "Before hand-over and continuously, check the foreground window's process integrity level and confirm it is the game; treat 'no pose/echo within N ticks' as input_blocked (release keys, stop, tell user); do not use UIAccess.",
+   "sources": [
+    "WIN-3"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C10",
+   "title": "Dedicated server is not singleplayer",
+   "severity": "major",
+   "area": "protocol",
+   "where": "sessions 01, 02; decisions 1.5",
+   "claim": "An external local server is not transparently singleplayer: it lacks Esc-pause, Open-to-LAN, world list and character migration; whitelist defaults to true in 26.3; offline-mode UUIDs affect inventory/skin; and the client still pauses ~500 ms on focus loss while the server keeps ticking (desync risk).",
+   "recommendation": "Document dedicated-server differences as a first-class constraint; manage the server process (EULA, properties, bind 127.0.0.1, save copy/import, whitelist=false, enforce-secure-profile=false, compression -1); add pause-state handling to the action layer; revisit client-mod fallback if pause behavior unworkable.",
+   "sources": [
+    "PROTO-7",
+    "BC-6",
+    "BC-11"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C11",
+   "title": "Hosted outage: no degraded-playing mode; safety-critical verbs route through brain",
+   "severity": "blocker",
+   "area": "brain",
+   "where": "architecture.md \u00a72, \u00a73, \u00a75, \u00a77; sessions 02 \u00a72.5, 08",
+   "claim": "Safety-critical control verbs (stop, cancel, status, carry on, hand-over) are mapped by Jev, so they do nothing with the network or brain down, and the indicator hangs off the brain; outage behaviour is internally contradictory (silent brain stops safely vs 3-5 s fallback goal vs <1 s starvation) with no defined safe state. Stopping in the open at night in survival gets you killed. Body-brain remote auth and key boundary also unspecified.",
+   "recommendation": "Parse a fixed list of control verbs with a local grammar in the body; connect the indicator to the body (body serves it or subscribes to both ports); define a degraded-but-playing mode running the last stamped directive plus a precomputed local shelter/retreat skill; define starvation excluding keepalive/movement-neutral packets; state per-call-class deadline table with fallbacks; require mutual TLS or pre-shared key for remote brain, never send API keys to body.",
+   "sources": [
+    "HOL-4",
+    "HOST-3",
+    "PM-3",
+    "HOST-7",
+    "TIME-COST-002",
+    "TIME-COST-003",
+    "SAF-BRAINSTOP-9",
+    "SAF-SECRETS-6"
+   ],
+   "reviewer_count": 5,
+   "disagreements": ""
+  },
+  {
+   "cid": "C12",
+   "title": "LLM tier labelled 'seconds' but reasoning models take 10-100 s",
+   "severity": "major",
+   "area": "latency",
+   "where": "architecture.md \u00a73; sessions 08",
+   "claim": "The architecture labels the LLM tier 'seconds', but reasoning models take 10-100 s to first answer token, making the plan-early rule fire almost always. Role latency budgets, thinking/effort as part of role, and a cap on plan-early lead time are unspecified. Jev latency envelope and billing/cancellation behaviour unmeasured and unguarded by hard enforcement.",
+   "recommendation": "Pin per-role latency budgets (non-reasoning/low-effort for chat and heartbeat, bounded thinking for planner, large model only for skill writing); make thinking budget and effort explicit in role definition; cap plan-early lead time (e.g. 60 s); treat Jev as admissible only if measured p99 < deadline - margin with per-decision deadline computed at runtime; enforce hosted calls forbidden on <1 s paths in code not just policy.",
+   "sources": [
+    "HOST-1",
+    "TIME-COST-001"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C13",
+   "title": "Cost runaway risk: warn-only brake plus event-driven calls",
+   "severity": "major",
+   "area": "cost",
+   "where": "sessions 08, 15; decisions cost brake",
+   "claim": "'Warn, never cut' has no ceiling on a runaway autonomous loop (skill fail -> LLM rewrite -> fail again), and contradicts 'empty credits make the body stop safely'; rate limits are only per-cause. Overnight thrash on expensive models can reach ~$125/h with no automatic stop.",
+   "recommendation": "Keep warn as first stage; add a rate circuit breaker (global LLM calls/min, consecutive-failure breaker degrading to cheaper model then code-only mode); add a very high user-set hard stop with loud announcement; set provider-side spend limit; log dollars/calls per rung; limit repair attempts per goal (e.g. 3).",
+   "sources": [
+    "HOST-2",
+    "PM-10",
+    "HOST-10"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C14",
+   "title": "Jev unproven value plus single-vendor no-SLA risk",
+   "severity": "major",
+   "area": "brain",
+   "where": "research/decision-models; sessions 08; architecture.md \u00a711 #5",
+   "claim": "Jev's cost is negligible, so only latency and calibration can justify it, but its vendor is early-access with no SLA and 30-60 day deprecation; the case for Jev vs rules + cheap LLM is weaker than docs imply, and no falsifiable bar is defined. Jev is wired in by measurement but calibration unknown; enabling it without calibration could cause wrong decisions and more LLM calls.",
+   "recommendation": "Record that Jev's role depends on latency gap, calibration value and single-vendor no-SLA risk; make /v1/systemone a first-class port with a built-in LLM structured-choice implementation; pin jev-1.13/1.14; define entry bar 'Jev proved better than cheap LLM on logged decisions'; keep Jev behind a flag in first demo; don't enable until calibration curves and look-alike audit pass; define Jev success as measurable win over rules+LLM on specific decision classes with held-out scenarios.",
+   "sources": [
+    "HOST-4",
+    "HOST-5",
+    "SC-4",
+    "TIME-COST-007",
+    "TESTING-6"
+   ],
+   "reviewer_count": 4,
+   "disagreements": ""
+  },
+  {
+   "cid": "C15",
+   "title": "Heartbeat 'did anything change' unspecified",
+   "severity": "major",
+   "area": "brain",
+   "where": "architecture.md \u00a75 brain loop",
+   "claim": "The heartbeat 'first asks did anything change' without saying who answers; if a model answers it is a call class with cost and failure mode. A code-level diff over briefing facts is needed.",
+   "recommendation": "Make the change check code: a hash/diff over briefing facts; wake the model only on nonzero diff; write as a rule in the decision.",
+   "sources": [
+    "HOST-6"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C16",
+   "title": "Decision epochs lack state-hash binding and hysteresis",
+   "severity": "major",
+   "area": "brain",
+   "where": "architecture.md \u00a73, \u00a75; research survey",
+   "claim": "souta-lab's measured failure was 1,215 Jev calls/hour for one unchanged situation; Praxion's event list lacks a closed epoch-cause set, state-hash binding and hysteresis margin for replacing a committed action.",
+   "recommendation": "Adopt souta-lab's epoch causes (candidate set changed, lease ended, health/food/air band crossed, hostile in range, no progress) with margin P(new)-P(current)>threshold; bind answers to state hash and drop stale ones.",
+   "sources": [
+    "COMP-5"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C17",
+   "title": "Perception algorithm unspecified; 64-block omni not computable",
+   "severity": "blocker",
+   "area": "perception",
+   "where": "architecture.md \u00a74, \u00a75; sessions 03; decisions",
+   "claim": "The world model's 'line of sight in every direction within ~64 blocks' is neither given an algorithm nor a representation and is not computable inside the stated budget (1.1M cells, ~10^8 block reads). Push invalidation writing millions of denials per second, transparent blocks, entity metadata visibility, and entity tracking range are all unspecified; the fair-play handicap may make endgame infeasible.",
+   "recommendation": "Store what the decoder receives; make visibility a query-time filter with bounded DDA per candidate, cached per (target, eye-chunk), explicit ray budget; log access attempts not denied facts; decide transparent-material table and entity-tracking bound; run early ablation with/without hidden-data access.",
+   "sources": [
+    "ALG-4",
+    "PM-5",
+    "SAF-PERCEPT-8"
+   ],
+   "reviewer_count": 3,
+   "disagreements": ""
+  },
+  {
+   "cid": "C18",
+   "title": "'unknown' value never reaches the rule interpreter",
+   "severity": "blocker",
+   "area": "perception",
+   "where": "architecture.md \u00a75, \u00a76; sessions 03, 05",
+   "claim": "The `unknown` value never reaches the rule interpreter: guards are boolean, so unknown degrades to false, contradicting the perception decision that out-of-sight data must not read as 'absent'. The TR format also has no specified condition language, Kleene logic, or handling of unknown guards; format deferred to first code leaves the hardest part undefined.",
+   "recommendation": "Type guards as {true,false,unknown} with Kleene AND/OR; declare predicates with observability class and cost; add probe(P) as first-class primitive/action; specify minimal condition language, three-valued logic, rule 'unknown in guard -> rule not eligible and observe(x) sub-goal offered'; specify guard compiler location.",
+   "sources": [
+    "ALG-1",
+    "HOL-5",
+    "MEM-008"
+   ],
+   "reviewer_count": 3,
+   "disagreements": ""
+  },
+  {
+   "cid": "C19",
+   "title": "Persistent state has multiple writers; no single source of truth/invalidation",
+   "severity": "blocker",
+   "area": "memory",
+   "where": "architecture.md \u00a74, \u00a78; sessions 03, 10, 12",
+   "claim": "Persistent state has at least six writers across two processes with no ownership or crash-consistency model; three world-knowledge stores have no single invalidation path, so the planner can plan through a wall built while a chunk was unloaded. Remembered facts originate in the body but memory is placed in Python. Body vs brain memory ownership undefined; container refresh and object identity unspecified; briefing contract underspecified.",
+   "recommendation": "Make the body's append-only event log the single source of truth; memory, ledger progress, skill stats and reports are rebuildable projections; brain writes only proposals; move learned skills to per-installation data dir; decide ownership boundary (body owns unloaded-chunk cache + provenance ledger; brain owns places/containers/events/lessons as JSONL); one authority in body, brain memory projection over append-only journal; invalidate on chunk load; store remembered chunks as paletted snapshots with LRU/budget; define clock for age; make container refresh explicit (LIVE only when window open, else SEEN with age); block identity inference across break+place.",
+   "sources": [
+    "ALG-12",
+    "HOL-7",
+    "HOL-8",
+    "MEM-001",
+    "MEM-002",
+    "MEM-003",
+    "MEM-004",
+    "MEM-006",
+    "MEM-009"
+   ],
+   "reviewer_count": 3,
+   "disagreements": ""
+  },
+  {
+   "cid": "C20",
+   "title": "No auditory perception channel (vision-only)",
+   "severity": "major",
+   "area": "perception",
+   "where": "architecture.md \u00a75; systems-review",
+   "claim": "Perception is vision-only (line of sight), so creeper hisses and skeleton sounds cannot trigger reflexes until visual contact, likely too late; Craftonomous's fair-play profile includes a 16-block hearing channel. Sound-packet hearing was also deferred as premature.",
+   "recommendation": "Add hearing as a perception channel with range and provenance, or explicitly justify vision-only and widen reflex trigger distances accordingly.",
+   "sources": [
+    "COMP-6"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C21",
+   "title": "Spatial cache / chunk-level memory missing",
+   "severity": "major",
+   "area": "memory",
+   "where": "architecture.md \u00a78; systems-review",
+   "claim": "Baritone's 2-bit chunk cache and altoclef's container cache enable long-distance planning through unloaded chunks and 'where was that chest' queries; Praxion's first memory (JSONL places/containers in RAM) is unlikely to scale to stronghold/chest recall, and no spatial cache stage is defined. Chunk cache snapshot on unload unspecified.",
+   "recommendation": "Add a chunk-level spatial cache (special-block positions and opened containers) as an explicit memory stage triggered by long-horizon goals; snapshot on Unload Chunk with allowlist (named places, containers, ores), not full chunk.",
+   "sources": [
+    "COMP-7",
+    "MEM-007"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C22",
+   "title": "Action receipts cannot attribute or verify OS-input actions",
+   "severity": "blocker",
+   "area": "input",
+   "where": "architecture.md \u00a75; sessions 04, 02",
+   "claim": "'Success needs the server's word' makes every movement task unverifiable because position is client-authoritative (server only doesn't complain), and SendInput lacks request ids so the proxy cannot attribute injected input to server acks. A global ladder also marks durative digs successful before the block breaks (block_changed_ack arrives at start). Block-change attribution via sequence numbers fragile; admission must use same receipt ladder.",
+   "recommendation": "Replace single global ladder with per-action evidence contract generated as data (dig->block air, place->state, pickup->inventory delta, move->unrefuted N ticks no correction, slot click->client packet+no correction); add receipt epoch (receipt tick > intention start) to avoid stale acks; define unrefuted as first-class consumable status; make input-to-packet attribution an explicit E2.7 experiment and body invariant; attribute effects using action receipts as primary mechanism; admission counts only world-changing steps that reached required receipt level.",
+   "sources": [
+    "ALG-3",
+    "COMP-1",
+    "SKILL-5",
+    "TESTING-4"
+   ],
+   "reviewer_count": 4,
+   "disagreements": ""
+  },
+  {
+   "cid": "C23",
+   "title": "Skill admission statistics, throughput and overfitting",
+   "severity": "blocker",
+   "area": "skills",
+   "where": "sessions 05, 11; architecture.md \u00a76, \u00a79",
+   "claim": "Admission and rollback statistics are underpowered and inconsistent: 3-run McNemar can never reject at conventional levels, 3 successes is a weak certificate, most skills used once so n>=8 rarely reached, and candidate tested on its triggering fixture risks overfitting. Admission also lacks Craftonomous's Wilson reliability, per-context stats and failure-cause separation; throughput and repair loop are unspecified. k=3 admission runs statistically insufficient for stochastic Minecraft tasks.",
+   "recommendation": "Use one statistic everywhere (sequential test or Wilson LCB with n>=12 and margin over baseline under pre-registered FWER); add typed failure kinds, per-context stats, retirement as flag; separate failure causes in receipts; ban world-specific literals and require held-out fixtures from different seed/biome; specify writer repair loop with bounded revisions and credit assignment; estimate candidates vs admissions per hour and cap writer output; add probation on real body; do power analysis per task class and require confidence intervals; treat n=3 as smoke test only.",
+   "sources": [
+    "SKL-1",
+    "SKILL-1",
+    "SKL-2",
+    "ALG-13",
+    "COMP-10",
+    "SKL-9",
+    "SKL-10",
+    "PM-7",
+    "SC-2",
+    "TIME-COST-005",
+    "SKILL-4",
+    "SKILL-6",
+    "SKILL-7",
+    "TESTING-5",
+    "SAF-SKILLWRITER-7"
+   ],
+   "reviewer_count": 9,
+   "disagreements": ""
+  },
+  {
+   "cid": "C24",
+   "title": "No failure-conditioned repair loop for skills",
+   "severity": "major",
+   "area": "skills",
+   "where": "sessions 11",
+   "claim": "The design specifies a gate but no repair loop, yet feedback-driven repair is what makes skill learning work (Voyager self-verification ablation -73% items; PSN credit assignment/maturity gating). Any edit returns a skill to candidate but failures are not turned into edits.",
+   "recommendation": "Specify the writer loop: typed failure kind plus trace to writer, bounded revisions, credit assignment down the skill-call chain; add maturity gating so active skills are not rewritten after each failure; count revision rounds in the equal-compute learning test budget.",
+   "sources": [
+    "SKL-6"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C25",
+   "title": "LLM cannot patch primitive quirks",
+   "severity": "major",
+   "area": "skills",
+   "where": "sessions 05, 11; research",
+   "claim": "The restriction that LLM-written skills only combine existing primitives may cut off the most reused learning from the one full-game run (primitive quirk workarounds), which Praxion's LLM cannot patch; primitive faults would plateau skill learning at human Rust speed.",
+   "recommendation": "Measure share of practice-room failures caused by composition vs primitives; give the writer a structured primitive defect report output (trace + suspected primitive) queued for human review and the lessons store; if primitive faults dominate, treat as a plateau risk.",
+   "sources": [
+    "SKL-3"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C26",
+   "title": "Guard compiler derives only effects; preconditions unspecified",
+   "severity": "major",
+   "area": "skills",
+   "where": "sessions 05, 11; architecture.md \u00a76 risk #7",
+   "claim": "Compiler-derived guards cover only what game data can express (inventory arithmetic); spatial/contextual preconditions (reach, free space, support, light, line of sight) are not in data, so guards are incomplete where Minecraft skills fail. Effects are conditional/probabilistic and the LLM-writes-rules vs writes-steps artifacts are inconsistent. Primitive effect declarations have no enforcement mechanism.",
+   "recommendation": "Make each primitive carry a hand-declared spatial/contextual precondition block separate from data-derived effects; run a conformance suite comparing declared effect/precondition with measured proxy delta; specify effect record as versioned data artifact (produces, consumes, requires, changes, reveals, duration, tool_tier); add order-derivation step and full regression+deadlock check to admission; state graded artifact is step program compiled to rule list; make primitive effect declarations a machine-checkable schema with unit tests asserting declared effects match observed deltas in the fake world; linter fails build if effect set missing/ambiguous.",
+   "sources": [
+    "SKL-4",
+    "ALG-10",
+    "SKILL-2"
+   ],
+   "reviewer_count": 3,
+   "disagreements": ""
+  },
+  {
+   "cid": "C27",
+   "title": "Teleo-reactive interpreter semantics undefined",
+   "severity": "major",
+   "area": "skills",
+   "where": "sessions 05, 07; research survey 03",
+   "claim": "The decided admission checks cover only half of Nilsson's well-formedness (regression but not completeness), and interpreter semantics for discrete, laggy actions are unspecified: no until, no action diffing, no halt cleanup, no semantics for rule switches mid-primitive, no 'no rule true' outcome, although the arbiter's margin rule depends on until.",
+   "recommendation": "Add a completeness check or define fallback (no rule true -> failed(no_rule) wake brain); specify in-flight discrete action blocking until receipt/timeout; specify minimum dwell/hysteresis on flapping spatial conditions; write interpreter semantics as formal spec with truth table and state diagram; add until/while commitment, action diffing keyed on (primitive,args), on_halt hook, explicit no-rule outcome.",
+   "sources": [
+    "SKL-5",
+    "ALG-2"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C28",
+   "title": "Skill runtime selection and postcondition verification gaps",
+   "severity": "major",
+   "area": "skills",
+   "where": "architecture.md \u00a76, \u00a78; systems-review",
+   "claim": "No runtime skill selection/retrieval strategy is specified (Voyager's description-embedding top-5 is the only precedent and is weak), and no system lets a skill declare its expected effect separately from code for independent verification; Praxion derives guards from primitive effects but never checks the skill's actual world delta against a declared postcondition.",
+   "recommendation": "Add a skill registry with preconditions, success rate (Wilson lower bound), context-keyed stats; retrieval by precondition match + reliability not embedding alone; extend skill schema with optional declared postcondition (inventory delta, block state) checked by receipts in practice room; admission requires postcondition verification.",
+   "sources": [
+    "COMP-2",
+    "COMP-3"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C29",
+   "title": "Curriculum can propose unverifiable goals; no validator",
+   "severity": "blocker",
+   "area": "plan",
+   "where": "architecture.md \u00a76, \u00a710; sessions 10; decisions 2026-10-29",
+   "claim": "Praxion adopts a free Voyager-style curriculum but only says unverifiable tasks are never counted as success; it does not specify how the curriculum avoids proposing goals whose completion cannot be computed within the perception policy, risking unverifiable goals and wandering. Big risky steps proceed after ~30 s unless user says stop. Free curriculum lacks a verifiability filter and a rung-progression learning signal, creating tension with the 'flawless first demo' requirement. Free curriculum/RAG choices multiply first-demo test surface without a demo-scoped off-switch.",
+   "recommendation": "Add a curriculum constraint: every proposed goal must carry a verifiable completion condition computable from Praxion's perception policy; brain validates before sending; specify validator in \u00a710; make window configurable, require first-time confirm per risk category, offer always-ask mode; treat rung advancement as primary learning metric not just number of new skills; add verifiability filter to curriculum (reject or decompose goals not computable within perception policy); track time-to-next-rung per seed; make equal-compute test required before committing to free curriculum long-term; hard-off free curriculum for Demo-1 (ladder-spine goals only).",
+   "sources": [
+    "COMP-4",
+    "PM-6",
+    "SKILL-3",
+    "PLAN-10"
+   ],
+   "reviewer_count": 4,
+   "disagreements": ""
+  },
+  {
+   "cid": "C30",
+   "title": "Planner specification incomplete (move set, costs, time budget, partial results, replanning)",
+   "severity": "major",
+   "area": "plan",
+   "where": "architecture.md \u00a74, \u00a76; sessions 06; research systems-review",
+   "claim": "The planner is specified only as 'A* over known blocks, segmented' with no time budget, partial-result handling, or replanning triggers; 'may dig and bridge at higher cost' mutates the world without receipt accounting; lifting Azalea's A* assumes capabilities it lacks (no place/bridge moves) and instant camera executors that SendInput cannot reproduce; inventory/tool/ruleset absent from planning state; A* over mostly-unknown world has undefined frontier selection, dig-exposure and bridge-support.",
+   "recommendation": "Specify time budget, partial results, replanning triggers (block change near path, chunk load, goal moved, dig error, 3.5 s no progress); require planner mutations through action-verification receipts; scope reuse to A* core+cost constants and write place/bridge/pillar moves yourself; add per-move exec_error calibrated on real body; make camera-then-move an explicit two-phase primitive; planning state includes position, hotbar/inventory summary, best tool per material, ruleset/protected set; define safe_to_expose, probe move, exploration policy; drop parkour from rung 1.",
+   "sources": [
+    "ALG-5",
+    "ALG-6",
+    "ALG-7",
+    "COMP-8"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C31",
+   "title": "Arbiter decision rule not computable (gain/loss units)",
+   "severity": "major",
+   "area": "brain",
+   "where": "architecture.md \u00a74; sessions 07",
+   "claim": "The arbiter's decision rule is not computable: gain, loss_on_interrupt and 'next safe point' have no units, estimators or interface; 'hard threshold promotes to survival' conflates stateful needs with stateless reflexes; the only quantitative cost unit is expected ticks.",
+   "recommendation": "Make utility tick-denominated: gain = expected ticks saved toward active goal; loss_on_interrupt = running primitive's remaining estimated cost plus per-class constant exposed as primitive.interrupt_cost(); safe point = primitive can be cancelled at cost <= declared loss; implement hard threshold as reflex predicate over need state whose action is a maintenance primitive.",
+   "sources": [
+    "ALG-8"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C32",
+   "title": "Wiki RAG adds heavy unverified machinery plus licence conflict",
+   "severity": "blocker",
+   "area": "memory",
+   "where": "architecture.md \u00a74, \u00a78; sessions 12",
+   "claim": "A local Minecraft Wiki index with Qwen3 embeddings and reranker adds a model download, Windows dependency, versioning and an unresolved CC BY-NC-SA licence conflict, while game data already comes from Mojang reports and the LLM has Minecraft knowledge. Licence conflict with open-core model remains open; 'never distributed' necessary but not sufficient; RAG serves LLM only with no enforcement mechanism.",
+   "recommendation": "Drop from first demo; use Mojang data + LLM knowledge; revisit RAG only if measured knowledge gaps appear; verify wiki.vg licence nuances (CC BY-SA 3.0 vs NC) before hard-coding undistributable; treat licence as hard blocker until resolved (options: Mojang data + first-party notes, original content, permissively licensed alternative, or isolated non-open-core component); add build-time checks to prevent committing index; define RAG as separate service only callable by LLM client with purpose: knowledge_question, log every query.",
+   "sources": [
+    "SC-3",
+    "MEM-005",
+    "MEM-010",
+    "TIME-COST-006"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C33",
+   "title": "Interface window undecided plus 'never takes focus' conflicts with text input",
+   "severity": "major",
+   "area": "interface",
+   "where": "architecture.md \u00a72, \u00a74, \u00a77, \u00a79; sessions 02, 09; decisions 2.4",
+   "claim": "The UX-critical surface (reports, command box, live view, memory viewer) is entirely undecided in technology and interaction model, while 'windows never take focus' makes its text input unusable as specified. Requirements are decided but technology open; indicator placement on single-monitor undefined.",
+   "recommendation": "Decide interaction model before code: either in-game chat is sole text input and interface is read-only/overlay, or interface may take focus on explicit user action and release on blur; document which. Define single-monitor indicator fallback (thin non-activating strip or taskbar badge). Split requirements [D] vs technology [O] in the table.",
+   "sources": [
+    "NF-1",
+    "CONS-2",
+    "NF-5"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C34",
+   "title": "Hand-over stalls when keys held",
+   "severity": "major",
+   "area": "interface",
+   "where": "sessions 02 \u00a72.4; decisions",
+   "claim": "Hand-over requires no held keys and waits up to ~2 s then fails, worst exactly when the user wants quick take-over.",
+   "recommendation": "Queue hand-over and start the instant all keys release, with a 'release to hand over' prompt; do not require re-pressing the hotkey.",
+   "sources": [
+    "NF-4"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C35",
+   "title": "After take-over task waits indefinitely for 'carry on'",
+   "severity": "major",
+   "area": "interface",
+   "where": "decisions 2.4; architecture.md \u00a75",
+   "claim": "Any momentary user adjustment forces an explicit 'carry on' command; otherwise Praxion stands idle indefinitely, even for a one-second camera nudge.",
+   "recommendation": "Offer optional auto-resume after configurable idle period (5-10 s) with visible countdown and one-key cancel; keep strict wait-for-command mode for risky contexts.",
+   "sources": [
+    "NF-3"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C36",
+   "title": "Ambiguous/high-risk commands lack pending state, attention and timeout",
+   "severity": "major",
+   "area": "interface",
+   "where": "sessions 09; architecture.md \u00a75",
+   "claim": "For low-risk ambiguous commands Praxion guesses, starts working and asks at the same time, so it can spend minutes on a misinterpreted goal; high-risk 'ask first and wait' has no timeout or escalation; windows never take focus so questions can be missed.",
+   "recommendation": "Add visible pending-question state in indicator with clear cancel/switch control; make side-effecting guesses require one-keystroke confirm when cheaper safe default exists; specify attention mechanism (system notification sound, taskbar flash, 'needs you' badge) and which events use it; add configurable timeout that aborts safely, re-asks later, marks indicator.",
+   "sources": [
+    "NF-2",
+    "NF-6"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C37",
+   "title": "Windows-only level-3 testing and naturalness undefined",
+   "severity": "major",
+   "area": "testing",
+   "where": "sessions 14; sessions 02 \u00a72.7",
+   "claim": "Windows-only, physical-PC level-3 testing cannot run in CI and depends on one person's machine, so real-input bugs are found late at demo time. Naturalness (human movement statistics and blind test) has no defined metrics, baseline or inter-rater method.",
+   "recommendation": "Maximize level-1/2 coverage; record seeds and replays; document repro steps; consider a second cheap Windows box for level-2. Pre-define 2-3 concrete movement distributions (inter-key intervals, camera angular velocity) with tolerances from held-out user recordings; for blind test use proper randomization and 'spot the bot' with controls.",
+   "sources": [
+    "PM-9",
+    "TESTING-7"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C38",
+   "title": "Scope/capacity mismatch; no minimal vertical slice",
+   "severity": "blocker",
+   "area": "plan",
+   "where": "decisions 1.5, 1.6; sessions 01, 10; backlog; architecture.md \u00a710",
+   "claim": "Scope and capacity are mismatched: one person, zero product code, unrun experiments, yet target is whole game to Ender Dragon with a 'flawless' live demo to community and professor audience. First demo over-scoped to whole-game capability target with free curriculum. Plan builds late-needed systems early and early-needed primitives late; no defined smallest vertical slice for 'survive the first night'. Architecture \u00a710 proposes full-repo scaffolding up front, violating build-in-dependency-order rule.",
+   "recommendation": "Re-scope first shippable milestone to 'first night survived on >=18/20 seeds'; move rungs 2-6 to roadmap; set explicit code-start gate; make live demo only hand-over + first night; keep Ender Dragon off live demo; present pre-recorded measured runs labelled. Define Demo-0 (headless, no hands, no LLM: protocol test body + hand-written TR core + fake world + referee survives scripted night on N fresh seeds) then Demo-1 (same core through real client + SendInput); gate first code on Demo-0 only. Start with spikes/ -> harness/ + one body/ crate + hand-written core skills; add brain/, interface/, skills/candidates/, RAG, ledger only when their Demo needs them.",
+   "sources": [
+    "PM-4",
+    "SC-1",
+    "PLAN-4",
+    "PLAN-5",
+    "PLAN-7"
+   ],
+   "reviewer_count": 3,
+   "disagreements": ""
+  },
+  {
+   "cid": "C39",
+   "title": "Missing decided behaviours in architecture (no traceability)",
+   "severity": "major",
+   "area": "architecture",
+   "where": "architecture.md whole; decisions.md; sessions 01-15",
+   "claim": "Several decided behaviours are silently absent from the architecture (user projects first, 30 s big-risk announcement, empty hand-over resume-then-choose, death acceptable, dedicated PC, human reaction limits, reply language/tone, five 1.6 success measures, wrong-click slot number, credential fallback, lesson trigger), so the 'consolidates the decisions' claim cannot be checked. Also 1.4 'proposal:' wording ambiguity.",
+   "recommendation": "Add a decisions->section traceability table with one row per decisions.md bullet; list bullets with no row as gaps; reword the 1.4 'proposal:' clause to a plain statement (user confirmed session-7 treatment).",
+   "sources": [
+    "CONS-3"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C40",
+   "title": "Python/Rust boundary overstated as decided",
+   "severity": "major",
+   "area": "architecture",
+   "where": "decisions 2026-10-29 Languages; sessions 02 \u00a72.5-2.6; architecture.md \u00a74",
+   "claim": "decisions.md says 'Exact boundary decided in 2.5', but 2.5 left port transport open and 2.6 marked timing/process boundary open; the component table drafts the whole Python/Rust split as settled with no tags, resting on an unconfirmed '~10 ms' rule.",
+   "recommendation": "Fix decisions.md bullet ('boundary shape decided in 2.5; wire/transport and 10 ms split rule confirmed nowhere yet'); tag every component whose language assignment rests on the unconfirmed split rule as [P] until the 10 ms rule is confirmed.",
+   "sources": [
+    "CONS-5"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C41",
+   "title": "Deterministic 'obtain X' tasks routed through LLM",
+   "severity": "major",
+   "area": "skills",
+   "where": "architecture.md \u00a76, \u00a78; sessions 05, 11; research systems-review \u00a73.5, \u00a73.7",
+   "claim": "The design routes the most repeated, exactly-solvable task family ('obtain X') through the LLM and guard compiler, although cited literature shows this family needs no LLM (Odyssey's obtainItem covers 789 items in ~1,265 lines of deterministic tables; altoclef is 34k lines of hand-written task code). This inverts the cost/reliability curve at the rungs the first demo needs.",
+   "recommendation": "Add a deterministic recipe/tech-tree solver under the TR runtime sharing effect/recipe data; compile every obtain(item,n) goal to solver output; let the LLM write only situational skills (shelter siting, exploration, trading, combat positioning); makes the equal-compute learning test measure LLM where it adds value.",
+   "sources": [
+    "ALG-11"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C42",
+   "title": "Body port contract and load-bearing contracts unspecified",
+   "severity": "major",
+   "area": "architecture",
+   "where": "architecture.md \u00a72, \u00a75; sessions 02 \u00a72.5; sessions 03, 12",
+   "claim": "Phase 0 commits to 'the same port serves real body, fake world and replays', yet the body port is not in the architecture at all: message catalog, ordering, query semantics, back-pressure, resync after brain restart, version negotiation, and what increments generation are all missing. Also three load-bearing contracts needed by the first line of body code (object identity, TTLs per fact kind, briefing/observation query contract) are explicitly left open with no spike to close them.",
+   "recommendation": "Write a one-page port spec: hello{port_version,body_caps} handshake; monotonically increasing seq on every observation; snapshot-plus-delta resync; bounded queues with coalescing per key and dropped(n) marker; generation incremented by body on owner change, take-over, new user command, reflex preemption; pick transport now. Add pre-code spike E0 (timeboxed, <=1 week): freeze unknown semantics, three TTLs (blocks/entities/containers), the five body queries the first-night core needs, and the TR text syntax subset (<=5 rule shapes); first code starts only when E0 is merged as a schema, not prose. Freeze a minimal v0 port contract before E1-E14: three message kinds with schemas (observation delta, command {id, owner token}, receipt {pending/settled + evidence level}) plus a recorded-replay file format; write spikes against it.",
+   "sources": [
+    "HOL-6",
+    "PLAN-3",
+    "PLAN-6"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C43",
+   "title": "Safety enforcement unspecified (chat allowlist, ruleset trust, perception policy)",
+   "severity": "blocker",
+   "area": "safety",
+   "where": "architecture.md \u00a75, \u00a77; sessions 02, 03, 09; decisions",
+   "claim": "Chat injection surface lacks concrete enforcement: sender allowlist by player UUID at packet level, prefix mapping, schema validation, cross-player rejection not specified. Ruleset trust/tamper model unspecified: storage format, signing, hash verification, brain cannot override not defined. Perception policy (deny by default, allowlist LoS+F3, provenance tags, reflexes only allowed facts) lacks enforcement at query API level; 'everything else is denied and written to the ledger' and F3-allowed need strict enforcement.",
+   "recommendation": "Enforce sender allowlist by user's player entity/UUID before parsing; never pass raw free text to planner/Jev; high-risk requires confirmation even if prefixed. Ruleset loaded from body-owned read-only file with hash verification; body enforces before any input for reflexes/arbiter/skills/primitives; brain proposes only. Perception: deny-by-default query API with provenance tags; tests that denied data cannot influence actions; treat logs as sensitive local data with redaction and size limits.",
+   "sources": [
+    "SAF-CHAT-4",
+    "SAF-RULESET-5",
+    "SAF-PERCEPT-8"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  },
+  {
+   "cid": "C44",
+   "title": "Experiment plan lacks integrated validation and fallbacks",
+   "severity": "blocker",
+   "area": "testing",
+   "where": "architecture.md \u00a711; sessions 02 \u00a72.7; 14",
+   "claim": "E1-E14 measure isolated micro-properties with no integrated-tick experiment (decoder->world model->reflex/arbiter->hands->server ack under load); Round 1 runs on macOS though timing budgets are Windows-loop properties; no pre-agreed fallback or timebox on threshold miss, so one miss stalls all lanes. 'Protocol test body fidelity' unverified, yet meant to carry most tests.",
+   "recommendation": "Replace stop rule with decision table mapping each threshold miss to a timeboxed fallback and owner; run E1-E3 on Windows PC from start; add integrated-tick experiment; define E14 pass criteria before runs; treat protocol test body fidelity as a gate experiment before relying on it; classify what each test level can/cannot test in a matrix (e.g. level 2 can test receipt logic but NOT take-over latency).",
+   "sources": [
+    "PLAN-1",
+    "PLAN-2",
+    "TESTING-2"
+   ],
+   "reviewer_count": 2,
+   "disagreements": ""
+  },
+  {
+   "cid": "C45",
+   "title": "Test infrastructure fidelity and statistical plan underspecified",
+   "severity": "blocker",
+   "area": "testing",
+   "where": "architecture.md \u00a79; sessions 14, 02 \u00a72.7, 13",
+   "claim": "The three-level pyramid is not realizable as described because protocol test body fidelity is unknown and untested yet meant to carry most tests. Statistical evidence plan ('many fresh seeds, confidence intervals, analysis before runs') lacks concrete power analysis, stopping rules, sample sizes. Naturalness (human movement statistics and blind test) has no defined metrics, baseline or inter-rater method.",
+   "recommendation": "Do not claim level 2 covers input timing/focus/take-over; classify what each level can/cannot test in a matrix. Pick concrete statistical plan (binomial CI, N>=30 or sequential testing with stopping rule, median+bootstrap for continuous); write analysis template before first baseline. Pre-define 2-3 concrete movement distributions (inter-key intervals, camera angular velocity) with tolerances from held-out user recordings; for blind test use proper randomization and 'spot the bot' with controls.",
+   "sources": [
+    "TESTING-1",
+    "TESTING-3",
+    "TESTING-7"
+   ],
+   "reviewer_count": 1,
+   "disagreements": ""
+  }
+ ],
+ "minor_ids": [
+  "HOL-11",
+  "HOL-12",
+  "WIN-4",
+  "WIN-8",
+  "WIN-9",
+  "WIN-10",
+  "WIN-11",
+  "WIN-12",
+  "WIN-13",
+  "PROTO-8",
+  "PROTO-10",
+  "PROTO-11",
+  "PROTO-12",
+  "HOST-8",
+  "HOST-9",
+  "HOST-10",
+  "HOST-11",
+  "SKL-7",
+  "SKL-8",
+  "SKL-11",
+  "SKL-12",
+  "COMP-9",
+  "COMP-11",
+  "COMP-12",
+  "PM-11",
+  "PM-12",
+  "PM-13",
+  "PM-14",
+  "BC-9",
+  "BC-10",
+  "BC-11",
+  "BC-12",
+  "SC-5",
+  "SC-6",
+  "SC-7",
+  "SC-8",
+  "SC-9",
+  "SC-10",
+  "SC-11",
+  "SC-12",
+  "NF-7",
+  "NF-8",
+  "NF-9",
+  "NF-10",
+  "NF-11",
+  "NF-12",
+  "ALG-14",
+  "ALG-15",
+  "CONS-6",
+  "CONS-7",
+  "CONS-8",
+  "CONS-9",
+  "CONS-10",
+  "CONS-11",
+  "TIME-COST-008",
+  "SKILL-8",
+  "TESTING-8",
+  "TESTING-9",
+  "TESTING-10",
+  "SAF-LOGS-10",
+  "PLAN-9"
+ ],
+ "ideas": [
+  {
+   "title": "Write ControlFrame and body port spec before any code",
+   "why": "All level-1 tests then sit on production interfaces and do not need rewriting later; fake world and real body cannot drift apart.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Counterfactual replay from the event log",
+   "why": "Re-run a death with a changed reflex or skill offline; complete causal answer to 'why did you do that?' with zero tokens.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Shadow mode while the user plays",
+   "why": "Run skills and reflexes in the body's head on the real perception stream and log frames it would have sent vs what the user did; free real-body evaluation and admission evidence without input conflicts.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Proxy-certified claims as public differentiator",
+   "why": "Every reported success links to receipt ids checked by an independent referee; no existing agent publishes verdicts its own self-report cannot influence.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Player-bound fair-perception leaderboard",
+   "why": "Define the benchmark others must meet (line of sight, F3-only), not only the agent.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "'Explain why' from the log",
+   "why": "Each action traces to rule -> guard values with provenance -> directive stamp.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Typed unknown-driven curiosity",
+   "why": "Treat unknown guard values as exploration goals, so exploration falls out of the perception policy instead of being prompted.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Version-pack regression across Minecraft releases",
+   "why": "Re-run admitted skills when a new pack arrives so learned skills survive game updates.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "title": "Tag-based ownership (nonce in dwExtraInfo)",
+   "why": "One line of design that removes the hook-vs-driver ambiguity; treat anything without the nonce as the user.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Probe canary (unbound key injected periodically)",
+   "why": "Proves the hook (and optionally the game's receipt of input) is alive.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Tick-synchronous input scheduler",
+   "why": "Proxy pose packets as the clock for holds and clicks, so the input layer never guesses client tick phase.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Input tape",
+   "why": "Log every injected event with QPC time and tag, aligned with proxy packets; serves E9 latency, stuck-key forensics and E12.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "SetCursorPos for menus",
+   "why": "Eliminates rounding errors in MOUSEEVENTF_ABSOLUTE normalization; SendInput only for button down/up.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Environment doctor at start",
+   "why": "Read-only checks of integrity levels, Sticky/Filter/Toggle Keys, pointer speed and EPP, rawMouseInput, layout, DPI, multi-monitor, lock/sleep, with refusal message and fix hint.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Dead-man switch (watchdog waits on body process handle)",
+   "why": "Reacts at once to a crash; replays shared held-key table.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Windows execution state while active",
+   "why": "SetThreadExecutionState replaces the Mac-only Amphetamine step.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "title": "Differential decode oracle",
+   "why": "Run the game's own packet codecs in a small Java harness to decode captured traffic and compare with Azalea per packet; stronger pass criterion than 'zero errors'.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Capture corpus first",
+   "why": "Record real stock-client sessions before writing code; every decoder, replay and CI test reuses them.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Server Management Protocol for the harness",
+   "why": "JSON-RPC over WebSocket replaces RCON for referee server control.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Version-pin manifest",
+   "why": "One file pins client, server jar, Azalea rev, nightly date and generated data hash; CI refuses mismatches.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Minimal own decoder for ~40 packets",
+   "why": "Drops Bevy/tokio weight and single-maintainer dependency; compare cost against porting Azalea each quarter.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Stay on 26.3 deliberately",
+   "why": "Mojang keeps old jars and the launcher can pin versions; skip 26.4 until a stable Azalea tag exists.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Status-ping-aware forwarder",
+   "why": "Test with Multiplayer screen Status connections and reconnects.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Passive decoder canary in-game",
+   "why": "Compare decoded player position/health with F3 screen on a fixed route to detect silent drift without operator commands.",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "title": "Replay harness for Jev vs cheap LLM vs rules",
+   "why": "The event log already exists, so it costs nothing; defines the entry bar for Jev.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Free heartbeat via code diff",
+   "why": "A hash/diff over briefing facts makes the heartbeat cost zero model calls.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Degrade ladder in code",
+   "why": "big model -> cheap model -> rules only -> shelter; defines offline mode explicitly.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Log dollars and call counts per rung",
+   "why": "Cost becomes a research output, not a surprise.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Batch pricing for skill-writing candidates",
+   "why": "50% off for non-urgent skill writing and critic runs.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Chaos scenario with real provider errors",
+   "why": "Test 429/5xx/slow stream from a fake proxy in addition to injected latency.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Prefix-cache primitive catalog and system prompt",
+   "why": "Stable system prompt plus primitive catalog as cacheable prefix; briefing after it; 60 s heartbeat keeps 5-minute cache alive.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "title": "Planner-only baseline arm",
+   "why": "A symbolic regression planner using the same effect data and no LLM as control in the learning test; separates what the LLM adds from what the data adds.",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Primitive defect reports as writer output",
+   "why": "Structured trace plus suspected primitive queued for human; where the most reused learning appeared in the Gemini run.",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Failure-conditioned practice rooms",
+   "why": "Build the practice room from the failure fixture, not the success.",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Hidden gate",
+   "why": "Keep fixtures and thresholds outside the writer's reach, with hold-out fixtures rotating (DGM lesson).",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Skill diet metrics",
+   "why": "Log call counts, reuse ratio and repair-chain depth per skill; cheap early measure of library compaction vs bloat.",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Lessons store first, skills second",
+   "why": "Text lessons can carry value before any skill is admitted (655-program quirk fix).",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Grammar-constrained generation for the DSL",
+   "why": "Structured-output schema so the writer cannot emit syntax errors; DSL is new and out of training distribution.",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Mutation-test the gate",
+   "why": "Feed hand-broken skills as a standing regression test; target of 0 bypasses needs a stable growing corpus.",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "title": "Mine AI MCP async submit/pending/settled protocol as body-port contract",
+   "why": "Proven full-game completion with ~92% wall time spent waiting on the world, not the model.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Odyssey tech-tree solver tables for 'obtain X' goals",
+   "why": "Deterministic and zero LLM cost; obtain tasks need no LLM.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Personal motor model from user's play via Raw Input sink",
+   "why": "Strongest naturalness idea; makes hand-over look like the same person.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "LLM-tunable reflex policy (typed fields, Mine AI MCP style)",
+   "why": "Adaptation without code changes, hard-capped by ruleset.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Candidate-skill sandbox with process isolation, quotas, seccomp",
+   "why": "Defense in depth for later primitive generation (agent-swarm).",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Persistent chunk cache (Baritone-style, 2 bits/block)",
+   "why": "Enables stronghold/chest recall across unloaded chunks.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Craftonomous perception-provenance profiles as reference",
+   "why": "Already matches Praxion's line-of-sight policy and includes DDA occlusion.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Decision-epoch gate with hysteresis (souta-lab)",
+   "why": "Prevents Jev flip-flopping and stacked latency.",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "title": "Thin own decoder over Mojang reports",
+   "why": "Removes upstream risk and Bevy coupling; drops single-maintainer dependency.",
+   "sources": [
+    "oc-beam-premortem.md",
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "First shippable milestone = first night on >=18/20 seeds",
+   "why": "Kills the scope-vs-capacity risk; defers rungs 2-6 to roadmap.",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "title": "Degraded-but-playing brain mode",
+   "why": "Runs last stamped directive plus rules on silence instead of stopping; keeps autonomy during transient outages.",
+   "sources": [
+    "oc-beam-premortem.md",
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "In-memory fake world as first admission gate",
+   "why": "~10x faster iteration; promote to test server only for final.",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "title": "Record every run as replay; demo as replayed measured run",
+   "why": "Removes live-demo risk; hand-picked best runs labelled.",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "title": "Jev optional and swappable",
+   "why": "Benchmark a small open classifier as default middle tier; avoids single-vendor lock-in.",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "title": "Perception profiles as toggle for ablation",
+   "why": "Settles whether fair-play is a hard constraint or a measured trade-off.",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "title": "Raw Input on as checked precondition",
+   "why": "MC-230466 shows absolute moves misbehave; acceleration compensation is slow.",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "Pause-state heuristic",
+   "why": "No client->server movement for N ms while active => safe stop; never send input into a paused game menu.",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "Praxion manages dedicated server as child process",
+   "why": "EULA, properties, save copy, bind 127.0.0.1 handled; removes manual setup errors.",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "Decoder in its own process with 'perception invalid' signal",
+   "why": "A decoder crash cannot take down the game connection.",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "Watchdog lease-expiry release as primary failsafe",
+   "why": "Test as E12 rather than relying on a second hook that can also be removed.",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "Pre-specify fallback on E5-E9 failure",
+   "why": "A missed experiment does not stall the project.",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "title": "Collapse guard derivation to hand-written guards for first 3-5 core skills",
+   "why": "Removes a compiler subsystem from the critical path.",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "title": "Single append-only log as only persistence for first demo",
+   "why": "Matches 'smallest memory' decision and keeps the file hand-readable.",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "title": "Replace Jev with rules table + LLM for first demo",
+   "why": "Removes an unproven hosted dependency from the decision path.",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "title": "Defer memory viewer and live view; state via replayable log + CLI dump",
+   "why": "Removes an undecided UI technology from the critical path.",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "title": "In-process mode for level-1 tests",
+   "why": "Simpler dev loop without changing the contract.",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "title": "Peek-and-resume",
+   "why": "User grabs control for a few seconds and auto-resumes with visible countdown; removes biggest daily friction without weakening safety.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "'Needs you' attention layer",
+   "why": "Sound + taskbar flash + indicator badge for questions/reports; interface never takes focus, so attention must be earned explicitly.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "Command palette in interface",
+   "why": "Global hotkey, fuzzy search over verbs, argument completion, history; typing prefixed commands mid-fight is hostile UX.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "Ambient status strip",
+   "why": "Health, hunger, current task, ETA, next planned action, expandable.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "One-click run replay (video/GIF with receipts overlaid)",
+   "why": "Blind naturalness test and community demos both need shareable artifacts.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "Persona presets",
+   "why": "'Short, calm, informative' is a default, not a universal preference.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "'Show me' command",
+   "why": "Praxion points the camera at a named thing for a few seconds; builds trust.",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "title": "Query-time perception with a ray budget",
+   "why": "Replaces per-tick omni-directional visibility with bounded on-demand rays plus cache; makes fairness policy cheap, auditable, provable.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "One currency: expected ticks",
+   "why": "Planner cost, arbiter gain, loss_on_interrupt, skill time estimates all in ticks; removes undefined units.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "Deterministic obtain solver; LLM for situational remainder",
+   "why": "Exact answers where exact answers exist; turns learning story into LLM deciding where to build/how to explore.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "Per-key lease table with danger_held bits",
+   "why": "Twelve entries and a bitmask; lets a reflex take only the keys it needs and makes unsafe_until survive every ownership change including take-over.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "Predicate intern table + compiled guard DAG per tick",
+   "why": "Evaluate each unique predicate once against one frozen snapshot; interpreter cost becomes unique_predicates + guards, a stated bound.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "One generated contract file per primitive",
+   "why": "Effects, required evidence, cancellation class, cost, exec error from the version pack; feeds guard compiler, receipt checker and test matrix from a single source.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "Copy-on-write planner snapshot with world version",
+   "why": "Version-stamped snapshot turns silent inconsistency into an explicit replan trigger (Azalea plans over live RwLock<World>).",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "Reaction time as sampled distribution with lethal-danger exception",
+   "why": "Reconciles 50 ms reflex with 150 ms human floor; lets blind test and reflex test measure the same quantity.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "title": "Machine-checkable traceability table",
+   "why": "Turns missing-decisions review into a lint future agents and draft rounds can run mechanically.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Name the component 'proxy' with forwarder/decoder sub-parts",
+   "why": "Zero design change, pure consistency win across E1, risk table and component table.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Per-risk 'fail path' column in \u00a711",
+   "why": "Prevents mistaking the risk table for a decision table; per 2.7 any missed threshold stops and goes to the user.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Version-constants file with verified-on date",
+   "why": "A new release surfaces in CI rather than only being noticed in session notes.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Verify wiki licence nuance (CC BY-SA 3.0 vs NC)",
+   "why": "May only block gameplay pages, not technical protocol pages imported from wiki.vg.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Timing diagram of a take-over event",
+   "why": "Single artifact a reviewer can eyeball against the 50 ms budget instead of three overlapping sections.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Registry/port journal for receipts",
+   "why": "Gives multi-session concepts like settle windows and sequence-number attribution a shared vocabulary.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Collect all quality gates in one 'gates' table",
+   "why": "Same numbers currently scattered across sessions 7/8/11/14.",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "title": "Latency budget as a contract",
+   "why": "Per-call-class budgets machine-checkable in tests; fail CI if violated.",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "Cost brake that actually brakes",
+   "why": "Soft warn plus hard stop (pause non-critical LLM calls above threshold) rather than 'never cut automatically'.",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "Jev as optional optimizer",
+   "why": "Default off until calibration passes; log agreement to build dataset for future training.",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "Effect schemas from data",
+   "why": "Auto-generate skill effect schemas from Mojang data reports to reduce admission gate errors.",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "Fixture caching",
+   "why": "Cache world fixtures by hash to cut admission time/cost.",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "Starvation telemetry",
+   "why": "starvation_gap_ms histogram with alerts; first-class metric in run reports.",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "title": "Smallest memory first (JSONL + in-RAM index + read rule)",
+   "why": "Avoids SQLite/vectors/lessons until measured triggers fire; cheaper to reason about and easier for user to master.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Unknown as first-class type in the API",
+   "why": "Enforce in queries (return Unknown not None/omission) so consumers can't accidentally treat 'not remembered' as 'false'.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Briefing as pure validated renderer with dual builders (Jev vs LLM)",
+   "why": "Jev needs buckets and counts-computed, LLM needs more prose; separation prevents state-text steering of Jev.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Container identity 'unverified until observed in window' by default",
+   "why": "Forces re-observation on approach/change and prevents confident wrong answers from moved chests.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Defer wiki RAG behind a strict gate + first-party data fallback",
+   "why": "Try Mojang data generator + our own notes first; only enable wiki RAG if measurements show gaps, isolated completely from Jev/reflexes with legal review.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Memory test suite as a hard gate before demo",
+   "why": "Script moves chest/break block/change time/restart and assert correct or labelled stale; catches identity, refresh, age-label issues.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Snapshot on Unload Chunk with allowlist",
+   "why": "Cheaper and safer than full 2-bit chunk cache; only snapshot named places, containers, ores.",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "title": "Safe mode on any security anomaly",
+   "why": "On hook loss, decoder desync, ruleset load failure, or unknown sender chat, drop to reflexes-only with all keys released and require explicit user re-enable.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Physical key shadow table with hardware timestamps",
+   "why": "Track each key with last physical event time from low-level hook; reject injected actions conflicting with a key pressed within last N ms by user.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Packet allowlist at proxy",
+   "why": "Only forward packets needed for Play state; drop/ignore others and log drops; least privilege on the wire.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Panic key",
+   "why": "Hardcoded or user-configurable key combo that immediately releases all keys and kills input injection regardless of state.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Action capability tokens",
+   "why": "Each action needs a capability token scoped to (action class, region, time window) signed by ruleset; body rejects unsigned/expired capabilities.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Deterministic replay gate for skills",
+   "why": "Before admission, replay skill on recorded fixture with perturbed inputs (reflex injection, take-over) and require bit-exact safe behavior.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Air gap for secrets",
+   "why": "Store API keys in a separate process/vault that signs requests without exposing raw keys to brain process memory.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Per-action danger score",
+   "why": "Compute danger score (height, lava nearby, bridging, etc.) and require stricter verification/take-over behavior.",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "title": "Effect schema linter as a gate",
+   "why": "Make primitive effect declarations first-class and lint them against observed behavior in the fake world.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Mutation testing for the admission gate",
+   "why": "Generate mutants (no-op, wrong count, side effect, protected-block write) and require 0 bypasses before enabling auto-activation.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Verifiability-first curriculum",
+   "why": "Filter goals to those with computable completion conditions within the perception policy; decompose unverifiable goals into verifiable subgoals or reject with explanation.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Skill utility scoring",
+   "why": "Track reuse count, success rate across contexts, time-to-execute, rollback history; retire skills never reused or with poor utility.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Deterministic practice fixtures",
+   "why": "Use pre-registered fixtures with fixed seeds for admission so results are reproducible across machines and gate versions.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Fast safety circuit breaker",
+   "why": "Immediate rollback for critical failures (death, rule violation) independent of Wilson bounds.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Receipt-linked admission",
+   "why": "Require every world-changing step to have a valid receipt at runtime level to count toward admission success.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "title": "Test the proxy first with packet capture",
+   "why": "Before writing Azalea decoder, record a real offline session and write a reference parser for just the packets needed; gives ground truth for level 2.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "Fake world with scripted server responses (level 1.5)",
+   "why": "Inject packet drops/acks/stale state to test receipts/fault injection cheaply without test server.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "Property-based testing for guards",
+   "why": "Use proptest to verify guards necessary/sufficient against random world states; catches effect declaration bugs.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "Measurement-driven Jev gate",
+   "why": "Don't wire Jev until pre-registered A/B test shows it wins on >=3 decision classes with confidence intervals.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "'Replay the death' fixture factory",
+   "why": "Every death becomes a fixture automatically from event log + server state; grows reflex coverage matrix without manual work.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "Chaos monkey for brain",
+   "why": "Test 'brain silent -> safe stop' with random process kills, network drops; cheap and critical for safety.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "Deterministic seeds for CI",
+   "why": "Fixed seeds for regression tests, fresh seeds only for statistical evaluation; prevents flaky tests while doing proper measurement.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "title": "Demo-0 before Demo-1",
+   "why": "Survive a scripted night headless (protocol body + referee, no SendInput, no LLM) retires verification/arbiter logic without the Windows bottleneck.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "title": "Body-port-first contract",
+   "why": "Freeze observation/command/receipt schemas and a replay file as v0 this week; makes every spike reusable as a test fixture.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "title": "Kill-board with pre-agreed fallbacks",
+   "why": "One table mapping each E-threshold miss to a timeboxed fallback and owner; replaces stall-on-miss with motion.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "title": "Pin-and-freeze rule",
+   "why": "Demo pins client, server and decoder commit hashes; version bumps need user sign-off.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "title": "Hand-written first-night core as permanent trust tier",
+   "why": "8-12 reviewed TR skills + 5 reflexes; LLM writes nothing for Demo-1; shrinks blast radius to refereed code.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "title": "Referee-first development",
+   "why": "Build the harness referee (server-fact verdicts, fault injection for dropped acks/stale inventory) before the body features it judges.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "title": "Defer Jev/RAG/curriculum behind feature flags with cost kill-switches",
+   "why": "All hosted calls default off in Demo-1 config; chaos test (cut providers mid-night) becomes part of the demo gate.",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  }
+ ],
+ "questions": [
+  {
+   "q": "Can admission (practice room) run only while you are not playing, or on a second machine? Otherwise it competes with your game for input and CPU.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "q": "Should the body, rather than the Python brain, own the indicator and the stop/cancel/status commands, so they work with the brain or the network down?",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "q": "Do you accept 'a forwarder crash or body crash must never kick me from my world' as a hard requirement? It rules out the forwarder-as-thread fallback.",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "q": "Should learned skills live outside the product repository, in a per-installation data folder?",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "q": "Is it acceptable for skills to be admitted on headless-body evidence, followed by a watched probation on the real body?",
+   "sources": [
+    "cl-opus-holistic.md"
+   ]
+  },
+  {
+   "q": "Do you ever control or watch the Windows PC remotely from the Mac (Parsec, Sunshine/Moonlight, AnyDesk, RDP)? That decides whether the injected flag can be the take-over signal.",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "q": "Will Praxion type into Minecraft chat (Turkish replies), or only report through its own interface window?",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "q": "If the Sticky Keys test is positive, is 'refuse to start and tell the user to turn the shortcut off' acceptable, instead of Praxion changing the setting?",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "q": "Is it acceptable that the PC is unusable for anything else while Praxion plays, since input needs the foreground?",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "q": "If closed-loop E7 still misses 95% at low frame rates, do you want to relax the criterion or require a minimum frame rate?",
+   "sources": [
+    "cl-sonnet-input.md"
+   ]
+  },
+  {
+   "q": "Are you willing to give up singleplayer behavior (Esc pauses the world, Open to LAN, world list, current character's inventory and skin) for a dedicated-server setup? Do you want an import path for existing worlds?",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "q": "Is a nightly-only Rust toolchain and a git-pinned Azalea branch acceptable for the product, or should the decoder be our own minimal code?",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "q": "Should we stay on Minecraft 26.3 until the experiments pass, even though 26.4 snapshots are already out?",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "q": "The client now uses SDL3, not GLFW: do you want the hands experiments (E5-E11) redone against SDL3 before anything else in round 2?",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "q": "Is a macOS pass for E1-E3 meant only as a decode-correctness test, with latency thresholds judged on the Windows PC?",
+   "sources": [
+    "cl-sonnet-protocol.md"
+   ]
+  },
+  {
+   "q": "Do you accept replacing 'warn, never cut' with warn plus a rate circuit breaker, plus one high hard stop you choose?",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "q": "Which provider and which model per role is your first choice? The cost spread is about 20x between Haiku 5.5 and Fable 5.1.",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "q": "Is the Jev experiment worth a spike before architecture draft 2, or should the architecture be written with a cheap LLM as the default and Jev only an optional later plug-in?",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "q": "What is your tolerance for chat reply latency? A reasoning model would take 10-30 s; a non-reasoning one takes 1-3 s (unverified).",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "q": "May the fallback during outage be a precomputed local shelter or retreat skill, even though that means the agent will not progress on the ladder during that time?",
+   "sources": [
+    "cl-sonnet-models.md"
+   ]
+  },
+  {
+   "q": "If the free-form-code run (Gemini 4 Argon) showed that primitive quirk fixes are the main learned value, are you willing to let the LLM propose patches to Rust primitives through a human-reviewed queue?",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "q": "What does a candidate need to pass: 3/3 on its own fixture plus no regression on the pooled set, or a statistical test? (SKL-1 shows the latter cannot work with one fixture.)",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "q": "Is a no-LLM regression planner an acceptable control arm for the learning test, even though it may show that the LLM adds little?",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "q": "Should the interpreter fall back to the brain when no rule fires (completeness failure), or is a completeness check at admission enough?",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "q": "Which Minecraft versions must a skill survive: only 26.3, or should the library revalidate on every game update?",
+   "sources": [
+    "cl-sonnet-skills.md"
+   ]
+  },
+  {
+   "q": "Should the first demo pin a verified stable version (e.g., 1.21.x) instead of 26.3, to de-risk Azalea and OS-input experiments?",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "q": "Is the player-bound OS-input route mandatory for v1, or should a protocol-body (Mineflayer-style) companion mode ship first as a stepping stone?",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "q": "Should skill success be judged by declared postconditions (world delta) in addition to practice-room admission?",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "q": "Should the reflex policy be LLM-tunable (Mine AI MCP style) in v1, or fixed defaults only?",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "q": "Should auditory perception be in scope for first-night reflexes?",
+   "sources": [
+    "oc-beam-competitors.md"
+   ]
+  },
+  {
+   "q": "Is the fair-play perception policy a hard constraint, or a measured trade-off? (Affects endgame feasibility.)",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "q": "Should the first shippable milestone be re-scoped to first night only, deferring the Ender Dragon?",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "q": "If Azalea 26.3 fails experiment E2, is the client-mod fallback acceptable despite 'avoid mods'?",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "q": "Should there be a hard cost budget that pauses autonomous play (never reflexes)?",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "q": "Is Jev's early-access risk acceptable, or should an open model be the default middle tier?",
+   "sources": [
+    "oc-beam-premortem.md"
+   ]
+  },
+  {
+   "q": "Is the dedicated-server route acceptable given its pause/desync and save-copy implications, or are you open to a Fabric client mod despite 'avoid mods'?",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "q": "Should Praxion manage the dedicated server process itself, or is manual setup with a checklist acceptable?",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "q": "Is pinning Azalea's stale 26.3 branch acceptable, or should we invest in a minimal passive codec from the start?",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "q": "Is network-compression-threshold=-1 on loopback acceptable (more traffic, simpler and faster decoding)?",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "q": "If SendInput experiments fail their thresholds, which fallback do you prefer: require Raw Input on, or switch to a client mod?",
+   "sources": [
+    "oc-beam-protocol.md"
+   ]
+  },
+  {
+   "q": "May the first demo be scoped to 'first night + one verified command' with no curriculum or autonomy?",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "q": "Should the wiki RAG be dropped from the first demo despite the earlier decision, given the licence conflict?",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "q": "Is Jev allowed to be optional/flagged in the first demo pending measurement?",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "q": "Should the skill admission gate be deferred until the first LLM-written skill is attempted?",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "q": "Should the level-2 protocol test body be dropped initially, keeping level 1 + level 3?",
+   "sources": [
+    "oc-beam-simplicity.md"
+   ]
+  },
+  {
+   "q": "Should the interface window be allowed to take focus on an explicit user action, despite 'windows never take focus'?",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "q": "After a take-over, should Praxion auto-resume after a short idle period, or always wait for 'carry on'?",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "q": "Where should the indicator live on a single-monitor setup?",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "q": "What attention modality (sound, taskbar flash, in-game ping) should questions and reports use?",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "q": "Should in-game chat output be minimal by default (interface-first), or verbose for streamers?",
+   "sources": [
+    "oc-beam-ux-feel.md"
+   ]
+  },
+  {
+   "q": "Perception: do you want to defend the exact 64-block omni-directional line of sight as the 'fair' claim, or accept a cheaper, provable model and document it as an approximation?",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "q": "Verification: may movement and look count as verified when unrefuted (no server correction for N ticks), or must the demo's verifiable command suite be restricted to world changes and inventory effects?",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "q": "Skills: is the 'obtain X' family allowed to be deterministic code (a recipe solver) rather than LLM-written rule lists?",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "q": "Safety precedence: when the user takes over mid-bridge, must Praxion keep the sneak and movement keys it holds until the moment passes (protecting the character), or yield every key the user touches as session 4 currently says?",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "q": "Demo scope: does the first demo require long-distance travel (village/stronghold scale)? If yes, an exploration policy must be designed now, not after the first code.",
+   "sources": [
+    "oc-deepseek-algorithms.md"
+   ]
+  },
+  {
+   "q": "Proxy process: is the isolated-thread fallback a re-opening you want, or a mistake to be corrected back to decided D1 (separate proxy process)?",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "q": "Version baseline: does the demo pin 26.3 explicitly (accepting the 26.4 snapshot risk), or does it follow the rolling 'newest stable release at coding start' rule from session 1? Should we record this as a decisions bullet?",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "q": "May spikes/ be committed now that the licence is chosen (Apache-2.0)?",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "q": "Language split rule ('anything with a deadline under ~10 ms is Rust', session 2.6's proposal marked 'to confirm in 2.5'): confirm now, or should the architecture tag every affected component row [P] until you do?",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "q": "Jev mapping commands to a closed schema (session 9 minor pick): promote to a decided bullet in decisions.md, or keep it open until session 8's measurements land?",
+   "sources": [
+    "oc-glm-consistency.md"
+   ]
+  },
+  {
+   "q": "Jev enablement: should Jev be disabled for the first demo regardless of measurements, or enabled only if it passes strict calibration on day-one decision points?",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "q": "Cost brake policy: do you want 'warn only' or a hard stop (e.g. stop non-critical LLM calls above threshold) to prevent runaway spend?",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "q": "Brain location: confirm default is same Windows PC only (no remote brain for first demo)?",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "q": "Wiki RAG: given CC BY-NC-SA conflict with open-core, do you want to drop wiki RAG and rely on game data + first-party notes, or keep it local-only with explicit non-commercial constraints?",
+   "sources": [
+    "oc-iceman-latency.md",
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "q": "Skill learning scope: for first demo, should LLM skill writing be disabled entirely (curated core only) or allowed only in practice room with no auto-admission?",
+   "sources": [
+    "oc-iceman-latency.md"
+   ]
+  },
+  {
+   "q": "Memory ownership: should the Rust body own the unloaded-chunk block cache and provenance ledger, while the Python brain owns places/containers/events/lessons as per-world JSONL files (brain reading body only via the body port)? Or should everything go in one place?",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "q": "Container refresh: is it acceptable that 'bring iron from chest X' may require walking to and opening the chest to be sure (and we label old memories as stale), rather than trusting a remembered count while the chunk is loaded?",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "q": "Object identity: for the demo, is 'never assume identity across break+place' acceptable (force re-observation / UNKNOWN on moved containers), or do you want a best-effort identity heuristic implemented now?",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "q": "Lessons timing: should lessons be fully postponed until after the first demo passes, or built behind the '3 proxy-verified traces' gate now?",
+   "sources": [
+    "oc-iceman-memory.md"
+   ]
+  },
+  {
+   "q": "Elevated game / UIPI: will you ever run Minecraft as administrator or on a system where UIPI blocks SendInput? If yes, is a client-mod fallback acceptable, or must Praxion refuse?",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "q": "Remote brain: is running the brain on another computer a requirement for the first demo, or just a future option? If required, what auth mechanism do you prefer (mutual TLS, pre-shared key)?",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "q": "Ruleset authority: should the ruleset be signed by you (cryptographic signature) so only your confirmation can change it, even if the LLM proposes changes?",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "q": "Panic behavior: do you want a physical panic key combo that works even if Praxion is frozen/crashed in some way, and should it require admin privileges?",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "q": "Chat trust: in singleplayer with a local server, only you are on the server - is cross-player chat even possible? If you ever play on a LAN server with others, should Praxion still only obey your player, and how do you want to be notified of other players' chat?",
+   "sources": [
+    "oc-iceman-safety.md"
+   ]
+  },
+  {
+   "q": "Verifiability vs ambition: for the free curriculum, when Praxion proposes a goal that code deems unverifiable under the perception policy, should it be rejected, decomposed, or allowed with a warning and not counted toward rung progression?",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "q": "Auto-activation scope: is 'learned in its own play' strictly limited to skills written by the skill writer in response to internally chosen goals, or does it include skills written in response to the user's commands that were executed autonomously?",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "q": "Admission strictness: for the first demo (flawless first night), should the admission gate be more strict than the long-term target (e.g. higher n, longer probation, or require human approval for all new skills initially)?",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "q": "Rollback SLA: what's the acceptable time window for rolling back a dangerous skill once detected (immediate vs within N minutes)? This affects whether a fast circuit breaker is required before enabling auto-activation.",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "q": "Practice room fidelity: is the protocol test body expected to be faithful enough for admission, or must admission always run against a real test server (separate process) to catch OS-input/hardware timing issues?",
+   "sources": [
+    "oc-iceman-skills.md"
+   ]
+  },
+  {
+   "q": "Physical access: do you have reliable access to the dedicated Windows PC for rounds 2-4 of 2.7 experiments (hands/takeover/focus)? RDP won't work per docs - is this machine always available when needed?",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "q": "Test server setup: who maintains the local vanilla server for level 2 tests? Is it acceptable to run headless server on same machine as game, or does it need separate setup?",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "q": "Jev budget: is there any cost limit for Jev/LLM during testing/evaluation, or is 'track and warn, never cut automatically' the only policy? This affects how many seeds/runs are feasible.",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "q": "Demo gate priority: the first demo is 'hand-over, verified chat command, instant take-over, autonomous first night' (18/20 fresh seeds). Is this demo gate blocking for moving to next phase, or is it aspirational while you do 2.7 experiments?",
+   "sources": [
+    "oc-iceman-testing.md"
+   ]
+  },
+  {
+   "q": "Is Demo-1 allowed to run with Jev/LLM/RAG/free-curriculum hard-off (ladder-spine + hand-written core only), or must the first night use the full brain?",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "q": "On an E-threshold miss, may the agent switch to the pre-agreed fallback (own minimal decoder / version freeze / client-mod spike) without asking, or must every miss wait for you?",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "q": "Which gate defines 'first demo success': the flawless video (1 run) or 18/20 fresh seeds with confidence intervals - pick one?",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "q": "Do you accept pinning client + server + decoder commits for the demo (no 26.4 upgrades mid-stream)?",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  },
+  {
+   "q": "May spikes/ helpers be committed now that Apache-2.0 is chosen, or must experiment code stay untracked?",
+   "sources": [
+    "oc-muse-dependency-order.md"
+   ]
+  }
+ ]
+}
