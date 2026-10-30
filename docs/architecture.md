@@ -227,6 +227,8 @@ skills / reflexes / planner / movement style
   Praxion never injects into the pause, options, social or death screens; inventory, chest,
   crafting-table and other container screens are normal play and use the absolute menu mode [D].
 - **Ownership** [D]: every injected event carries a per-run nonce; an event without it is the user's.
+  SDL 3.4.14 drops mouse events whose extra info looks like pen or touch, so the nonce avoids the
+  `0xFF5157xx` pattern and keeps bit `0x80` clear (sessions/02, round 0).
   A periodic probe on an unbound key proves the hook is alive. If the hook is lost, Praxion releases
   all keys and stops.
 - **Hand-over** [D]: by chat command, global hotkey or the interface. It waits until no physical

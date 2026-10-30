@@ -39,10 +39,14 @@ Confidence: verified (source code) · documented (official docs/wiki) · inferre
 ### Version baseline
 - Newest stable release: **26.3** (2026-09-15); snapshot 26.4-snapshot-5. (checked, Mojang
   version manifest.) Session 1 named 26.2; that is now one release behind.
-- 26.3 bundles LWJGL 3.4.3 and needs Java 25. GLFW commit inside it: unknown.
+- 26.3 bundles LWJGL 3.4.3 and needs Java 25. It uses SDL, not GLFW (corrected 2026-10-29, review round 1).
 - Protocol version 777 = 26.3 (documented: minecraft.wiki; verified: minecraft-data, MCProtocolLib, Velocity).
 
-### Mouse input path (GLFW, Windows)
+### Mouse input path (GLFW, Windows): superseded
+> **Superseded 2026-10-29.** Minecraft 26.3 ships SDL (`org.lwjgl:lwjgl-sdl:3.4.3`) and no GLFW
+> library (Mojang version manifest; NeoForge 26.3 primer). The GLFW analysis below describes code
+> 26.3 does not run; it is kept as history. Round 0 redoes it against SDL. See "2.7 Round 0".
+
 - GLFW registers raw mouse input without `RIDEV_INPUTSINK`: WM_INPUT arrives only while the window
   is in the foreground. The WM_INPUT handler does no filtering by device, extra info or injected
   flag; relative events use `lLastX/lLastY` directly; absolute events are converted to a delta
@@ -248,7 +252,29 @@ import body layers).
 - **Experiment code lives in `spikes/`, untracked, until the license is chosen.** Reports and
   measurements are committed as documents. `spikes/` is in `.gitignore` (minor pick by Claude).
 
-### Experiments
+### Amended plan (user, 2026-10-29, review round 1 Q11)
+The table below is amended as follows; the stop rule is unchanged, and a miss report carries a
+fallback shortlist for the user.
+- **Round 0 (desk, new):** version manifest; read the 26.3 SDL input path and key-binding format;
+  record a stock-client capture corpus (Status ping, Login, Configuration with Known Packs, one
+  Play→Configuration re-entry, 10+ min of Play). Server checklist for all rounds.
+- **E1, E3:** macOS judges correctness only; latency is judged on Windows under co-load (game,
+  test server, recorder) with p99 and p99.9; decode and world-model update measured apart; chunk
+  bursts reported apart; the forwarder-tee topology of decision Q3 is what is measured.
+- **E2:** decode the stock-client corpus at the pinned Azalea commit; pass = zero decode errors and
+  per-packet agreement with an oracle.
+- **E5:** the raw-input axis is dropped (the option no longer exists); add a pointer speed /
+  enhanced-precision matrix and check that an injected relative move turns the camera under SDL.
+- **E7, E8:** close the loop on serverbound per-tick packets. **E9:** add input-to-packet attribution.
+- **E10:** compare `SetCursorPos` with absolute `SendInput`. **E11:** borderless first.
+- **E12:** add the nonce check, hook-liveness probe, watchdog on the process handle with mouse
+  buttons, danger-held keys released last, the command gesture.
+- **E15 (new, Windows, round 4):** integrated tick, packet → decode → world model → reflex → hands →
+  server ack, under a chunk burst and a combat fixture; end-to-end p99 of a scripted reflex within 50 ms.
+- **E16 (new, after round 4):** protocol-body fidelity: the same scripted movement and dig sequence on
+  the real and the headless body, traces compared.
+
+### Experiments (as accepted before the amendment)
 | Round | # | Measures | Pass |
 |---|---|---|---|
 | 1 Eyes (also on macOS) | E1 | Latency added by the forwarding proxy | p99 < 1 ms; 10 min of play without disconnect or desync |
@@ -275,3 +301,57 @@ rounds run before session 3, because a failure changes the route (client-mod fal
 
 Update from session 4: the rule "release all keys on take-over" has an exception for dangerous
 moments (bridge-edge sneak, mid-air jump); see `docs/sessions/04-action-verification.md`.
+
+## 2.7 Round 0 (desk, started 2026-10-29)
+
+### Version manifest (draft; becomes `versions/` at Demo-0)
+| Item | Pinned value | Source |
+|---|---|---|
+| Minecraft Java | 26.3, release 2026-09-15; version JSON sha1 `5df1795e16eea19d75b923d66ecca9ce183353c5` (re-published 2026-10-27) | piston-meta version manifest v2 |
+| Protocol | 777 | Azalea `26.3` branch `azalea-protocol/src/packets/mod.rs`; minecraft.wiki |
+| Java runtime | 25 (`java-runtime-epsilon`) | 26.3 version JSON |
+| Client jar | sha1 `e877b6a07acd633fb3bb475002175cec036e7b87`, 41,483,720 bytes | 26.3 version JSON |
+| Server jar | sha1 `33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c`, 62,294,556 bytes | 26.3 version JSON |
+| LWJGL | 3.4.3, with `lwjgl-sdl` (no GLFW) | 26.3 version JSON libraries |
+| Azalea | branch `26.3`, commit `8041a14706fbdb2b8c481d2e8960d7411e850796` (2026-09-25); 11 ahead and 18 behind `main` (`0d38e0d`, 2026-10-16); licence MIT | GitHub API |
+| Rust toolchain | Azalea asks for an undated `nightly`; pin a dated nightly near the branch commit, e.g. `nightly-2026-09-25` (minor pick by Claude; confirmed when E2 builds) | `rust-toolchain.toml` |
+| Data reports | hash recorded after the first data-generator run | — |
+
+Newer at the time of writing: `26.4-snapshot-6`. Not used (decision Q4).
+
+### SDL 3.4.14 Windows input path (read 2026-10-29)
+LWJGL 3.4.3 bundles **SDL 3.4.14** (LWJGL 3.4.3 release notes, 2026-08-23). Read from SDL tag
+`release-3.4.14`, `src/video/windows/` (`SDL_windowsevents.c`, `SDL_windowsrawinput.c`,
+`SDL_windowsvideo.c`) and `include/SDL3/SDL_hints.h`:
+
+- **Keyboard (default path):** `WM_KEYDOWN`/`WM_KEYUP`; the scancode comes from `lParam` bits 16-23
+  plus `KF_EXTENDED` (`WindowsScanCodeToSDLScanCode`). `SendInput` with `KEYEVENTF_SCANCODE` fills
+  exactly these bits, so hands H1 holds. Raw keyboard is off by default
+  (`SDL_HINT_WINDOWS_RAW_KEYBOARD`, default 0); if a game turns it on, `WIN_HandleRawKeyboardInput`
+  has no `hDevice` filter, so injected keys still pass.
+- **Mouse in relative mode:** SDL enables raw mouse input (`WIN_SetRawMouseEnabled`) on a hidden
+  message-only window in its own thread (`CreateWindowEx(... HWND_MESSAGE ...)`, `dwFlags = 0`, so
+  no `RIDEV_INPUTSINK`: input arrives only while the game is in the foreground).
+  `WIN_HandleRawMouseInput` sends relative motion for any `hDevice`, including `NULL` (injected
+  events get mouse id 0), so injected relative moves should turn the camera (verify in E5).
+- **Filter that matters for the nonce:** raw mouse events are dropped when `ulExtraInformation`
+  carries the pen/touch signature (`(x & 0xFFFFFF00) == 0xFF515700`, `MI_WP_SIGNATURE`) or, when
+  touch devices exist, when bit `0x80` is set. **Praxion's `dwExtraInfo` nonce must avoid the
+  `0xFF5157xx` pattern and keep bit `0x80` clear.** The same check guards `WM_MOUSEMOVE` and buttons.
+- **Absolute moves** (`MOUSE_MOVE_ABSOLUTE`) go through a separate RDP/tablet branch; keep using
+  relative `MOUSEEVENTF_MOVE` only (H2 unchanged).
+- **GameInput:** SDL can read keyboard and mouse through GameInput instead of raw input, but only if
+  the game sets `SDL_HINT_WINDOWS_GAMEINPUT` (default off). Whether `SendInput` reaches GameInput is
+  unknown. **Open:** which SDL hints Minecraft 26.3 sets.
+- Pointer speed and "enhanced pointer precision": raw input reports device deltas before Windows
+  ballistics for real mice; whether an injected relative move is scaled first is **unknown**; E5
+  measures it (the pointer-speed matrix).
+
+### Still open in round 0 (moved to the Windows PC session; the user chose no downloads on the Mac)
+- Which SDL hints Minecraft 26.3 sets (GameInput, raw keyboard, relative-mode warp): grep the client
+  jar for `SDL_` hint strings, or decompile `com.mojang.blaze3d.platform` / `MouseHandler`.
+- The 26.3 mouse sensitivity formula in `MouseHandler` (session 2.3 still cites the old formula).
+- Key-binding format in `options.txt` under SDL scancodes.
+- Data generator run for the data-report hash (needs JDK 25 and the server jar).
+- Capture corpus: needs the game running.
+

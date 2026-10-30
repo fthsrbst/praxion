@@ -128,7 +128,10 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Source: Claude Sonnet 5.5, 2026-10-29
 - State: Experiments E1-E14 and thresholds agreed; no code written yet. Blocked: review round 1
   found that 26.3 uses SDL, not GLFW; the user accepted the amended plan (round 0, E15, E16, Q11),
-  see `docs/decisions.md`. Draft 2 is reviewed and accepted: round 0 (desk) can start.
+  see `docs/decisions.md`. Round 0 started: version manifest and the SDL 3.4.14 reading are in
+  `docs/sessions/02-body-connection.md` "2.7 Round 0"; the rest of round 0 (SDL hints Minecraft sets,
+  `MouseHandler` formula, `options.txt` format, data-report hash, capture corpus) waits for the Windows
+  PC, since the user chose no downloads on the Mac.
 - Remaining: write throwaway spikes in untracked `spikes/` (the free OpenCode worker may draft
   them; another model reviews), run round 1 on macOS, rounds 2-4 at the physical Windows PC,
   write results into `docs/sessions/02-body-connection.md`. Stop and ask the user on any miss.
