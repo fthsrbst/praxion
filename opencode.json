@@ -1,21 +1,27 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "opencode/minimax-m3.1-flash-free",
-  "permissions": [
-    { "action": "shell", "resource": "git push *", "effect": "deny" },
-    { "action": "shell", "resource": "git commit *", "effect": "deny" },
-    { "action": "shell", "resource": "git reset *", "effect": "deny" },
-    { "action": "shell", "resource": "git checkout *", "effect": "deny" },
-    { "action": "shell", "resource": "git rebase *", "effect": "deny" },
-    { "action": "shell", "resource": "git * push *", "effect": "deny" },
-    { "action": "shell", "resource": "git * commit *", "effect": "deny" },
-    { "action": "shell", "resource": "git * reset *", "effect": "deny" },
-    { "action": "shell", "resource": "git * checkout *", "effect": "deny" },
-    { "action": "shell", "resource": "git * rebase *", "effect": "deny" },
-    { "action": "shell", "resource": "rm -rf *", "effect": "deny" },
-    { "action": "external_directory", "resource": "*", "effect": "deny" },
-    { "action": "external_directory", "resource": "~/.config/opencode/*", "effect": "allow" },
-    { "action": "external_directory", "resource": "~/.claude/skills/*", "effect": "allow" },
-    { "action": "external_directory", "resource": "~/.agents/skills/*", "effect": "allow" }
-  ]
+  "permission": {
+    "*": "allow",
+    "bash": {
+      "*": "allow",
+      "git push *": "deny",
+      "git commit *": "deny",
+      "git reset *": "deny",
+      "git checkout *": "deny",
+      "git rebase *": "deny",
+      "git * push *": "deny",
+      "git * commit *": "deny",
+      "git * reset *": "deny",
+      "git * checkout *": "deny",
+      "git * rebase *": "deny",
+      "rm -rf *": "deny"
+    },
+    "external_directory": {
+      "*": "deny",
+      "~/.config/opencode/*": "allow",
+      "~/.claude/skills/*": "allow",
+      "~/.agents/skills/*": "allow"
+    }
+  }
 }
