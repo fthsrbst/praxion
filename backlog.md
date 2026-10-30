@@ -129,9 +129,11 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - State: Experiments E1-E14 and thresholds agreed; no code written yet. Blocked: review round 1
   found that 26.3 uses SDL, not GLFW; the user accepted the amended plan (round 0, E15, E16, Q11),
   see `docs/decisions.md`. Round 0 started: version manifest and the SDL 3.4.14 reading are in
-  `docs/sessions/02-body-connection.md` "2.7 Round 0"; the rest of round 0 (SDL hints Minecraft sets,
-  `MouseHandler` formula, `options.txt` format, data-report hash, capture corpus) waits for the Windows
-  PC, since the user chose no downloads on the Mac.
+  `docs/sessions/02-body-connection.md` "2.7 Round 0". On 2026-10-30 the user allowed downloads on
+  the Mac: SDL hints (no GameInput), mouse formula, `options.txt` format, data-report hash, an
+  Azalea packet-ID check and an Azalea build (pinned `nightly-2026-08-20`) are done ("Jar reading on
+  the Mac", "Azalea build"). The Azalea `26.3` branch is unfinished upstream (red CI, stale tests). Left in round 0: the capture corpus,
+  which needs the user at a machine to log in to the client (macOS or Windows; same jar).
 - Remaining: write throwaway spikes in untracked `spikes/` (the free OpenCode worker may draft
   them; another model reviews), run round 1 on macOS, rounds 2-4 at the physical Windows PC,
   write results into `docs/sessions/02-body-connection.md`. Stop and ask the user on any miss.

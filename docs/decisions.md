@@ -3,6 +3,15 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-10-30
+
+- **Rust toolchain for the Azalea `26.3` branch: `nightly-2026-08-20`, no extra flags.** The branch
+  (commit `8041a14`) does not build on nightlies near its commit date (unstable `generic_const_exprs`
+  breakage that Azalea `main` fixed later); this nightly builds the decoder crates unchanged.
+  Rejected: `nightly-2026-09-25` plus `-Znext-solver=coherence` (Azalea `main`'s own fix), which adds a
+  compiler flag the build depends on. Revisit when Praxion follows Azalea `main` to 26.3. Evidence:
+  `docs/sessions/02-body-connection.md` "Azalea build". (User, on Claude's recommendation.)
+
 ## 2026-10-29
 
 - **Architecture draft 2 accepted.** The user accepted every item that draft 2 tagged [P], in four

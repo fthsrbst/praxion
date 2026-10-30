@@ -314,8 +314,8 @@ moments (bridge-edge sneak, mid-air jump); see `docs/sessions/04-action-verifica
 | Server jar | sha1 `33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c`, 62,294,556 bytes | 26.3 version JSON |
 | LWJGL | 3.4.3, with `lwjgl-sdl` (no GLFW) | 26.3 version JSON libraries |
 | Azalea | branch `26.3`, commit `8041a14706fbdb2b8c481d2e8960d7411e850796` (2026-09-25); 11 ahead and 18 behind `main` (`0d38e0d`, 2026-10-16); licence MIT | GitHub API |
-| Rust toolchain | Azalea asks for an undated `nightly`; pin a dated nightly near the branch commit, e.g. `nightly-2026-09-25` (minor pick by Claude; confirmed when E2 builds) | `rust-toolchain.toml` |
-| Data reports | hash recorded after the first data-generator run | — |
+| Rust toolchain | `nightly-2026-08-20`, no extra flags (user, 2026-10-30; rejected: `nightly-2026-09-25` plus `-Znext-solver=coherence`). Re-pin when Azalea moves to `main` | build test, see "Azalea build" |
+| Data reports | tree hash `a6e12ba626ea9dcb25f2a3336522f787e82d9691bdb5817d90db070f0895a79f` (see below) | data generator, 2026-10-30 |
 
 Newer at the time of writing: `26.4-snapshot-6`. Not used (decision Q4).
 
@@ -342,16 +342,105 @@ LWJGL 3.4.3 bundles **SDL 3.4.14** (LWJGL 3.4.3 release notes, 2026-08-23). Read
   relative `MOUSEEVENTF_MOVE` only (H2 unchanged).
 - **GameInput:** SDL can read keyboard and mouse through GameInput instead of raw input, but only if
   the game sets `SDL_HINT_WINDOWS_GAMEINPUT` (default off). Whether `SendInput` reaches GameInput is
-  unknown. **Open:** which SDL hints Minecraft 26.3 sets.
+  unknown. **Closed 2026-10-30:** Minecraft 26.3 does not set it (see "Jar reading on the Mac").
 - Pointer speed and "enhanced pointer precision": raw input reports device deltas before Windows
   ballistics for real mice; whether an injected relative move is scaled first is **unknown**; E5
   measures it (the pointer-speed matrix).
 
-### Still open in round 0 (moved to the Windows PC session; the user chose no downloads on the Mac)
-- Which SDL hints Minecraft 26.3 sets (GameInput, raw keyboard, relative-mode warp): grep the client
-  jar for `SDL_` hint strings, or decompile `com.mojang.blaze3d.platform` / `MouseHandler`.
-- The 26.3 mouse sensitivity formula in `MouseHandler` (session 2.3 still cites the old formula).
-- Key-binding format in `options.txt` under SDL scancodes.
-- Data generator run for the data-report hash (needs JDK 25 and the server jar).
-- Capture corpus: needs the game running.
+### Jar reading on the Mac (2026-10-30)
+The user allowed downloads into untracked `spikes/round0/` (2026-10-30). Downloaded and verified:
+Temurin JDK 25.0.5+8 (Adoptium sha256 match), the 26.3 version JSON, client and server jars (sha1
+match the manifest above), Vineflower 1.12.0 decompiler (Maven Central sha1 match). The 26.3
+version JSON has no `client_mappings`: the jar ships unobfuscated, so class names below are Mojang's.
 
+**SDL hints Minecraft 26.3 sets** (every `SDLHints.SDL_SetHint` call site in the client jar; no other
+hint setter is referenced):
+
+| Class | Hint | Value |
+|---|---|---|
+| `RenderSystem` | `SDL_NO_SIGNAL_HANDLERS` | 1 |
+| `RenderSystem` | `SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS` | 0 |
+| `RenderSystem` | `SDL_QUIT_ON_LAST_WINDOW_CLOSE` | 0 |
+| `RenderSystem` | `SDL_MOUSE_FOCUS_CLICKTHROUGH` | 1 |
+| `RenderSystem` | `SDL_ENABLE_SCREEN_KEYBOARD` | 0 |
+| `RenderSystem` | `SDL_IME_IMPLEMENTED_UI` | `composition` |
+| `Window.setQuitShortcuts` | `SDL_WINDOWS_CLOSE_ON_ALT_F4` | 1 or 0 |
+| `MacosUtil` (macOS only) | `SDL_VIDEO_MAC_FULLSCREEN_MENU_VISIBILITY`, `SDL_MAC_CTRL_CLICK_EMULATE_RIGHT_CLICK` | 1 or 0 |
+
+- **No `SDL_WINDOWS_GAMEINPUT`, no `SDL_WINDOWS_RAW_KEYBOARD`, no relative-mode hints.** So on
+  Windows SDL uses its defaults: keyboard through `WM_KEYDOWN` scancodes, mouse in relative mode
+  through raw input. The GameInput risk is closed for the stock client. Caveat: SDL also reads hints
+  from environment variables; the vanilla launcher's version JSON sets none (verified), but a
+  third-party launcher could. The body should log the `SDL_*` environment of the game process.
+- `SDL_MOUSE_FOCUS_CLICKTHROUGH=1`: a click on the unfocused window is delivered to the game as well
+  as focusing it. Relevant to E11 and take-over: a focus-restoring click is also a game click.
+- Mouse grab (`InputConstants.grabMouse`): `SDL_WarpMouseInWindow` to the centre, then
+  `SDL_SetWindowRelativeMouseMode(true)`; release does the reverse. Also `SDL_SetWindowMouseGrab` in `Window`.
+- `InputQuirks.RESTORE_KEY_STATE_AFTER_MOUSE_GRAB` is true off macOS: after a grab the game re-reads
+  key state. Relevant to HoldGuard (keys held across a menu close); check in E11/E12.
+
+**Mouse to rotation (26.3, `MouseHandler` + `Entity.turn`, decompiled):**
+```
+onMove (SDL_EVENT_MOUSE_MOTION): grabbed -> accumulate xrel, yrel (SDL relative deltas)
+                                 not grabbed -> accumulate position differences
+handleAccumulatedMovement (once per render frame): if grabbed and player exists -> turnPlayer
+ss   = mouseSensitivity * 0.6 + 0.2        // options.txt, [0, 1], default 0.5
+sens = ss^3 * 8.0
+dYaw = (float) xo * 0.15 ; dPitch = (float) yo * 0.15 ; pitch clamped to ±90
+xo = dx * sens (normal) | dx * ss^3 (spyglass, first person) | SmoothDouble (cinematic)
+invertMouseX / invertMouseY negate xo / yo
+```
+- Same as the 26.2 formula above, except `invertMouseX` is new. Default 0.5 gives 0.15° per count.
+- Deltas are dropped while the window is inactive (`isWindowActive`), as before.
+- Whether SDL scales `xrel` for an injected move is still E5's question; with no
+  `SDL_MOUSE_RELATIVE_*` hint set, SDL's defaults apply (system scaling off).
+
+**Key bindings in `options.txt`:**
+- Line format `key_<mapping name>:<key name>`, e.g. `key_key.forward:key.keyboard.w`. The file starts
+  with `version:<data version>` and is upgraded through `DataFixTypes.OPTIONS`.
+- Key names are `key.keyboard.<name>` or `key.mouse.<name>`; unnamed codes are `key.keyboard.<n>` /
+  `key.mouse.<n>`. The 256 keyboard names map to **SDL scancodes**, which are USB HID usage IDs
+  (`a`=4, `w`=26, `space`=44, `escape`=41, `t`=23, `slash`=56, `left.shift`=225, `left.control`=224).
+  Names are positional, not layout letters: `key.keyboard.w` is the key at the US-W position on any layout.
+- Mouse buttons use SDL numbering: `left`=1, `middle`=2, `right`=3, then 4–8 (GLFW used 0/1/2).
+- Default bindings in `Options`: forward 26, left 4, back 22, right 7, jump 44, sneak 225 (toggle
+  option), sprint 224, inventory 8, drop 20, chat 23, command 56, attack mouse 1, use mouse 3,
+  pick mouse 2.
+- Consequence for the actuator: read the user's bindings from `options.txt`, map SDL scancode →
+  Windows set-1 scancode (inverse of SDL's `windows_scancode_table`), send `KEYEVENTF_SCANCODE`.
+
+**Data reports:** `java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports`
+writes 1,666 files under `generated/reports` in ~5 s. Two runs gave the same tree hash, so the
+reports are deterministic.
+- Tree hash (minor pick by Claude): sha256 of the sorted `shasum -a 256` listing of every file
+  under `reports/`. Value: `a6e12ba626ea9dcb25f2a3336522f787e82d9691bdb5817d90db070f0895a79f`.
+- `blocks.json` sha256 `7a0de8aa…05a4`: 1,286 blocks, 35,723 states.
+- `packets.json` sha256 `2f048631…6886`: play 144 clientbound / 69 serverbound; configuration 21 / 10;
+  login 6 / 5; status 2 / 2; handshake 1.
+- `registries.json` sha256 `51f62d56…cdac6`.
+
+### Azalea build (2026-10-30)
+- The `26.3` branch does **not** build on the nightly near its commit date: `nightly-2026-09-15`,
+  `nightly-2026-09-25` fail in `azalea-entity` (E0284 on `azalea-core::bitset::FixedBitSet`, from the
+  unstable `generic_const_exprs`); `nightly-2026-10-29` panics the compiler. Upstream CI on the branch
+  is red on every commit since 2026-07-05; `main` is green (2026-10-16).
+- Cause: `main` fixed nightly breakage after the branch split: `153c90aa` (#378, 2026-08-26) adds
+  `-Znext-solver=coherence` to `.cargo/config.toml`; `b65fa8cf` (#380) moves to `generic_const_args`.
+- Two setups build `azalea-protocol` and `azalea-world` cleanly (macOS arm64, `--locked`, ~1 min):
+  A. `nightly-2026-09-25` with `RUSTFLAGS="--cfg docsrs_dep -Znext-solver=coherence"` (main's own fix);
+  B. `nightly-2026-08-20`, no flags.
+- Tests on B: `azalea-buf` 11, `azalea-world` 15, `azalea-block` 11, `azalea-registry` 6,
+  `azalea-chat` 31 pass, 0 fail (`azalea-buf` needs `--features azalea-buf/serde_json` when tested
+  alone). `azalea-protocol`'s own tests do not compile: the `update_advancements` test still uses
+  fields removed in `aa5d4cbe` (2026-09-24). `azalea-core` alone does not compile under `cargo test`
+  (feature unification; builds fine as a dependency). Not chased further.
+- Packet IDs: all 260 packets of every state and direction match `packets.json` in order (names
+  differ only in `debug/x` vs `debug_x`). This checks IDs, not field layouts; E2 checks layouts.
+- Risk for E2 and Demo-0: the branch is unfinished upstream work (red CI, stale tests). Expect to
+  carry small local patches or to follow `main` once it moves to 26.3. Fallback stays MCProtocolLib.
+
+### Still open in round 0
+- Capture corpus: needs the client running with the user's Microsoft login, so the user must be at
+  a machine. Any machine works: the client jar is identical on macOS and Windows. Needs a local
+  26.3 server in offline mode (server jar and JDK are already in `spikes/round0/`).
+- Windows-only checks move to round 2 (E5): `hDevice` of injected events, pointer-speed matrix.
