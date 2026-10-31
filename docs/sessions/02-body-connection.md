@@ -493,9 +493,24 @@ clicks, GUI scales), E11 (window modes; run with a separate `--gameDir` so the u
 untouched), E12 (needs the user's physical key presses), E5 pointer-speed matrix (needs the user to change
 a system setting), E14 (written comparison), E15, E16.
 
+### E2 follow-up: local Azalea patches (user approved, 2026-10-31)
+- 26.3 layouts are read from the server's own classes with `spikes/round0/classcalls.py` (stdlib class-file
+  reader: lists field and method references per method, in order). No decompiler is run.
+- `level_particles` (26.3): particle first, then `override_limiter`, `always_show`, x/y/z (double),
+  x/y/z dist (float), **x/y/z max speed** (float), count (**VarInt**), **randomization type** (VarInt enum:
+  default, alternative, alternative with speed). Patched; `corpus1` now decodes 291,523 packets with 0 errors
+  (the 4 packets were sand landing particles, count 150).
+- `corpus4` (12.2 min of play, `/transfer` reconnect works with `accepts-transfers=true`, 386,114 packets):
+  2 errors in `update_advancements`. 26.3 `DisplayInfo` sends the icon as `ItemStackTemplate` and no
+  longer sends x/y. Patch in progress.
+- Proxy fix: capture timestamps were taken after `write_all`, not when `read()` returned, so a status
+  reply could carry an earlier timestamp than its request (1 decode error in `corpus4`). Fixed. Effect on
+  E9 is below 0.1 ms (write cost p50 ~70 µs).
+- Decoder fix in progress: answer block queries from the game connection that ended last (after a
+  transfer the old connection's world is stale).
+- Patches live in `spikes/patches/`; apply them after cloning Azalea at the pinned commit.
+
 ### Proposals for the user (not decided)
-- E2: carry a local patch for `ClientboundLevelParticles` on the pinned Azalea commit (find the 26.3 layout
-  in the server jar), then rerun E2 on a fresh 10-minute corpus.
 - E13: the body process sets `nothrottle,high,mmcss` (process-local; no system settings) as a requirement.
 - E7: hold keys for a number of client ticks counted from the proxy's `client_tick_end`, not for a fixed
   50 ms; a fixed hold misses or doubles about 3% of the time depending on phase.

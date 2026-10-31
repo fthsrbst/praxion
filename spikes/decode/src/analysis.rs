@@ -221,6 +221,10 @@ pub struct ConnectionSummary {
     pub player: Option<PlayerPos>,
     pub notes: Vec<String>,
     pub stopped: Option<String>,
+    /// Timestamp of the last frame processed for this connection, any state.
+    pub last_ts_unix_ns: u64,
+    /// Whether this connection ever entered the game state.
+    pub reached_game: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +258,9 @@ pub struct Analysis {
     pub e3: E3Stats,
     pub e4: E4Stats,
     pub blocks: Vec<BlockAnswer>,
+    /// The connection whose world answers `--block` and the end-of-capture
+    /// player summary: the game connection that ended last.
+    pub end_world_conn: Option<u32>,
 }
 
 impl Analysis {
@@ -298,6 +305,7 @@ pub fn analyze(capture_name: &str, capture: &Capture, options: &Options) -> Anal
         e3: E3Stats::default(),
         e4: E4Stats::default(),
         blocks: Vec::new(),
+        end_world_conn: None,
     };
 
     if let Some(offset) = capture.truncated_at {
@@ -350,7 +358,30 @@ pub fn analyze(capture_name: &str, capture: &Capture, options: &Options) -> Anal
         analysis.connections.push(summary);
     }
 
-    // 4. Answer --block queries at the end of the capture.
+    // 4. Pick the world that is live at the end of the capture: the game
+    // connection whose last frame has the newest timestamp. A `/transfer`
+    // starts a second game connection, and the first one's world is stale by
+    // then. Ties go to the higher connection id.
+    let end_world_conn = analysis
+        .connections
+        .iter()
+        .filter(|connection| connection.reached_game)
+        .filter(|connection| {
+            worlds
+                .iter()
+                .any(|(conn_id, _)| *conn_id == connection.conn_id)
+        })
+        .max_by_key(|connection| (connection.last_ts_unix_ns, connection.conn_id))
+        .map(|connection| connection.conn_id);
+    analysis.end_world_conn = end_world_conn;
+    let end_world = end_world_conn.and_then(|conn_id| {
+        worlds
+            .iter()
+            .find(|(world_conn_id, _)| *world_conn_id == conn_id)
+            .map(|(_, world)| (conn_id, world))
+    });
+
+    // 5. Answer --block queries against that world at the end of the capture.
     for pos in &options.blocks {
         let mut answer = BlockAnswer {
             pos: *pos,
@@ -358,13 +389,12 @@ pub fn analyze(capture_name: &str, capture: &Capture, options: &Options) -> Anal
             block: None,
             note: Some("no connection decoded a game world".to_owned()),
         };
-        for (conn_id, world) in &worlds {
+        if let Some((conn_id, world)) = end_world {
             match world.block_state(*pos) {
                 Some(state) => {
-                    answer.conn_id = Some(*conn_id);
+                    answer.conn_id = Some(conn_id);
                     answer.block = Some(BlockDescription::of(state));
                     answer.note = None;
-                    break;
                 }
                 None => {
                     let chunk = ChunkPos::from(*pos);
@@ -410,6 +440,8 @@ struct ConnectionState {
     dimension: Option<DimensionInfo>,
     player: Option<PlayerPos>,
     notes: Vec<String>,
+    last_ts_unix_ns: u64,
+    reached_game: bool,
 }
 
 impl ConnectionState {
@@ -427,6 +459,8 @@ impl ConnectionState {
             dimension: None,
             player: None,
             notes: Vec::new(),
+            last_ts_unix_ns: 0,
+            reached_game: false,
         }
     }
 
@@ -453,6 +487,7 @@ impl ConnectionState {
         } else {
             self.cb_state
         };
+        self.last_ts_unix_ns = self.last_ts_unix_ns.max(frame.ts_unix_ns);
         let stream_index = self.next_stream_index(frame.dir);
         let group = analysis.groups.entry((state, frame.dir)).or_default();
 
@@ -640,9 +675,22 @@ impl ConnectionState {
             Action::StateBoth(next) => {
                 self.sb_state = *next;
                 self.cb_state = *next;
+                if *next == State::Game {
+                    self.reached_game = true;
+                }
             }
-            Action::StateClientbound(next) => self.cb_state = *next,
-            Action::StateServerbound(next) => self.sb_state = *next,
+            Action::StateClientbound(next) => {
+                self.cb_state = *next;
+                if *next == State::Game {
+                    self.reached_game = true;
+                }
+            }
+            Action::StateServerbound(next) => {
+                self.sb_state = *next;
+                if *next == State::Game {
+                    self.reached_game = true;
+                }
+            }
             Action::Compression(threshold) => {
                 if *threshold < 0 {
                     self.compression = None;
@@ -849,6 +897,8 @@ impl ConnectionState {
             player: self.player,
             notes: self.notes,
             stopped: self.stopped,
+            last_ts_unix_ns: self.last_ts_unix_ns,
+            reached_game: self.reached_game,
         }
     }
 }

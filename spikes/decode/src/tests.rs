@@ -50,6 +50,7 @@ use crate::world::BlockDescription;
 struct Builder {
     records: Vec<Record>,
     ts: u64,
+    conn_id: u32,
     rng: u64,
     payload_size: usize,
 }
@@ -59,9 +60,14 @@ impl Builder {
         Self {
             records: Vec::new(),
             ts: 1_700_000_000_000_000_000,
+            conn_id: 0,
             rng: 0x2545_f491_4f6c_dd1d,
             payload_size: 0,
         }
+    }
+
+    fn set_conn_id(&mut self, conn_id: u32) {
+        self.conn_id = conn_id;
     }
 
     fn next_random(&mut self) -> u64 {
@@ -85,7 +91,7 @@ impl Builder {
             let end = (offset + chunk).min(wire.len());
             let record = Record {
                 ts_unix_ns: self.ts,
-                conn_id: 0,
+                conn_id: self.conn_id,
                 dir,
                 seq: self.records.len(),
                 data: wire[offset..end].to_vec(),
@@ -99,7 +105,7 @@ impl Builder {
     fn marker(&mut self, dir: Dir) {
         self.records.push(Record {
             ts_unix_ns: self.ts,
-            conn_id: 0,
+            conn_id: self.conn_id,
             dir,
             seq: self.records.len(),
             data: Vec::new(),
@@ -214,9 +220,19 @@ fn dirt_section_update(dirt: BlockState) -> ClientboundSectionBlocksUpdate {
 /// Play -> Configuration re-entry and back to Play.
 fn build_session() -> (Vec<u8>, usize) {
     let stone = find_block("minecraft:stone");
-    let dirt = find_block("minecraft:dirt");
 
     let mut builder = Builder::new();
+    builder.set_conn_id(0);
+    add_session(&mut builder, stone);
+
+    let payload = builder.payload_size;
+    (builder.into_capture(), payload)
+}
+
+/// Append one whole session to `builder`. `block` is placed at (0, 64, 0).
+fn add_session(builder: &mut Builder, block: BlockState) {
+    let dirt = find_block("minecraft:dirt");
+
     builder.marker(Dir::Opened);
 
     // Handshake -> login.
@@ -303,7 +319,7 @@ fn build_session() -> (Vec<u8>, usize) {
         Dir::Clientbound,
         &ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
             pos: BlockPos::new(0, 64, 0),
-            block_state: stone,
+            block_state: block,
         }),
         Some(256),
     );
@@ -403,7 +419,7 @@ fn build_session() -> (Vec<u8>, usize) {
         Dir::Clientbound,
         &ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
             pos: BlockPos::new(0, 64, 0),
-            block_state: stone,
+            block_state: block,
         }),
         Some(256),
     );
@@ -449,9 +465,6 @@ fn build_session() -> (Vec<u8>, usize) {
         Some(256),
     );
     builder.marker(Dir::Closed);
-
-    let payload = builder.payload_size;
-    (builder.into_capture(), payload)
 }
 
 #[test]
@@ -598,6 +611,46 @@ fn synthetic_session_decodes_with_zero_errors() {
         custom.wire_size,
         custom.size
     );
+}
+
+#[test]
+fn blocks_use_the_game_connection_that_ended_last() {
+    let stone = find_block("minecraft:stone");
+    let gold = find_block("minecraft:gold_block");
+
+    let mut builder = Builder::new();
+    builder.set_conn_id(0);
+    add_session(&mut builder, stone);
+    builder.set_conn_id(1);
+    add_session(&mut builder, gold);
+    let capture = builder.into_capture();
+
+    let options = Options {
+        blocks: vec![BlockPos::new(0, 64, 0)],
+        dump: None,
+    };
+    let analysis =
+        crate::analyze_bytes("two-connections.prxcap", &capture, &options).expect("decode");
+    assert!(analysis.passed(), "expected PASS\n{}", analysis.text_report());
+
+    // The second connection ends later (a `/transfer` reconnect in miniature),
+    // so its world answers the query even though connection 0 has the chunk too.
+    assert_eq!(analysis.end_world_conn, Some(1));
+    assert_eq!(analysis.blocks[0].conn_id, Some(1));
+    assert_eq!(
+        analysis.blocks[0]
+            .block
+            .as_ref()
+            .map(|b| b.name.as_str()),
+        Some("minecraft:gold_block")
+    );
+
+    let report = analysis.text_report();
+    assert!(
+        report.contains("world: connection 1 (last connection that reached game state)"),
+        "{report}"
+    );
+    assert!(report.contains("-> minecraft:gold_block (connection 1)"), "{report}");
 }
 
 #[test]

@@ -279,6 +279,9 @@ fn forward_dir(
             }
             Ok(n) => {
                 let t_read = Instant::now();
+                // Capture timestamp = when read() returned (spikes/README.md contract), taken before
+                // forwarding so a reply can never carry an earlier timestamp than its request.
+                let ts_read = now_ns();
                 // write_all
                 if let Err(_) = to.write_all(&buf[0..n]) {
                     // write error: close both
@@ -334,7 +337,7 @@ fn forward_dir(
                 }
 
                 let rec = CaptureRecord {
-                    ts: now_ns(),
+                    ts: ts_read,
                     conn_id,
                     dir,
                     data: buf[0..n].to_vec(),

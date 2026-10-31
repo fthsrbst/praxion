@@ -4,12 +4,20 @@
 use std::fmt::Write as _;
 
 use crate::analysis::{
-    Analysis, BlockAnswer, DimensionInfo, E3Stats, E4Stats, MoveStats, PacketRecord, PercentilesUs,
-    State,
+    Analysis, BlockAnswer, ConnectionSummary, DimensionInfo, E3Stats, E4Stats, MoveStats,
+    PacketRecord, PercentilesUs, State,
 };
 use crate::capture::Dir;
 
 impl Analysis {
+    /// The connection whose world and player represent the end of the capture.
+    fn end_of_capture_connection(&self) -> Option<&ConnectionSummary> {
+        let conn_id = self.end_world_conn?;
+        self.connections
+            .iter()
+            .find(|connection| connection.conn_id == conn_id)
+    }
+
     pub fn text_report(&self) -> String {
         let mut out = String::new();
 
@@ -115,6 +123,38 @@ impl Analysis {
         write_e3(&mut out, &self.e3);
         write_e4(&mut out, &self.e4);
 
+        let _ = writeln!(out, "end of capture");
+        match self.end_of_capture_connection() {
+            Some(connection) => {
+                let _ = writeln!(
+                    out,
+                    "  world: connection {} (last connection that reached game state)",
+                    connection.conn_id
+                );
+                match connection.player {
+                    Some(player) => {
+                        let _ = writeln!(
+                            out,
+                            "  player: x {:.3} y {:.3} z {:.3} yaw {:.3} pitch {:.3} (connection {})",
+                            player.pos.x,
+                            player.pos.y,
+                            player.pos.z,
+                            player.yaw,
+                            player.pitch,
+                            connection.conn_id
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(out, "  player: none for connection {}", connection.conn_id);
+                    }
+                }
+            }
+            None => {
+                let _ = writeln!(out, "  world: none (no connection reached game state)");
+            }
+        }
+        let _ = writeln!(out);
+
         let _ = writeln!(out, "blocks at the end of the capture");
         if self.blocks.is_empty() {
             let _ = writeln!(out, "  none requested");
@@ -195,6 +235,11 @@ impl Analysis {
                             .map(|s| Json::str(s.clone()))
                             .unwrap_or(Json::Null),
                     ),
+                    (
+                        "last_ts_unix_ns",
+                        Json::uint(connection.last_ts_unix_ns),
+                    ),
+                    ("reached_game", Json::Bool(connection.reached_game)),
                 ])
             })
             .collect();
@@ -266,6 +311,12 @@ impl Analysis {
 
         obj.push(("e3", e3_json(&self.e3)));
         obj.push(("e4", e4_json(&self.e4)));
+        obj.push((
+            "end_world_conn",
+            self.end_world_conn
+                .map(|id| Json::uint(id as u64))
+                .unwrap_or(Json::Null),
+        ));
         obj.push((
             "blocks",
             Json::Arr(self.blocks.iter().map(block_json).collect()),
