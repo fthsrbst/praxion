@@ -472,13 +472,15 @@ libraries and the client jar sha1-checked), no launcher tweaker. Code: `spikes/`
 |---|---|---|---|
 | `corpus1` | 13 min play (injected walk/turn/jump, 3 far teleports = chunk bursts, 300 status pings, `/transfer`) | 40,343 | sha256 `3bb8e784…3222`; player died after a far teleport (fall); transfer refused (server setting) |
 | `corpus2` | E1 run: 4,000 status pings, chunk bursts | 4001 connections | every connection has open and close records (fixed proxy) |
-| `corpus3` | ground-truth blocks, E7 key holds, E6 aiming | 28,686 at snapshot 1 | live session, still capturing |
+| `corpus3` | ground-truth blocks, E7 key holds, E6 aiming | 373,626 packets (snapshot 2) | player killed by a zombie at the end (difficulty reset to easy on restart; now `peaceful` in `server.properties`) |
+| `corpus4` | 12.2 min play with `/transfer` reconnect | 386,114 packets | sha256 `fcea0ba9…9225`; old proxy timestamps (one status reply stamped before its request) |
+| `corpus5` | 11.1 min play, `/transfer`, ground-truth blocks, fixed proxy | 400,593 packets | sha256 `8ba518f0…aa37`; the E2 reference corpus |
 
 ### Results so far
 | # | Result | Verdict |
 |---|---|---|
 | E1 | Interleaved status pings, proxy vs direct, game running, chunk bursts, n=3000 pairs: added round trip p50 0.155 ms, p99 0.50 ms, p99.9 2.0 ms, max 4.1 ms (both directions) | **pass** (p99 < 1 ms) |
-| E2 | `corpus1` (13 min): 291,523 packets, 4 errors, all `level_particles` (Azalea's `ClientboundLevelParticles` leaves 6 of 56 bytes unread). `corpus3` snapshot: 293,036 packets, 0 errors, 10/10 ground-truth blocks right (incl. a block removed after placement, block properties, a block inside a `fill`) | **miss** on `corpus1` (zero errors required); layouts otherwise agree |
+| E2 | With the local Azalea patches (`spikes/patches/`): `corpus5` (fixed proxy, 11.1 min of play, a `/transfer` reconnect, 300 status pings): **400,593 packets, 0 errors, 0 unconsumed**, 5/5 ground-truth blocks right (incl. a removed block). `corpus1` 291,523 / 0 errors; `corpus3` 373,626 / 0 errors. Unpatched Azalea failed on `level_particles` and `update_advancements` | **pass** (with patches); the oracle is the ground-truth blocks, not a second decoder |
 | E3 | Offline replay of `corpus1` (processing time only, no queueing): steady-state decode p99 0.7 µs, p99.9 7.9 µs; chunk decode p99 133 µs; chunk apply p99 163 µs; block apply p99 28 µs | **pass** (p99 < 5 ms); arrival-to-state under live load is E15 |
 | E4 | `client_tick_end` 20.00/s; `move_player_pos` 3.0/s mean, 50 ms gaps while moving, gaps > 1 s when still; `move_player_rot` gaps 50 ms | measure only |
 | E7 | 50 ms `W` hold, tuned timer. Run 1 (gap 450 ms = 9 ticks, constant phase): 100/100 exactly one tick. Run 2 (gap 433 ms, phase swept 0.5–50 ms): 194/200 one tick, 4 two ticks, 2 never on the wire | **pass** (97% ≥ 95%), phase-dependent |
@@ -501,13 +503,13 @@ a system setting), E14 (written comparison), E15, E16.
   default, alternative, alternative with speed). Patched; `corpus1` now decodes 291,523 packets with 0 errors
   (the 4 packets were sand landing particles, count 150).
 - `corpus4` (12.2 min of play, `/transfer` reconnect works with `accepts-transfers=true`, 386,114 packets):
-  2 errors in `update_advancements`. 26.3 `DisplayInfo` sends the icon as `ItemStackTemplate` and no
-  longer sends x/y. Patch in progress.
+  2 errors in `update_advancements`. 26.3 layout: x/y moved from `DisplayInfo` to the packet's positioned
+  entry; the icon is an `ItemStackTemplate` (item id VarInt, count VarInt, data component patch). Patched.
 - Proxy fix: capture timestamps were taken after `write_all`, not when `read()` returned, so a status
   reply could carry an earlier timestamp than its request (1 decode error in `corpus4`). Fixed. Effect on
   E9 is below 0.1 ms (write cost p50 ~70 µs).
-- Decoder fix in progress: answer block queries from the game connection that ended last (after a
-  transfer the old connection's world is stale).
+- Decoder fix: block queries are answered from the game connection that ended last (after a transfer the
+  old connection's world is stale).
 - Patches live in `spikes/patches/`; apply them after cloning Azalea at the pinned commit.
 
 ### Proposals for the user (not decided)

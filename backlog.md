@@ -138,12 +138,14 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 ### Run the session 2.7 experiments
 - Source: Claude Opus 5.5, 2026-10-31 (Windows runs)
 - State: Round 0 and most of rounds 1-2 ran on the Windows PC on 2026-10-31; results in
-  `docs/sessions/02-body-connection.md` "2.7 Windows runs". Pass: E1, E3, E5, E6, E7, E13 (only with
-  process settings). Miss: E2 on `corpus1` (Azalea `level_particles` layout). Measured: E4, E9.
-- Remaining: user decisions on the four proposals in that section; E2 rerun after the decision; E8, E10,
+  `docs/sessions/02-body-connection.md` "2.7 Windows runs". Pass: E1, E2 (with local Azalea patches,
+  `spikes/patches/`), E3, E5, E6, E7, E13 (only with process settings). Measured: E4, E9.
+- Remaining: user decisions on the three open proposals in that section; E8, E10,
   E11, E12 (needs the user's physical key presses), E5 pointer-speed matrix (user changes the setting),
   E14, E15, E16. Hands spike review finding #1 (key slot published before its scancode; guarded by the
   gate except on a same-thread panic) and #6-8 (E12 timestamps) are open in `spikes/hands`.
+- Also: a one-command setup script for a new machine (Rust + llvm-tools + dlltool copy, server jar,
+  Azalea clone at the pin + patches, generated `.cargo/config.toml` without hard-coded paths).
 - Pointers: `spikes/README.md`, `logs/briefs/` (worker briefs, ignored), `spikes/captures/` (ignored)
 
 ## Done
