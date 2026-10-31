@@ -69,8 +69,10 @@ timeout 90 opencode run --auto -m opencode-go/deepseek-v4.1-flash "Reply with ex
 
 ## Safety rails (this repo's `opencode.json`)
 
-Verified under `--auto` on macOS only. **Not re-verified on Windows**: Windows paths
-(`C:\...`, backslashes) may slip past rules written for Unix paths. Until verified, treat these as unproven there.
+Verified under `--auto` on macOS (2026-10-21) and Windows (2026-10-31). Windows results:
+- Denied: `git commit ...` and `git -c user.name=x commit ...`; read and write tools on `C:\...` paths outside the repo.
+- **Not caught on Windows:** shell commands with absolute outside paths (`type C:\Users\...\file` printed the file),
+  in addition to `~` paths (as on macOS). On Windows the shell gives no path protection at all.
 - Denied: `git push`, `git commit`, `git reset`, `git checkout`, `git rebase`, `rm -rf`.
   Each git rule also has a `git * <cmd> *` twin, because `git commit *` alone misses
   global options such as `git -c user.name=x commit ...`.
