@@ -10,10 +10,12 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
   Minecraft only (Java Edition, singleplayer, Windows); see `docs/decisions.md`.
 - Phase 0, research and design. All 15 discussion sessions are done; their decisions are in
   `docs/decisions.md`. Research lives in `docs/research/`.
-- Discussion sessions (`docs/discussion-plan.md`): all done. Session 2's experiments (2.7) have not run
-  yet. `docs/architecture.md` draft 2 is reviewed and accepted (reviews in `docs/reviews/`).
-  Next: the 2.7 experiments, starting with desk round 0 (spike code in `spikes/`, committed; jars,
-  build output and captures stay ignored), then the first product code, starting with Demo-0 (architecture §1.1). Agreed decisions go to `docs/decisions.md`; per-session notes go to
+- Discussion sessions (`docs/discussion-plan.md`): all done. `docs/architecture.md` draft 2 is reviewed
+  and accepted (reviews in `docs/reviews/`). Session 2's experiments (2.7) are running on the Windows PC
+  since 2026-10-31: results in `docs/sessions/02-body-connection.md` "2.7 Windows runs", open items in
+  `backlog.md` (spike code in `spikes/`, committed; downloads, build output and captures stay ignored).
+  Next: the user's decisions on the 2.7 proposals, the remaining experiments, then the first product
+  code, starting with Demo-0 (architecture §1.1). Agreed decisions go to `docs/decisions.md`; per-session notes go to
   `docs/sessions/NN-topic.md`.
 - Do not scaffold, add dependencies or write product code until the 2.7 experiments have passed. Experiment code in `spikes/` is allowed.
 - When this section is stale, fix it in the same change that makes it stale.

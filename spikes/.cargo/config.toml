@@ -1,0 +1,22 @@
+# Toolchain fix for every crate under spikes/ (pinned host x86_64-pc-windows-gnu, self-contained mingw,
+# no MinGW binutils installed). Two problems, two settings:
+#
+# 1. dlltool. Crates that link through `raw-dylib` (windows-sys 0.61, getrandom 0.4) need rustc to
+#    generate import libraries with a dlltool; the sysroot copy needs an assembler that is not installed.
+#    LLVM's dlltool is the same binary as llvm-ar (it picks its mode from its file name), so
+#    `spikes/.toolchain/llvm-dlltool.exe` is a copy of `llvm-ar.exe` from the rustup `llvm-tools` component.
+# 2. linker. binutils' ld cannot read import libraries made by LLVM: it links, then the EXE dies with
+#    STATUS_ACCESS_VIOLATION before `main` (rustc says so in `back/archive.rs`). Linking with rust-lld in
+#    its gnu flavour fixes it.
+#
+# Recreate the dlltool copy with:
+#   rustup component add llvm-tools
+#   cp "$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-gnu/bin/llvm-ar.exe" spikes/.toolchain/llvm-dlltool.exe
+# rustc resolves both paths from each crate's build directory, so they must be absolute.
+[target.x86_64-pc-windows-gnu]
+linker = "C:/Users/fatih/.rustup/toolchains/nightly-2026-08-20-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe"
+rustflags = [
+    "-C", "dlltool=C:/Users/fatih/praxion/spikes/.toolchain/llvm-dlltool.exe",
+    "-Z", "unstable-options",
+    "-C", "linker-flavor=gnu-lld",
+]

@@ -24,7 +24,9 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - State: Rails test ran 2026-10-31 (user-approved). Git commit variants and read/write tools outside the repo are denied.
   Shell commands with absolute Windows paths (`type C:\...`) and `~` paths read outside files: not caught.
 - Remaining: agree a fix with the user (shell deny rules for drive-letter paths, or accept and rely on the brief),
-  apply it, re-run the test. Also find out whether the service keeps generating after the watchdog kills a client.
+  apply it, re-run the test. Answered 2026-10-31: the service DOES keep running a session after
+  `oc-run.sh` kills its client (a decoder worker kept editing for 18 min); stop it with
+  `opencode session export <id>` then `opencode session delete <id>`. Make `oc-run.sh` do this on timeout.
 - Pointers: `.claude/skills/opencode-worker/SKILL.md` ("Safety rails"), `opencode.json`
 
 ### Finish the source-level systems review
@@ -134,19 +136,15 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Pointers: `docs/reviews/2026-10-29-arch-r1/synthesis.md` "Ideas worth adopting"
 
 ### Run the session 2.7 experiments
-- Source: Claude Sonnet 5.5, 2026-10-29
-- State: Experiments E1-E14 and thresholds agreed; no code written yet. Blocked: review round 1
-  found that 26.3 uses SDL, not GLFW; the user accepted the amended plan (round 0, E15, E16, Q11),
-  see `docs/decisions.md`. Round 0 started: version manifest and the SDL 3.4.14 reading are in
-  `docs/sessions/02-body-connection.md` "2.7 Round 0". On 2026-10-30 the user allowed downloads on
-  the Mac: SDL hints (no GameInput), mouse formula, `options.txt` format, data-report hash, an
-  Azalea packet-ID check and an Azalea build (pinned `nightly-2026-08-20`) are done ("Jar reading on
-  the Mac", "Azalea build"). The Azalea `26.3` branch is unfinished upstream (red CI, stale tests). Left in round 0: the capture corpus,
-  which needs the user at a machine to log in to the client (macOS or Windows; same jar).
-- Remaining: write throwaway spikes in untracked `spikes/` (the free OpenCode worker may draft
-  them; another model reviews), run round 1 on macOS, rounds 2-4 at the physical Windows PC,
-  write results into `docs/sessions/02-body-connection.md`. Stop and ask the user on any miss.
-- Pointers: `docs/sessions/02-body-connection.md` §2.7
+- Source: Claude Opus 5.5, 2026-10-31 (Windows runs)
+- State: Round 0 and most of rounds 1-2 ran on the Windows PC on 2026-10-31; results in
+  `docs/sessions/02-body-connection.md` "2.7 Windows runs". Pass: E1, E3, E5, E6, E7, E13 (only with
+  process settings). Miss: E2 on `corpus1` (Azalea `level_particles` layout). Measured: E4, E9.
+- Remaining: user decisions on the four proposals in that section; E2 rerun after the decision; E8, E10,
+  E11, E12 (needs the user's physical key presses), E5 pointer-speed matrix (user changes the setting),
+  E14, E15, E16. Hands spike review finding #1 (key slot published before its scancode; guarded by the
+  gate except on a same-thread panic) and #6-8 (E12 timestamps) are open in `spikes/hands`.
+- Pointers: `spikes/README.md`, `logs/briefs/` (worker briefs, ignored), `spikes/captures/` (ignored)
 
 ## Done
 

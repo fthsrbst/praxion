@@ -96,7 +96,10 @@ Verified under `--auto` on macOS (2026-10-21) and Windows (2026-10-31). Windows 
    Tune with `OC_STALL_SECS` (default 300) and `OC_WALL_SECS` (default 1800).
    On Windows run it with Git Bash (the Bash tool). It kills with `taskkill /T` there; verified 2026-10-31
    (exit 0 path and exit 11 path; the shared `opencode serve --service` process correctly survives).
-   Unknown: whether the service keeps generating for a session whose client was killed.
+   **The service keeps running the session after its client is killed** (measured 2026-10-31: a timed-out
+   decoder worker kept editing files and running `cargo clean` for 18 minutes). After exit 10 or 11, stop it:
+   `opencode session list` (find the title), `opencode session export <id> > <log-dir>/<name>.session.json`,
+   then `opencode session delete <id>`.
    Do not `&` workers or "check back later": nothing wakes you when they die.
 3. Verify the result yourself. Exit 0 is not success. Success means the expected diff, no out-of-scope
    changes (`git status --porcelain`), and your own run of the build and tests passing.

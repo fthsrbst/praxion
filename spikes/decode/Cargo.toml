@@ -1,0 +1,28 @@
+[package]
+name = "decode"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "decode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "decode"
+path = "src/main.rs"
+
+[dependencies]
+azalea-block = { path = "../azalea/azalea-block" }
+azalea-buf = { path = "../azalea/azalea-buf" }
+azalea-core = { path = "../azalea/azalea-core" }
+azalea-protocol = { path = "../azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-registry = { path = "../azalea/azalea-registry" }
+azalea-world = { path = "../azalea/azalea-world" }
+
+[dev-dependencies]
+azalea-entity = { path = "../azalea/azalea-entity" }
+
+# release builds of the decoder are what E3 measures
+[profile.release]
+debug = false

@@ -444,3 +444,60 @@ reports are deterministic.
   a machine. Any machine works: the client jar is identical on macOS and Windows. Needs a local
   26.3 server in offline mode (server jar and JDK are already in `spikes/round0/`).
 - Windows-only checks move to round 2 (E5): `hDevice` of injected events, pointer-speed matrix.
+
+## 2.7 Windows runs (2026-10-31, draft, in progress)
+
+Machine: the user's Windows 11 laptop (RTX 3060 Laptop, 8 threads, on AC, power plan "Performance").
+Server: vanilla 26.3 jar (sha1 match), offline mode, `127.0.0.1:25566`, RCON on loopback.
+Client: vanilla 26.3 started by `spikes/round0/launch_client.py` straight from the version JSON (74
+libraries and the client jar sha1-checked), no launcher tweaker. Code: `spikes/` (see `spikes/README.md`).
+
+### Setup findings
+- **TLauncher** starts the game wrapped in `org.tlauncher.tweaker.Tweaker` (LaunchWrapper), and the game
+  process it starts could not be terminated from the user's session ("Access is denied"), consistent with
+  an elevated process. Under H3 an elevated game blocks `SendInput` (UIPI). Its client jar on disk is
+  byte-identical to vanilla. Decision (user, 2026-10-31): experiments launch the client directly.
+- Toolchain: host `x86_64-pc-windows-gnu` (no MSVC on this PC; minor pick by Claude). Two fixes, in
+  `spikes/.cargo/config.toml`: `llvm-dlltool` (a copy of `llvm-ar` from `llvm-tools`) and `rust-lld` as
+  linker. GNU `ld` with LLVM import libraries links but the EXE dies with `STATUS_ACCESS_VIOLATION`.
+- The 26.3 dedicated server ships with the whitelist on and `accepts-transfers=false`.
+- No stock way to force Play→Configuration: `DebugConfigCommand` exists but is registered only in the
+  development environment. The corpus has no re-entry; the decoder's synthetic test covers it.
+- OpenCode: after `oc-run.sh` kills a timed-out client, the service **keeps running the session** (a
+  decoder worker kept editing and running `cargo clean` for 18 minutes). Stop it with
+  `opencode session export <id>` then `opencode session delete <id>`.
+
+### Capture corpus (round 0)
+| Capture | Content | Records | Notes |
+|---|---|---|---|
+| `corpus1` | 13 min play (injected walk/turn/jump, 3 far teleports = chunk bursts, 300 status pings, `/transfer`) | 40,343 | sha256 `3bb8e784…3222`; player died after a far teleport (fall); transfer refused (server setting) |
+| `corpus2` | E1 run: 4,000 status pings, chunk bursts | 4001 connections | every connection has open and close records (fixed proxy) |
+| `corpus3` | ground-truth blocks, E7 key holds, E6 aiming | 28,686 at snapshot 1 | live session, still capturing |
+
+### Results so far
+| # | Result | Verdict |
+|---|---|---|
+| E1 | Interleaved status pings, proxy vs direct, game running, chunk bursts, n=3000 pairs: added round trip p50 0.155 ms, p99 0.50 ms, p99.9 2.0 ms, max 4.1 ms (both directions) | **pass** (p99 < 1 ms) |
+| E2 | `corpus1` (13 min): 291,523 packets, 4 errors, all `level_particles` (Azalea's `ClientboundLevelParticles` leaves 6 of 56 bytes unread). `corpus3` snapshot: 293,036 packets, 0 errors, 10/10 ground-truth blocks right (incl. a block removed after placement, block properties, a block inside a `fill`) | **miss** on `corpus1` (zero errors required); layouts otherwise agree |
+| E3 | Offline replay of `corpus1` (processing time only, no queueing): steady-state decode p99 0.7 µs, p99.9 7.9 µs; chunk decode p99 133 µs; chunk apply p99 163 µs; block apply p99 28 µs | **pass** (p99 < 5 ms); arrival-to-state under live load is E15 |
+| E4 | `client_tick_end` 20.00/s; `move_player_pos` 3.0/s mean, 50 ms gaps while moving, gaps > 1 s when still; `move_player_rot` gaps 50 ms | measure only |
+| E7 | 50 ms `W` hold, tuned timer. Run 1 (gap 450 ms = 9 ticks, constant phase): 100/100 exactly one tick. Run 2 (gap 433 ms, phase swept 0.5–50 ms): 194/200 one tick, 4 two ticks, 2 never on the wire | **pass** (97% ≥ 95%), phase-dependent |
+| E9 | Key-down to `player_input` on the wire, phase swept (n=200): p50 25.5 ms, p99 51.8 ms, min 2.2 ms (one client tick); run 1 was phase-locked at ~11 ms | measure only |
+| E5 | 0.15°/count exact: 1000 counts → 150.000°, 1400 → 209.998°, 500 × 1 count → 75.001°, pitch 500 → 75.000°, with enhanced pointer precision ON, speed 10 | **pass**; pointer-speed matrix not run (system setting; needs the user) |
+| E6 | 100/100 targets within 1° (error p50 0.00005°, max 0.0005°); 10 events at 10 ms spacing, interval p99 10.6 ms → ~95 ms per aim | **pass** |
+| E13 | 50 ms loop, game running, 3 × 60 s each: default p99 1.3 / 5.0 / 24.4 ms; with `nothrottle,high,mmcss` p99 0.73 / 0.86 / 0.55 ms, max ≤ 1.21 ms | **pass only with the process settings** |
+| other | The first relative mouse event after the game grabs the mouse (join, respawn, menu close) is dropped: seen 4 times | finding |
+
+Not run yet: E8 (needs a mouse-button command and a live decode tap for the click timing), E10 (mouse
+clicks, GUI scales), E11 (window modes; run with a separate `--gameDir` so the user's `options.txt` is
+untouched), E12 (needs the user's physical key presses), E5 pointer-speed matrix (needs the user to change
+a system setting), E14 (written comparison), E15, E16.
+
+### Proposals for the user (not decided)
+- E2: carry a local patch for `ClientboundLevelParticles` on the pinned Azalea commit (find the 26.3 layout
+  in the server jar), then rerun E2 on a fresh 10-minute corpus.
+- E13: the body process sets `nothrottle,high,mmcss` (process-local; no system settings) as a requirement.
+- E7: hold keys for a number of client ticks counted from the proxy's `client_tick_end`, not for a fixed
+  50 ms; a fixed hold misses or doubles about 3% of the time depending on phase.
+- The first relative move after a grab is dropped: after a grab the body sends a 1-count primer, or
+  checks the resulting rotation in the proxy stream.

@@ -6,3 +6,11 @@ spikes/**/target/
 spikes/**/*.jar
 spikes/**/*.pcap
 spikes/**/captures/
+spikes/round0/client-natives/
+spikes/round0/blocks-truth*.txt
+spikes/azalea/
+spikes/.toolchain/
+spikes/round0/server/
+spikes/round0/*.jar
+spikes/**/*.prxcap
+spikes/**/*.prxcap.stats.jsonl
