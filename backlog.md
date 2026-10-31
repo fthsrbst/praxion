@@ -27,12 +27,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   apply it, re-run the test. Also find out whether the service keeps generating after the watchdog kills a client.
 - Pointers: `.claude/skills/opencode-worker/SKILL.md` ("Safety rails"), `opencode.json`
 
-### Keep-awake on Windows
-- Source: Claude Opus 5.5, 2026-10-31
-- State: `AGENTS.md` "Keep-awake" covers only macOS (Amphetamine). This machine is Windows.
-- Remaining: decide the Windows method with the user (e.g. the desktop app's keep-awake, or `powercfg`) and document it.
-- Pointers: `AGENTS.md` "Keep-awake"
-
 ### Finish the source-level systems review
 - Source: Claude Opus 5.5, 2026-10-21
 - State: Ten systems read; findings in `docs/research/systems-review.md`.

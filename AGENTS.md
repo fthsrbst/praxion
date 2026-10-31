@@ -12,10 +12,10 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
   `docs/decisions.md`. Research lives in `docs/research/`.
 - Discussion sessions (`docs/discussion-plan.md`): all done. Session 2's experiments (2.7) have not run
   yet. `docs/architecture.md` draft 2 is reviewed and accepted (reviews in `docs/reviews/`).
-  Next: the 2.7 experiments, starting with desk round 0 (throwaway code in untracked `spikes/`),
-  then the first product code, starting with Demo-0 (architecture §1.1). Agreed decisions go to `docs/decisions.md`; per-session notes go to
+  Next: the 2.7 experiments, starting with desk round 0 (spike code in `spikes/`, committed; jars,
+  build output and captures stay ignored), then the first product code, starting with Demo-0 (architecture §1.1). Agreed decisions go to `docs/decisions.md`; per-session notes go to
   `docs/sessions/NN-topic.md`.
-- Do not scaffold, add dependencies or write product code until the 2.7 experiments have passed. Throwaway experiment code in `spikes/` is allowed.
+- Do not scaffold, add dependencies or write product code until the 2.7 experiments have passed. Experiment code in `spikes/` is allowed.
 - When this section is stale, fix it in the same change that makes it stale.
 
 ## The user owns the design
@@ -44,19 +44,26 @@ data structure and every interface. We build it together; agents never design al
 ## Session protocol
 
 Start of a session:
-1. Keep the Mac awake (see "Keep-awake").
+1. Keep the machine awake (see "Keep-awake").
 2. Read `backlog.md` (open items) and the newest entries of `notes.md`.
 3. Follow the global hub protocol (`agent_checkin`, `project_get`) once the project is registered there.
 
 End of a session, or whenever you stop with work unfinished:
 1. Write every unfinished item to `backlog.md`. "I'll remember" does not count.
 2. Put ideas, observations and proposals in `notes.md`.
-3. End the Amphetamine session if you started it (see "Keep-awake").
+3. End the keep-awake hold if you started it (see "Keep-awake").
 
 ## Keep-awake
 
-Agents must keep the Mac awake while they work. Long runs that let the Mac sleep fail
-in confusing ways (dropped connections, timeouts).
+Agents must keep the machine awake while they work. Long runs that let it sleep fail
+in confusing ways (dropped connections, timeouts). Never change the OS power settings.
+
+**Windows (the main machine):** in the Claude desktop app, call `request_keep_awake` with
+`until: "session_idle"` before long work. The hold ends by itself when the session goes idle or
+stops. A closed lid or an explicit Sleep still sleeps the machine. Other agents without that tool
+(OpenCode, Codex) rely on the hold of the session that launched them.
+
+**macOS:**
 
 ```sh
 osascript -e 'tell application "Amphetamine" to get session is active'
@@ -64,7 +71,7 @@ osascript -e 'tell application "Amphetamine" to start new session with options {
 osascript -e 'tell application "Amphetamine" to end session'
 ```
 
-- Check first. Start a session only if none is active, and remember that you started it.
+- Check first. Start a session only if none is active, and remember that you started it (macOS).
 - End it only if you started it and no other agent is still working (hub `agent_active`).
   Never end a session the user or another agent started.
 
