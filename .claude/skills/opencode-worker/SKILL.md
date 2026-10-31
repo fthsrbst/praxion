@@ -1,12 +1,24 @@
 ---
 name: opencode-worker
-description: Orchestrator-side guide for delegating work to an OpenCode v2 worker on the free MiniMax M3.1 Flash model. Use when handing a well-specified coding, test, refactor, docs, digest or review task to OpenCode, or when checking OpenCode model and service health. Not for an agent that is itself running inside OpenCode.
+description: Orchestrator-side guide for delegating work to an OpenCode v2 worker on DeepSeek V4.1 Flash (OpenCode Go). Use when handing a well-specified coding, test, refactor, docs, digest or review task to OpenCode, or when checking OpenCode model and service health. Not for an agent that is itself running inside OpenCode.
 ---
 
 # OpenCode worker (v2)
 
-Facts below were measured on this machine on 2026-10-21 with `opencode v2.1.2`.
-Re-measure after an OpenCode upgrade; v2 changed a lot from v1.
+Facts below were measured with `opencode v2.1.2` on macOS (2026-10-21) and
+`opencode v2.2.5` on Windows 11 + Git Bash (2026-10-31). Re-measure after an OpenCode upgrade;
+the model list changes without notice (`minimax-m3.1-flash-free` disappeared between those dates).
+
+## Install and login
+
+| OS | Install | Notes |
+|---|---|---|
+| macOS / Linux | `curl -fsSL https://opencode.ai/v2/install \| bash` | |
+| Windows | `npm install -g @opencode/cli` | The curl script is Unix-only. choco/scoop install **v1**, not v2. |
+
+Login is the user's job (API keys are never typed by an agent): `opencode auth login` → OpenCode Go → paste key.
+Check with `opencode auth list`. DeepSeek on Go needs Console › Settings › Privacy › Regions › **Global**,
+otherwise it is blocked (default regions are Europe and United States).
 
 ## When to delegate
 
@@ -20,16 +32,20 @@ Do not delegate when the spec is still open. Close the open questions first, the
 
 | Model | Use | Measured |
 |---|---|---|
-| `opencode/minimax-m3.1-flash-free` | Default worker. Free (cost 0 in event log). | PONG 5 s; spotted a planted bug in 5 s |
-| `opencode-go/minimax-m3.1-flash-free` | Same model through OpenCode Go. Fallback when the Zen route fails. | PONG 2 s |
+| `opencode-go/deepseek-v4.1-flash` | Default worker (user's choice). Billed to the Go plan: $0.15/$0.60 per 1M in/out off-peak, double at peak; $100 monthly limit. | PONG 2 s; found a planted bug via a `general` subagent in 13 s |
+| `opencode/deepseek-v4.1-flash-free` | Same model, free on Zen. Fallback when Go fails or its limit is reached. | PONG 3 s; same bug test passed in 16 s |
+| `opencode-go/minimax-m3.1-flash` | Second opinion from a different model family. | PONG 2 s |
+| `opencode-go/beam-free` | Free, limited time. Untested beyond PONG. | PONG 1 s |
 
-Check availability: `opencode models | grep minimax`. Liveness test before a batch:
+All rows measured 2026-10-31 on Windows. The event log reports `cost: 0` even for Go models;
+Go usage is metered as an allowance, not in `step_finish.cost`. Check spend in the OpenCode Console.
+
+Check availability: `opencode models | grep deepseek`. Liveness test before a batch
+(`timeout` exists in Git Bash and Linux; on macOS use `perl -e 'alarm 90; exec @ARGV'` instead):
 
 ```sh
-perl -e 'alarm 90; exec @ARGV' opencode run --auto -m opencode/minimax-m3.1-flash-free "Reply with exactly one word: PONG" </dev/null
+timeout 90 opencode run --auto -m opencode-go/deepseek-v4.1-flash "Reply with exactly one word: PONG" </dev/null
 ```
-
-macOS has no `timeout`; `perl -e 'alarm N; exec @ARGV'` is the portable substitute.
 
 ## How OpenCode v2 works (what matters here)
 
@@ -43,7 +59,9 @@ macOS has no `timeout`; `perl -e 'alarm N; exec @ARGV'` is the portable substitu
   `AGENTS.md` from the workspace up to `$HOME`). It never reads `CLAUDE.md`.
 - Skills: discovered in `.opencode/skills`, `.claude/skills`, `.agents/skills` (project) and
   `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills` (global). Skills without a `description` are not advertised.
-- Agents: built-in `build` and `plan` (primary), `general` and `explore` (subagents). Custom agents live in
+- Agents: built-in `build` and `plan` (primary), `general` and `explore` (subagents).
+  A worker spawns them itself with the `subagent` tool when the brief asks it to
+  (verified 2026-10-31: "Use the 'general' subagent to review X" → one `subagent` tool call). Custom agents live in
   `.opencode/agents/<name>.md` with frontmatter `description`, `mode`, `model`, `permissions`.
 - Config: project `opencode.json` at the repo root. Permissions are an ordered list of
   `{action, resource, effect}`; the last matching rule wins. Actions include `read`, `edit`, `shell`,
@@ -51,7 +69,8 @@ macOS has no `timeout`; `perl -e 'alarm N; exec @ARGV'` is the portable substitu
 
 ## Safety rails (this repo's `opencode.json`)
 
-Verified under `--auto`:
+Verified under `--auto` on macOS only. **Not re-verified on Windows**: Windows paths
+(`C:\...`, backslashes) may slip past rules written for Unix paths. Until verified, treat these as unproven there.
 - Denied: `git push`, `git commit`, `git reset`, `git checkout`, `git rebase`, `rm -rf`.
   Each git rule also has a `git * <cmd> *` twin, because `git commit *` alone misses
   global options such as `git -c user.name=x commit ...`.
@@ -73,6 +92,9 @@ Verified under `--auto`:
    Exit codes: `0` done with `FINAL_REPORT`, `10` stalled, `11` wall timeout,
    `12` finished without `FINAL_REPORT`, `13` could not start or worker error.
    Tune with `OC_STALL_SECS` (default 300) and `OC_WALL_SECS` (default 1800).
+   On Windows run it with Git Bash (the Bash tool). It kills with `taskkill /T` there; verified 2026-10-31
+   (exit 0 path and exit 11 path; the shared `opencode serve --service` process correctly survives).
+   Unknown: whether the service keeps generating for a session whose client was killed.
    Do not `&` workers or "check back later": nothing wakes you when they die.
 3. Verify the result yourself. Exit 0 is not success. Success means the expected diff, no out-of-scope
    changes (`git status --porcelain`), and your own run of the build and tests passing.
@@ -85,11 +107,14 @@ Start with one run at a time and measure before fanning out.
 
 `--format json` events: `step_start`, `tool_use`, `step_finish`, `text`, `error`.
 
+Use `scripts/oc-events.js` (node; Windows has no jq):
+
 ```sh
-jq -r 'select(.type=="text") | .part.text' run.jsonl                    # final answer text
-jq -r 'select(.type=="tool_use") | "\(.part.tool) \(.part.state.status)"' run.jsonl
-jq -r 'select(.type=="error") | .error.message' run.jsonl               # e.g. provider.no-route
-jq -s 'map(select(.type=="step_finish") | .part.cost) | add' run.jsonl  # total cost
+S=.claude/skills/opencode-worker/scripts
+node $S/oc-events.js text run.jsonl      # final answer text
+node $S/oc-events.js tools run.jsonl     # "<tool> <status>" per call, e.g. "subagent completed"
+node $S/oc-events.js error run.jsonl     # e.g. provider.no-route
+node $S/oc-events.js summary run.jsonl   # tools + errors + cost
 ```
 
 A bad model id exits `1` with `{"type":"error","error":{"type":"provider.no-route",...}}`.

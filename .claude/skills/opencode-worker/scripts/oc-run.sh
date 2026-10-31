@@ -12,7 +12,7 @@ set -uo pipefail
 
 brief=${1:?brief file required}
 logdir=${2:?log dir required}
-model=${3:-opencode/minimax-m3.1-flash-free}
+model=${3:-opencode-go/deepseek-v4.1-flash}
 stall=${OC_STALL_SECS:-300}
 wall=${OC_WALL_SECS:-1800}
 
@@ -24,7 +24,12 @@ log=$logdir/$name.events.jsonl
 out=$logdir/$name.answer.txt
 
 # macOS has no setsid, so walk the child tree instead of killing a process group.
+# Git Bash on Windows has no pgrep; there, taskkill /T kills the native process tree.
 kill_tree() {
+  if [[ -r /proc/$1/winpid ]]; then
+    taskkill //T //F //PID "$(cat "/proc/$1/winpid")" >/dev/null 2>&1
+    return
+  fi
   local child
   for child in $(pgrep -P "$1"); do kill_tree "$child"; done
   kill -TERM "$1" 2>/dev/null
@@ -52,8 +57,9 @@ done
 wait "$pid"
 rc=$?
 
-jq -r 'select(.type == "text") | .part.text' "$log" >"$out" 2>/dev/null
-errors=$(jq -r 'select(.type == "error") | .error.message' "$log" 2>/dev/null)
+# node, not jq: node ships wherever OpenCode was installed from npm; Windows has no jq.
+node "$(dirname "$0")/oc-events.js" text "$log" >"$out" 2>/dev/null
+errors=$(node "$(dirname "$0")/oc-events.js" error "$log" 2>/dev/null)
 echo "oc-run: exit=$rc elapsed=$(( $(date +%s) - start ))s log=$log text=$out"
 
 if (( rc != 0 )) || [[ -n $errors ]]; then

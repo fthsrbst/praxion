@@ -19,6 +19,22 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Verify OpenCode safety rails on Windows
+- Source: Claude Opus 5.5, 2026-10-31
+- State: OpenCode v2.2.5 installed on Windows (npm), Go login done, DeepSeek V4.1 Flash default, watchdog verified.
+  The deny rules in `opencode.json` (git commit/push, outside-repo paths) were verified only on macOS.
+  The test run was blocked by Claude Code's auto-mode classifier, since it asked a worker to try a commit.
+- Remaining: with the user's approval, run the rails test (worker tries `git commit`, reads a file outside the repo
+  by `C:\...` path and by `type`); check HEAD is unchanged. Add Windows-path deny rules if any slip through.
+  Also find out whether the service keeps generating after the watchdog kills a client.
+- Pointers: `.claude/skills/opencode-worker/SKILL.md` ("Safety rails"), `opencode.json`
+
+### Keep-awake on Windows
+- Source: Claude Opus 5.5, 2026-10-31
+- State: `AGENTS.md` "Keep-awake" covers only macOS (Amphetamine). This machine is Windows.
+- Remaining: decide the Windows method with the user (e.g. the desktop app's keep-awake, or `powercfg`) and document it.
+- Pointers: `AGENTS.md` "Keep-awake"
+
 ### Finish the source-level systems review
 - Source: Claude Opus 5.5, 2026-10-21
 - State: Ten systems read; findings in `docs/research/systems-review.md`.

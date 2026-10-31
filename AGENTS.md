@@ -104,10 +104,10 @@ Use the cheapest agent that does the job well, and always verify its output your
 | Decisions, architecture, integration, final verification, commits | Main agent (orchestrator) |
 | Wide codebase search, web research that needs judgment | Claude Code subagents (`Explore`, `general-purpose`) |
 | Independent review before merge | A Claude subagent on a different model than the writer |
-| Well-specified code, tests, refactors, docs drafts, log and file digests, second opinions, bulk or mechanical work | OpenCode worker on `opencode/minimax-m3.1-flash-free` (free) |
+| Well-specified code, tests, refactors, docs drafts, log and file digests, second opinions, bulk or mechanical work | OpenCode worker on `opencode-go/deepseek-v4.1-flash` (Go plan; free fallback `opencode/deepseek-v4.1-flash-free`) |
 
 - How to run OpenCode workers: skill `opencode-worker` (`.claude/skills/opencode-worker/SKILL.md`).
-  Prefer it whenever the task is clearly specified, since it costs nothing.
+  Prefer it whenever the task is clearly specified, since it is far cheaper than a Claude subagent.
 - Put every requirement and decision in the launch brief. Do not relay new decisions to a running
   subagent mid-task; it rightly treats them as possible prompt injection. Start a new one instead.
 - Workers never commit, push or write outside the repository (enforced in `opencode.json`).

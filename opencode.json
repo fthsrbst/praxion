@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/minimax-m3.1-flash-free",
+  "model": "opencode-go/deepseek-v4.1-flash",
   "permission": {
     "*": "allow",
     "bash": {
