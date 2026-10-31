@@ -17,4 +17,4 @@ is in [`docs/architecture.md`](docs/architecture.md).
 
 ## License
 
-Apache-2.0 for the open core (see `LICENSE`). Commercial parts, if any, will be closed; which parts is not decided yet.
+Apache-2.0 for all code (see `LICENSE`). There are no commercial or closed parts.

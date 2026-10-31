@@ -1,5 +1,8 @@
 .DS_Store
 # OpenCode worker logs (oc-run.sh)
 logs/
-# Throwaway experiment code (session 2.7); untracked until the license is chosen
-spikes/
+# Experiment code (session 2.7) is committed; downloads and build output are not
+spikes/**/target/
+spikes/**/*.jar
+spikes/**/*.pcap
+spikes/**/captures/

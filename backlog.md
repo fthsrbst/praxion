@@ -21,12 +21,10 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ### Verify OpenCode safety rails on Windows
 - Source: Claude Opus 5.5, 2026-10-31
-- State: OpenCode v2.2.5 installed on Windows (npm), Go login done, DeepSeek V4.1 Flash default, watchdog verified.
-  The deny rules in `opencode.json` (git commit/push, outside-repo paths) were verified only on macOS.
-  The test run was blocked by Claude Code's auto-mode classifier, since it asked a worker to try a commit.
-- Remaining: with the user's approval, run the rails test (worker tries `git commit`, reads a file outside the repo
-  by `C:\...` path and by `type`); check HEAD is unchanged. Add Windows-path deny rules if any slip through.
-  Also find out whether the service keeps generating after the watchdog kills a client.
+- State: Rails test ran 2026-10-31 (user-approved). Git commit variants and read/write tools outside the repo are denied.
+  Shell commands with absolute Windows paths (`type C:\...`) and `~` paths read outside files: not caught.
+- Remaining: agree a fix with the user (shell deny rules for drive-letter paths, or accept and rely on the brief),
+  apply it, re-run the test. Also find out whether the service keeps generating after the watchdog kills a client.
 - Pointers: `.claude/skills/opencode-worker/SKILL.md` ("Safety rails"), `opencode.json`
 
 ### Keep-awake on Windows
@@ -118,7 +116,7 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - State: Session 12 decided; see `docs/sessions/12-memory-rag.md`. The user chose a wiki RAG against
   the recommendation.
 - Remaining: check whether the Minecraft Wiki offers a dump and what its terms allow before
-  building the index; settle the licence question with the business model (`Choose a license`);
+  building the index (the licence question is closed: no commercial purpose, index stays local);
   memory test suite on a scripted world; retrieval test with real questions to confirm the
   embedding model; ask the user what Mnema is, to confirm the separation.
 - Pointers: `docs/research/memory-review/critic-simplicity.md` §7, `docs/research/embeddings.md`
@@ -126,10 +124,11 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 ### Architecture open points after draft 2
 - Source: Claude Opus 5.5, 2026-10-29
 - State: Draft 2 accepted in full by the user (decisions.md); review round 1 and the draft-2 review closed.
-- Remaining: still [O]: lesson trigger, transparent-material table, interface technology, which
-  parts are commercial, wiki RAG licence; Mojang EULA and Usage Guidelines check before any
-  release; log the round-1 minor IDs (synthesis.md "Minor and dropped"); decide whether `spikes/`
-  may be committed.
+- Remaining: still [O]: transparent-material table (decided at first code); Mojang EULA and Usage
+  Guidelines check before any release (2026-10-31: the official page timed out; third-party summaries
+  say only that mods must be free and show no AI-agent rule; read minecraft.net/usage-guidelines
+  before release); log the round-1 minor IDs (synthesis.md "Minor and dropped").
+  Closed 2026-10-31: lesson trigger, interface technology, commercial parts, wiki RAG licence, `spikes/`.
 - Pointers: `docs/architecture.md` §11 and Appendix A
 
 ### Later ideas from review round 1

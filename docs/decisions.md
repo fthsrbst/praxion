@@ -3,6 +3,28 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-10-31
+
+- **Interface technology: a local web interface.** The Python brain serves a small web page on
+  loopback; the command box, reports, live view and memory viewer are a browser tab. The
+  "Praxion is active" indicator stays a separate small window fed by the body (2.4). Rejected: a
+  desktop app (Tauri), which adds a second stack and packaging work. (User, on Claude's recommendation.)
+- **Lesson trigger: a failure-repair pair.** The LLM proposes a lesson when the same failure kind
+  has occurred in two different contexts and a later repair or revision succeeded. Code still
+  accepts it only after 3 proxy-verified successful traces. Rejected: a proposal after every skill
+  admission (noise, cost). (User, on Claude's recommendation.)
+- **No commercial parts: everything is Apache-2.0.** The user has no commercial purpose, so the
+  open-core split is dropped and no part stays closed. Supersedes "commercial parts closed" of
+  2026-10-29 and closes the "which parts are commercial" open point. Dependencies must still carry
+  licences compatible with Apache-2.0. (User.)
+- **`spikes/` source is committed; downloaded binaries are not.** Spike code and reports go into
+  the repository now that the licence is chosen; Mojang jars, build output and captures stay in
+  `.gitignore`. (User, on Claude's recommendation.)
+- **Wiki RAG is built.** The user states there is no commercial purpose, so the non-commercial
+  clause of CC BY-NC-SA does not block use. The rule stays that wiki text is never distributed
+  (the index is local; the licence field and the build check remain as a cheap guard while the
+  repository is public). Closes the wiki RAG [O] of session 12. (User.)
+
 ## 2026-10-30
 
 - **Rust toolchain for the Azalea `26.3` branch: `nightly-2026-08-20`, no extra flags.** The branch

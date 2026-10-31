@@ -148,7 +148,7 @@ user, pauses autonomous LLM work while reflexes and the core keep running.
 | Skill writer and admission | Python + harness | step programs compiled to rule lists; staged admission (§6.3); writer is a low-privilege process that writes only to a candidates directory [D, session 15 pick] | 5, 11 |
 | Memory projections and briefing | Python | rebuilt from the event log: places, containers, ledger progress, skill statistics; briefing with a token cap | 12, R1-M4 |
 | Wiki RAG | Python | local index of Minecraft Wiki text for the LLM's knowledge questions; behind a flag, off the Demo-1 path [D] | 12 |
-| Indicator and interface | **[O]** technology | indicator, reports, command box, live view, memory viewer; requirements [D] | 2.4, 9, 14, Q2 |
+| Indicator and interface | Python + web | local web page served by the brain on loopback: reports, command box, live view, memory viewer; the indicator is a separate small window fed by the body [D] | 2.4, 9, 14, Q2 |
 | Watchdog | Rust | own process [D]; waits on the body's process handle and releases keys and buttons from the shared held-key table [D] | 2.4 |
 | Test harness | Python + Rust | logged setup channel, referee, fixtures, practice room on a test server, server checklist, world backups | 14, 11 |
 
@@ -443,7 +443,7 @@ candidate ─► static checks ─► practice room ─► probation ─► acti
   not in the product repository. The skill writer is a low-privilege process that can write only to
   a candidates directory [D, session 15 pick].
 - **Lessons** [D]: general across worlds, proposed by the LLM, accepted by code after 3
-  proxy-verified successful traces. Which condition triggers a lesson proposal is **[O]**.
+  proxy-verified successful traces. A lesson is proposed when one failure kind has occurred in two contexts and a later repair succeeded [D].
 
 ### 6.4 Curriculum [D]
 
@@ -482,7 +482,7 @@ restart.
 - **Game data** [D]: comes from Mojang data reports; `minecraft-data` is the backup only.
 - **Minecraft Wiki RAG** [D]: feeds the LLM only. The index is local and never distributed, because
   the wiki is CC BY-NC-SA. Every passage carries a licence field, and a build check fails if an
-  NC passage reaches a distributable target [D]. The conflict with the open-core model is **[O]**.
+  NC passage reaches a distributable target [D]. The user has no commercial purpose, so the NC clause does not block use [D].
 - **Separation** [D]: the game memory is separate from Mnema and the hub.
 
 ## 9. Testing and observability
@@ -543,8 +543,8 @@ Demo-2. Learned skills live outside the repository, in a per-installation data d
 | 9 | Primitive effect declarations must be exact | conformance test (§6.2) | hand-written guard fixes |
 | 10 | Dedicated server: no pause, defenceless while stopped | accepted (Q6) | — |
 | 11 | Cost runaway | caps, breaker, hard stop (§3) | — |
-| 12 | Wiki RAG licence vs open core | business-model decision | — |
-| 13 | Apache-2.0 open core [D]: which parts are commercial; Mojang EULA and Usage Guidelines | business-model decision, desk check before any release | — |
+| 12 | Wiki RAG licence | closed 2026-10-31: no commercial purpose; index stays local [D] | — |
+| 13 | Apache-2.0 for all code [D]; Mojang EULA and Usage Guidelines | desk check before any release | — |
 | 14 | Whether the Azalea A* core lifts out of its framework | session 6 spike | own A* |
 | 15 | Co-load on one PC (game, server, body, brain, embedder, test server, recorder) | E13 under co-load, process priorities | brain or practice room on a second machine |
 
@@ -590,5 +590,4 @@ before their rungs); voice commands; reinforcement learning; personalised moveme
 | Jev with LLMs behind it; hosted models; LLMs may write code (narrowed by session 5); Mineflayer not a dependency | §3, §6 |
 
 Gaps: none found after the draft-2 review. Every former [P] item, including minor picks from
-session notes, was accepted by the user on 2026-10-29 (decisions.md, "Architecture draft 2 accepted"). Still **[O]**: the lesson trigger, the transparent-material table, the
-interface technology, which parts are commercial, and the wiki RAG licence conflict.
+session notes, was accepted by the user on 2026-10-29 (decisions.md, "Architecture draft 2 accepted"). Still **[O]**: the transparent-material table (decided at first code).
