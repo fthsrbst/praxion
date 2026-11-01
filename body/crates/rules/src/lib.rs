@@ -40,7 +40,7 @@ pub use parser::parse;
 pub use print::print;
 pub use registry::{
     BlockChange, BlockRef, CancellationClass, Effects, EvidenceKind, FactSig, Facts, ItemDelta,
-    PrimParam, PrimitiveKind, PrimitiveRecord, Primitives,
+    ItemDrop, PrimParam, PrimitiveKind, PrimitiveRecord, Primitives,
 };
 
 /// Removes an optional `minecraft:` namespace from an identifier.

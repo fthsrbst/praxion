@@ -53,6 +53,11 @@ All on Claude's recommendation.
   logic (unknown propagates); actions are a primitive call, `do skill(...)`, `done` or `fail(kind)`.
   The loader rejects unknown names, type errors, more than 30 rules, cycles, composition depth over 2
   and unreachable rules. Reference: `docs/rule-lists.md`. (Claude.)
+- **Interpreter readings where §6.1 is silent:** a failed primitive blocks its rule for the tick and is
+  retried, but three consecutive failures of the same rule return `failed(kind)` from the skill; a child's
+  `done` lets the parent re-select on the next tick; `until` on a skill call is bounded by 1200 ticks;
+  `observe` is a discrete primitive with evidence `FactKnown` and a timeout. Craft effects come from the
+  26.3 recipe data and mine/attack drops from the loot tables, never by hand. (Claude, after review t7.)
 - **The headless actuator reads the raw store for physics, read-only.** It plays the game client, which
   also simulates movement with full world knowledge; decision-making layers (reflexes, interpreter,
   planner) still see the world only through perception. (Claude.)

@@ -421,6 +421,76 @@ fn the_reflex_reserve_is_the_only_extra_budget() {
 }
 
 #[test]
+fn reflex_spending_its_reserve_does_not_shrink_the_other_share() {
+    // N = 6, R = 2: Other always has 4 rays, whatever Reflex spent from the
+    // reserve before it queries.
+    let config = Config { ray_budget: 6, reflex_reserve: 2, ..Config::default() };
+    let targets = [BlockPos::new(4, 65, 0), BlockPos::new(0, 65, 4)];
+    let blocks: Vec<(BlockPos, BlockState)> = targets.iter().map(|pos| (*pos, stone())).collect();
+    let world = world_with(&blocks);
+    let mut p = Perception::new(config);
+    p.begin_tick(&world);
+
+    for target in targets {
+        assert_eq!(
+            p.block(Caller::Reflex, &world, target).provenance(),
+            Some(Provenance::Sight),
+            "one open-air center ray reaches {target:?}"
+        );
+    }
+    assert_eq!(p.rays_used_this_tick(), 2, "Reflex spent its reserve only");
+    assert_eq!(
+        p.rays_remaining(Caller::Other),
+        4,
+        "Other keeps the whole N - R share after Reflex ran first"
+    );
+}
+
+#[test]
+fn other_spending_its_share_does_not_shrink_the_reflex_reserve() {
+    // The same N = 6, R = 2 with the other order: Other spends its 4 rays
+    // first, then Reflex still has its 2 reserved rays.
+    let config = Config { ray_budget: 6, reflex_reserve: 2, ..Config::default() };
+    let targets = [
+        BlockPos::new(4, 65, 0),
+        BlockPos::new(0, 65, 4),
+        BlockPos::new(4, 64, 0),
+        BlockPos::new(4, 66, 0),
+        BlockPos::new(4, 65, 4),
+        BlockPos::new(8, 65, 2),
+    ];
+    let blocks: Vec<(BlockPos, BlockState)> = targets.iter().map(|pos| (*pos, stone())).collect();
+    let world = world_with(&blocks);
+    let mut p = Perception::new(config);
+    p.begin_tick(&world);
+
+    for target in &targets[..4] {
+        assert_eq!(
+            p.block(Caller::Other, &world, *target).provenance(),
+            Some(Provenance::Sight),
+            "one open-air center ray reaches {target:?}"
+        );
+    }
+    assert_eq!(p.rays_used_this_tick(), 4, "Other spent its whole share");
+    assert_eq!(p.rays_remaining(Caller::Other), 0);
+    assert_eq!(
+        p.rays_remaining(Caller::Reflex),
+        2,
+        "Reflex keeps its reserve after Other ran first"
+    );
+
+    for target in &targets[4..] {
+        assert_eq!(
+            p.block(Caller::Reflex, &world, *target).provenance(),
+            Some(Provenance::Sight),
+            "the reserve still casts rays"
+        );
+    }
+    assert_eq!(p.rays_used_this_tick(), 6);
+    assert_eq!(p.rays_remaining(Caller::Reflex), 0);
+}
+
+#[test]
 fn the_entity_cap_counts_overflow() {
     let config = Config { entity_cap: 1, ..Config::default() };
     let mut world = world_with(&[]);
@@ -571,8 +641,8 @@ fn f3_facts_are_allowed_without_a_ray() {
         p.dimension(&world).value().unwrap().dimension(),
         "minecraft:overworld"
     );
-    assert_eq!(p.biome().reason(), Some(Reason::NeverSeen));
-    assert_eq!(p.light_level().reason(), Some(Reason::NeverSeen));
+    assert_eq!(p.biome(&world).reason(), Some(Reason::NeverSeen));
+    assert_eq!(p.light_level(&world).reason(), Some(Reason::NeverSeen));
     assert_eq!(p.rays_used_this_tick(), 0);
 }
 
@@ -651,6 +721,26 @@ fn blocks_in_and_nearest_block_skip_hidden_blocks() {
     p.begin_tick(&world);
     let answer = p.nearest_block(Caller::Other, &world, BlockKind::OakLog, 16);
     assert_eq!(answer.value().unwrap().pos, far, "{answer:?}");
+}
+
+#[test]
+fn blocks_in_remembers_every_block_it_sees() {
+    let target = BlockPos::new(4, 65, 0);
+    let world = world_with(&[(target, stone())]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+
+    let answer = p.blocks_in(
+        Caller::Other,
+        &world,
+        BlockRegion::around(target, 1),
+        BlockFilter::Kind(BlockKind::Stone),
+    );
+    assert_eq!(answer.value().map(Vec::len), Some(1), "{answer:?}");
+    let (remembered, _age) = p
+        .remembered(target)
+        .expect("a block seen by blocks_in must go to memory");
+    assert_eq!(remembered.state, stone());
 }
 
 #[test]

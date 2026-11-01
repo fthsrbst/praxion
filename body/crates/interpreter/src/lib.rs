@@ -20,13 +20,15 @@
 //! commitment: `ACTION until G` keeps running the rule's action while the
 //! rule's own guard is `T` and `G` is not `T` (`F` or `U`). The commitment is
 //! released when `G` becomes `T`, when the own guard stops being `T`, or at
-//! `max_ticks`.
+//! `max_ticks`. A primitive failure is retried, but a rule whose primitive
+//! fails [`MAX_PRIMITIVE_FAILURES`] times in a row fails its skill with the
+//! last kind.
 
 mod interp;
 
 use praxion_rules::{ArgValue, FactCall, PrimitiveKind};
 
-pub use interp::Interpreter;
+pub use interp::{DEFAULT_MAX_TICKS, Interpreter, MAX_PRIMITIVE_FAILURES};
 
 /// A fact's three-valued truth.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1250,9 +1250,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1946,9 +1948,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-eventlog"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "praxion-fakeworld"
 version = "0.0.0"
 dependencies = [
+ "praxion-gamedata",
  "praxion-interpreter",
  "praxion-rules",
 ]
@@ -1962,14 +1973,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-gamedata"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "serde_json",
+ "toml",
+ "zip",
+]
+
+[[package]]
 name = "praxion-headless"
 version = "0.0.0"
 dependencies = [
  "azalea-auth",
+ "azalea-block",
  "azalea-core",
  "azalea-entity",
+ "azalea-physics",
  "azalea-protocol",
+ "azalea-registry",
+ "praxion-decoder",
  "praxion-manifest",
+ "praxion-tee",
+ "praxion-world",
+ "serde",
+ "serde_json",
  "tokio",
  "uuid",
  "windows-sys 0.59.0",
@@ -2009,8 +2038,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-receipts"
+version = "0.0.0"
+dependencies = [
+ "azalea-block",
+ "azalea-core",
+ "azalea-inventory",
+ "azalea-protocol",
+ "azalea-registry",
+ "praxion-decoder",
+ "praxion-eventlog",
+ "praxion-interpreter",
+ "praxion-rules",
+ "praxion-tee",
+ "praxion-world",
+]
+
+[[package]]
 name = "praxion-rules"
 version = "0.0.0"
+dependencies = [
+ "praxion-gamedata",
+]
 
 [[package]]
 name = "praxion-tee"
@@ -2718,6 +2767,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3175,6 +3230,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "zip"
+version = "9.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "848dad21639597378c3be94c59fd4de683f0f6d8a5387575896e1245737d4f37"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap",
+ "memchr",
+ "nix",
+ "typed-path",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

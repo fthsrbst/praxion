@@ -68,14 +68,25 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Rays a caller may still spend this tick, given what was spent.
-    pub fn remaining(&self, caller: Caller, used: u32) -> u32 {
+    /// Rays `caller` may still spend this tick, given what each caller spent.
+    ///
+    /// `Caller::Other` always keeps the unreserved share
+    /// `ray_budget - reflex_reserve`, less its own spending: rays Reflex spent
+    /// from its reserve do not shrink it. `Caller::Reflex` may spend whatever
+    /// is left of the whole budget, its reserve plus the unreserved share
+    /// Other has not spent yet.
+    ///
+    /// Other is also capped by the whole budget, so Reflex using the unused
+    /// unreserved share can never let the tick pass `ray_budget`.
+    pub fn remaining(&self, caller: Caller, other_used: u32, reflex_used: u32) -> u32 {
+        let whole_left = self.ray_budget.saturating_sub(other_used.saturating_add(reflex_used));
         match caller {
-            Caller::Reflex => self.ray_budget.saturating_sub(used),
+            Caller::Reflex => whole_left,
             Caller::Other => self
                 .ray_budget
                 .saturating_sub(self.reflex_reserve)
-                .saturating_sub(used),
+                .saturating_sub(other_used)
+                .min(whole_left),
         }
     }
 }

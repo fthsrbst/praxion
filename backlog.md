@@ -19,6 +19,16 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Biome and light in the raw store (F3 facts)
+- Source: OpenCode DeepSeek V4.1 Flash, 2026-11-01
+- State: `Perception::biome` and `Perception::light_level` now take `&World` and answer
+  `Unknown(never_seen)`; the raw store carries neither biome nor light yet (t4 review finding 4).
+- Remaining: record biome per chunk section and light per block in `praxion-world` from the
+  decoder's chunk and light packets, then answer both from the world and keep
+  `Unknown(never_seen)` only when the data is genuinely absent.
+- Pointers: `body/crates/perception/src/lib.rs` (`biome`, `light_level` TODOs),
+  `body/crates/world/src/lib.rs`, `logs/demo0/t4-perception.review.md` finding 4
+
 ### Verify OpenCode safety rails on Windows
 - Source: Claude Opus 5.5, 2026-10-31
 - State: Rails test ran 2026-10-31 (user-approved). Git commit variants and read/write tools outside the repo are denied.

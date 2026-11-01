@@ -142,7 +142,7 @@ fn observe_clears_the_unknown_mode() {
             args: vec![ArgValue::Item("oak_log".into())],
         })],
     );
-    actuator.apply(&observe, 1);
+    assert_eq!(settle(&mut actuator, observe), Outcome::Confirmed);
     assert!(!world.is_unknown("count"));
 }
 
@@ -327,12 +327,14 @@ fn a_decision_observe_can_be_executed_by_the_actuator() {
     match interpreter.tick(&mut facts, &mut actuator) {
         Decision::Observe(call) => {
             assert_eq!(call.name, "count");
-            actuator.apply(
-                &StartAction {
-                    primitive: "observe".into(),
-                    args: vec![ArgValue::Fact(call)],
-                },
-                1,
+            let observe = StartAction {
+                primitive: "observe".into(),
+                args: vec![ArgValue::Fact(call)],
+            };
+            let duration = actuator.start(&observe, 0);
+            assert_eq!(
+                actuator.poll(u64::from(duration)),
+                Some(Outcome::Confirmed)
             );
         }
         other => panic!("expected an observe, got {other:?}"),

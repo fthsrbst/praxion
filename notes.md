@@ -15,6 +15,9 @@ until it is recorded as one. Promote decisions out of this file when they are ma
   timed out after 80 min with code that does not compile (pulled azalea-auth and bevy). Reviews only.
 - DeepSeek v4.1 Flash finished every coding job it got (manifest, move, forwarder, decoder, harness,
   Azalea patch). Default: DeepSeek writes, Beam tests and reviews, Iceman takes small reviews.
+- DeepSeek hand-writes what a mature crate already does when a brief does not forbid it: a 590-line zlib
+  inflater and a ZIP reader in two days. Every coding brief now says: use mature crates (flate2, zip,
+  serde_json); never hand-write a parser or codec.
 - An independent test that "flaked once" failed 8 of 15 in a loop. Always loop a reported flake.
   Root cause: on Windows a socket handle duplicated with `TcpStream::try_clone` can stay "not
   connected" (WSAENOTCONN) for `shutdown` while reads and writes work, so the half-close FIN is never

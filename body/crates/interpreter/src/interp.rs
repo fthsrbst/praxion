@@ -14,6 +14,10 @@ use crate::{
 /// (a `do`, `done` or `fail`).
 pub const DEFAULT_MAX_TICKS: u32 = 1200;
 
+/// Consecutive failures of the same rule's primitive before that skill fails
+/// with the last failure kind. A different rule firing resets the count.
+pub const MAX_PRIMITIVE_FAILURES: u32 = 3;
+
 /// Guards a selection loop against a pathological ruleset. The load-time
 /// depth cap makes this unreachable for a checked program.
 const MAX_SELECTION_STEPS: usize = 64;
@@ -31,6 +35,15 @@ struct Frame {
     /// A primitive of this rule failed this tick; the rule retries next tick
     /// instead of the skill failing.
     retry: Option<usize>,
+    /// Consecutive primitive failures of one rule, reset when another rule
+    /// fires or the same rule succeeds.
+    streak: Option<FailureStreak>,
+}
+
+#[derive(Clone, Debug)]
+struct FailureStreak {
+    rule: usize,
+    count: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +72,7 @@ pub struct Interpreter {
     finished: bool,
     continuous: bool,
     tick: u64,
+    max_primitive_failures: u32,
     last_failure: Option<String>,
 }
 
@@ -73,8 +87,15 @@ impl Interpreter {
             finished: false,
             continuous: false,
             tick: 0,
+            max_primitive_failures: MAX_PRIMITIVE_FAILURES,
             last_failure: None,
         }
+    }
+
+    /// Changes how many consecutive primitive failures a rule may collect
+    /// before its skill fails. The default is [`MAX_PRIMITIVE_FAILURES`].
+    pub fn set_max_primitive_failures(&mut self, max: u32) {
+        self.max_primitive_failures = max.max(1);
     }
 
     pub fn program(&self) -> &Program {
@@ -109,6 +130,7 @@ impl Interpreter {
             call_rule: None,
             ineligible: None,
             retry: None,
+            streak: None,
         });
         self.in_flight = None;
         self.until = None;
@@ -145,16 +167,48 @@ impl Interpreter {
                 Some(outcome) => {
                     self.in_flight = None;
                     match outcome {
-                        Outcome::Confirmed => {}
-                        Outcome::Failed(kind) => self.fail_flight(&flight, kind),
-                        Outcome::Timeout => self.fail_flight(&flight, "timeout".into()),
-                        Outcome::Preempted => self.fail_flight(&flight, "preempted".into()),
+                        Outcome::Confirmed => self.succeeded(&flight),
+                        Outcome::Failed(kind) => {
+                            if let Some(kind) = self.fail_flight(&flight, kind) {
+                                if let Some(decision) =
+                                    self.fail_skill(flight.depth, kind, actuator)
+                                {
+                                    return decision;
+                                }
+                            }
+                        }
+                        Outcome::Timeout => {
+                            if let Some(kind) =
+                                self.fail_flight(&flight, "timeout".into())
+                            {
+                                if let Some(decision) =
+                                    self.fail_skill(flight.depth, kind, actuator)
+                                {
+                                    return decision;
+                                }
+                            }
+                        }
+                        Outcome::Preempted => {
+                            if let Some(kind) =
+                                self.fail_flight(&flight, "preempted".into())
+                            {
+                                if let Some(decision) =
+                                    self.fail_skill(flight.depth, kind, actuator)
+                                {
+                                    return decision;
+                                }
+                            }
+                        }
                     }
                 }
                 None if self.tick >= flight.deadline => {
                     let _ = actuator.cancel();
                     self.in_flight = None;
-                    self.fail_flight(&flight, "timeout".into());
+                    if let Some(kind) = self.fail_flight(&flight, "timeout".into()) {
+                        if let Some(decision) = self.fail_skill(flight.depth, kind, actuator) {
+                            return decision;
+                        }
+                    }
                 }
                 None => {
                     return Decision::Waiting(format!("{} in flight", flight.primitive));
@@ -187,6 +241,7 @@ impl Interpreter {
         for frame in &mut self.stack {
             frame.ineligible = None;
             frame.retry = None;
+            frame.streak = None;
         }
     }
 
@@ -315,6 +370,15 @@ impl Interpreter {
                 continue;
             };
 
+            // A different rule firing ends the previous rule's failure streak.
+            if self.stack[depth]
+                .streak
+                .as_ref()
+                .is_some_and(|streak| streak.rule != index)
+            {
+                self.stack[depth].streak = None;
+            }
+
             let (action, rule_max_ticks, has_until) = {
                 let frame = &self.stack[depth];
                 let skill = self
@@ -391,6 +455,7 @@ impl Interpreter {
                         call_rule: Some(index),
                         ineligible: None,
                         retry: None,
+                        streak: None,
                     });
                     continue;
                 }
@@ -444,14 +509,77 @@ impl Interpreter {
         }
     }
 
-    fn fail_flight(&mut self, flight: &InFlight, kind: String) {
-        self.last_failure = Some(kind);
+    /// Records a successful discrete action and clears its rule's streak.
+    fn succeeded(&mut self, flight: &InFlight) {
         if flight.depth < self.stack.len() {
-            // A primitive failure is retried on the next tick: the world did
-            // not change, so the same rule is still the highest true one.
-            self.stack[flight.depth].retry = Some(flight.rule);
+            let frame = &mut self.stack[flight.depth];
+            if frame
+                .streak
+                .as_ref()
+                .is_some_and(|streak| streak.rule == flight.rule)
+            {
+                frame.streak = None;
+            }
+        }
+    }
+
+    /// Records a primitive failure. Returns the failure kind when the rule has
+    /// failed [`MAX_PRIMITIVE_FAILURES`] times in a row, meaning its skill
+    /// fails; otherwise marks the rule to retry next tick.
+    fn fail_flight(&mut self, flight: &InFlight, kind: String) -> Option<String> {
+        self.last_failure = Some(kind.clone());
+        let mut failed = false;
+        if flight.depth < self.stack.len() {
+            let max = self.max_primitive_failures;
+            let frame = &mut self.stack[flight.depth];
+            let count = match &mut frame.streak {
+                Some(streak) if streak.rule == flight.rule => {
+                    streak.count += 1;
+                    streak.count
+                }
+                _ => {
+                    frame.streak = Some(FailureStreak {
+                        rule: flight.rule,
+                        count: 1,
+                    });
+                    1
+                }
+            };
+            if count >= max {
+                // The skill fails; do not retry this rule.
+                frame.streak = None;
+                failed = true;
+            } else {
+                // A primitive failure is retried on the next tick: the world
+                // did not change, so the same rule is still the highest true
+                // one.
+                frame.retry = Some(flight.rule);
+            }
         }
         self.clear_until_at(flight.depth, flight.rule);
+        if failed { Some(kind) } else { None }
+    }
+
+    /// Fails the skill whose frame is `depth`, mirroring `fail(kind)`: a child
+    /// pops and makes its caller ineligible, the root ends the interpreter.
+    fn fail_skill(
+        &mut self,
+        depth: usize,
+        kind: String,
+        actuator: &mut dyn Actuator,
+    ) -> Option<Decision> {
+        self.last_failure = Some(kind.clone());
+        if depth == 0 || depth >= self.stack.len() {
+            self.finished = true;
+            self.stop_continuous(actuator);
+            return Some(Decision::Failed(kind));
+        }
+        let call_rule = self.stack[depth].call_rule.unwrap_or(0);
+        self.stack.truncate(depth);
+        let parent = depth - 1;
+        self.stack[parent].ineligible = Some(call_rule);
+        self.clear_until_at(parent, call_rule);
+        None
     }
 
     fn clear_until_at(&mut self, depth: usize, rule: usize) {

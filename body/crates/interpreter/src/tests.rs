@@ -501,6 +501,76 @@ fn primitive_failure_retries_on_the_next_tick() {
 }
 
 #[test]
+fn three_consecutive_primitive_failures_fail_the_skill() {
+    let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    act.outcome = Some(Outcome::Failed("no_block".into()));
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Run { .. }
+        ));
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+    assert!(matches!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Run { .. }
+    ));
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed("no_block".into()),
+        "the third consecutive failure fails the skill with the last kind"
+    );
+    assert_eq!(interpreter.last_failure(), Some("no_block"));
+}
+
+#[test]
+fn another_rule_firing_resets_the_failure_streak() {
+    let program = program(
+        "skill s()\n  rules:\n    count(x) >= 1 -> wait(1)\n    true -> mine(stone)\n",
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    act.outcome = Some(Outcome::Failed("no_block".into()));
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    // Two failures of the mine rule.
+    for _ in 0..2 {
+        assert!(matches!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Run { .. }
+        ));
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+    // A different rule fires, which resets the streak.
+    facts.ints.insert("x".into(), 1);
+    assert_eq!(wait_ticks(&started(&mut interpreter, &mut facts, &mut act)), 1);
+    facts.ints.insert("x".into(), 0);
+    // A fresh mine failure starts the count again, so two more do not fail.
+    for _ in 0..2 {
+        assert!(matches!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Run { .. }
+        ));
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+}
+
+#[test]
 fn preemption_abandons_the_action_and_starts_no_duplicate() {
     let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
     let mut facts = Mock::default();

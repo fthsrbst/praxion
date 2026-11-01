@@ -1,0 +1,16 @@
+[package]
+name = "praxion-gamedata"
+description = "26.3 recipes and loot tables shared by the primitive registry and the fake world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[build-dependencies]
+# Reads the server jar, the versioned jar inside it, and `local/paths.toml`.
+# `zip` only needs inflate (method 8): no AES, bzip2, lzma, zstd or xz. `deflate-flate2`
+# leaves the back-end to flate2, so the pure-Rust one is named here explicitly.
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+serde_json = "1.0.154"
+toml = "1.1.8"
+zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2"] }

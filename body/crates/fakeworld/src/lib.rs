@@ -12,7 +12,7 @@
 //! afterwards.
 
 mod rng;
-pub mod recipes;
+pub use praxion_gamedata as recipes;
 
 #[cfg(test)]
 mod tests;
@@ -35,8 +35,6 @@ pub const ATTACK_TICKS: u64 = 3;
 pub const EQUIP_TICKS: u64 = 1;
 
 const CHANCE_MINE_FAIL: f64 = 0.03;
-const CHANCE_DROP_NONE: f64 = 0.05;
-const CHANCE_DROP_BONUS: f64 = 0.10;
 const CHANCE_ATTACK_MISS: f64 = 0.05;
 const CHANCE_PERTURB: f64 = 0.5;
 
@@ -110,6 +108,21 @@ impl State {
 
     fn grant(&mut self, item: &str, count: u32) {
         *self.inventory.entry(item.to_string()).or_insert(0) += count;
+    }
+
+    /// Grants one random count in each declared drop's range. The fake world
+    /// never invents a drop the primitive record does not declare.
+    fn grant_drops(&mut self, drops: &[recipes::Drop]) {
+        for drop in drops {
+            let count = if drop.min >= drop.max {
+                drop.min
+            } else {
+                self.rng.range(drop.min, drop.max)
+            };
+            if count > 0 {
+                self.grant(drop.item, count);
+            }
+        }
     }
 
     fn take(&mut self, item: &str, count: u32) -> bool {
@@ -281,12 +294,8 @@ impl State {
                     return Outcome::Failed("block_resisted".into());
                 }
                 self.remove_block(&block);
-                if !self.rng.chance(CHANCE_DROP_NONE) {
-                    let drop = recipes::drop_for(&block).to_string();
-                    self.grant(&drop, 1);
-                    if self.rng.chance(CHANCE_DROP_BONUS) {
-                        self.grant(&drop, 1);
-                    }
+                if let Some(drops) = recipes::block_drops(&block) {
+                    self.grant_drops(drops);
                 }
                 Outcome::Confirmed
             }
@@ -338,15 +347,9 @@ impl State {
                 if self.rng.chance(CHANCE_ATTACK_MISS) {
                     return Outcome::Failed("missed".into());
                 }
-                let kind = arg_name(action, 0).unwrap_or_default().to_string();
-                match kind.as_str() {
-                    "cow" => {
-                        self.grant("beef", 1);
-                        self.grant("leather", 1);
-                    }
-                    "sheep" => self.grant("mutton", 1),
-                    "chicken" => self.grant("chicken", 1),
-                    _ => {}
+                let kind = arg_name(action, 0).unwrap_or_default();
+                if let Some(drops) = recipes::entity_drops(kind) {
+                    self.grant_drops(drops);
                 }
                 Outcome::Confirmed
             }
@@ -391,11 +394,6 @@ impl State {
         self.stats.continuous_applies += 1;
         self.tick = tick;
         match action.primitive.as_str() {
-            "observe" => {
-                if let Some(ArgValue::Fact(call)) = action.args.first() {
-                    self.unknown.remove(&call.name);
-                }
-            }
             "move_to" => {
                 if let Some(target) = arg_name(action, 0) {
                     let progress = self.move_progress.entry(target.to_string()).or_insert(0);

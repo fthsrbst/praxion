@@ -374,7 +374,10 @@ fn check_arg(
             }
             _ => Err(err(
                 skill,
-                "expected a block or entity_kind identifier",
+                format!(
+                    "expected a block or entity_kind identifier, found {}",
+                    describe(expr)
+                ),
                 expr.span,
             )),
         },
@@ -382,7 +385,10 @@ fn check_arg(
             ExprKind::Call { .. } => type_of(expr, None, skill, facts).map(|_| ()),
             _ => Err(err(
                 skill,
-                "expected a fact call, for example `observe(count(x))`",
+                format!(
+                    "expected a fact call, for example `observe(count(x))`, found {}",
+                    describe(expr)
+                ),
                 expr.span,
             )),
         },
@@ -425,9 +431,12 @@ fn check_value(
                 ))
             }
         }
-        ExprKind::Call { .. } => Err(err(
+        ExprKind::Call { name, .. } => Err(err(
             skill,
-            "a fact call is only allowed as the argument of `observe`",
+            format!(
+                "expected an argument of type {}, found the fact call `{name}(...)`",
+                want.name()
+            ),
             expr.span,
         )),
         ExprKind::Int(n) => Err(err(
@@ -446,7 +455,7 @@ fn check_value(
         ExprKind::Name(name) => Err(err(
             skill,
             format!(
-                "expected an argument of type {}, found the identifier `{name}`",
+                "expected an argument of type {}, found the identifier `{name}` (an item, block or entity kind)",
                 want.name()
             ),
             expr.span,
@@ -460,6 +469,20 @@ fn check_value(
                 ),
                 expr.span,
             ))
+        }
+    }
+}
+
+/// A short description of an expression for a "found" clause.
+fn describe(expr: &Expr) -> &'static str {
+    match &expr.kind {
+        ExprKind::Int(_) => "an int",
+        ExprKind::Bool(_) => "a bool",
+        ExprKind::Param(_) => "a parameter",
+        ExprKind::Name(_) => "an identifier",
+        ExprKind::Call { .. } => "a fact call",
+        ExprKind::Not(_) | ExprKind::And(_, _) | ExprKind::Or(_, _) | ExprKind::Cmp { .. } => {
+            "a boolean expression"
         }
     }
 }

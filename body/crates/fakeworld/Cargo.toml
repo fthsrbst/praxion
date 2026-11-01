@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 praxion-rules = { path = "../rules" }
 praxion-interpreter = { path = "../interpreter" }
+praxion-gamedata = { path = "../gamedata" }

@@ -187,7 +187,10 @@ pub struct Perception {
     last_dimension: Option<String>,
     tick: u64,
     sneaking: bool,
-    rays_used: u32,
+    /// Rays each caller spent this tick. Kept apart so one caller's spending
+    /// never shrinks the other's guaranteed share.
+    rays_other: u32,
+    rays_reflex: u32,
     entity_checked: HashSet<i32>,
     entity_overflow: u64,
     table: SightTable,
@@ -208,7 +211,8 @@ impl Perception {
             last_dimension: None,
             tick: 0,
             sneaking: false,
-            rays_used: 0,
+            rays_other: 0,
+            rays_reflex: 0,
             entity_checked: HashSet::new(),
             entity_overflow: 0,
             table: SightTable::new(),
@@ -259,7 +263,8 @@ impl Perception {
         self.last_followed = followed;
         self.last_dimension = dimension;
         self.tick = self.tick.saturating_add(1);
-        self.rays_used = 0;
+        self.rays_other = 0;
+        self.rays_reflex = 0;
         self.entity_checked.clear();
         self.entity_overflow = 0;
         self.forget_other_eye_cells(world);
@@ -290,11 +295,24 @@ impl Perception {
     }
 
     pub fn rays_used_this_tick(&self) -> u32 {
-        self.rays_used
+        self.rays_other.saturating_add(self.rays_reflex)
     }
 
     pub fn rays_remaining(&self, caller: Caller) -> u32 {
-        self.config.remaining(caller, self.rays_used)
+        self.remaining_rays(caller)
+    }
+
+    /// Rays `caller` may still spend this tick (see [`Config::remaining`]).
+    fn remaining_rays(&self, caller: Caller) -> u32 {
+        self.config.remaining(caller, self.rays_other, self.rays_reflex)
+    }
+
+    /// Account one cast ray to `caller`.
+    fn spend_ray(&mut self, caller: Caller) {
+        match caller {
+            Caller::Reflex => self.rays_reflex = self.rays_reflex.saturating_add(1),
+            Caller::Other => self.rays_other = self.rays_other.saturating_add(1),
+        }
     }
 
     pub fn entity_checks_this_tick(&self) -> usize {
@@ -439,6 +457,9 @@ impl Perception {
                         }
                         match self.visible_block(world, caller, eye, pos, state, &mut reader) {
                             Ok(()) => {
+                                // A block a region query sees by sight is seen
+                                // like one `block` answers, so memory keeps it.
+                                self.memory.record(pos, state, self.tick);
                                 found.push(BlockFact { pos, state, kind, distance });
                                 if found.len() >= self.config.max_list_results {
                                     self.ledger.record(
@@ -738,13 +759,21 @@ impl Perception {
 
     /// Biome at the own position. The raw store does not carry biome data in
     /// this step, so the answer is `Unknown(never_seen)`.
-    pub fn biome(&self) -> Answer<String> {
+    ///
+    /// TODO(backlog "Biome and light in the raw store (F3 facts)"): read the
+    /// biome from `world` once the raw store keeps it. The `&World` parameter
+    /// is here already so callers need no change when the data arrives.
+    pub fn biome(&self, _world: &World) -> Answer<String> {
         Answer::Unknown(Reason::NeverSeen)
     }
 
     /// Light level at the own position. The raw store does not carry light
     /// data in this step, so the answer is `Unknown(never_seen)`.
-    pub fn light_level(&self) -> Answer<u8> {
+    ///
+    /// TODO(backlog "Biome and light in the raw store (F3 facts)"): read the
+    /// light level from `world` once the raw store keeps it. The `&World`
+    /// parameter is here already so callers need no change when it arrives.
+    pub fn light_level(&self, _world: &World) -> Answer<u8> {
         Answer::Unknown(Reason::NeverSeen)
     }
 
@@ -858,7 +887,7 @@ impl Perception {
         if distance > f64::from(self.config.range) {
             return Err(Reason::OutOfRange);
         }
-        if self.config.remaining(caller, self.rays_used) == 0 {
+        if self.remaining_rays(caller) == 0 {
             return Err(Reason::Budget);
         }
         let mut points = [Vec3::ZERO; 7];
@@ -871,10 +900,10 @@ impl Perception {
         crossed.record_target(world, pos);
         let mut visible = false;
         for point in &points[..count] {
-            if self.config.remaining(caller, self.rays_used) == 0 {
+            if self.remaining_rays(caller) == 0 {
                 return Err(Reason::Budget);
             }
-            self.rays_used += 1;
+            self.spend_ray(caller);
             if sight::line_of_sight(world, eye, *point, pos, &mut self.table, &mut crossed) {
                 visible = true;
                 break;
@@ -957,7 +986,7 @@ impl Perception {
                 return Err(Reason::Budget);
             }
         }
-        if self.config.remaining(caller, self.rays_used) == 0 {
+        if self.remaining_rays(caller) == 0 {
             return Err(Reason::Budget);
         }
         self.entity_checked.insert(entity.id());
@@ -987,10 +1016,10 @@ impl Perception {
         crossed.record_target(world, cell);
         let mut visible = false;
         for point in &points[..count] {
-            if self.config.remaining(caller, self.rays_used) == 0 {
+            if self.remaining_rays(caller) == 0 {
                 return Err(Reason::Budget);
             }
-            self.rays_used += 1;
+            self.spend_ray(caller);
             let point_cell = point.to_block_pos_floor();
             if sight::line_of_sight(world, eye, *point, point_cell, &mut self.table, &mut crossed) {
                 visible = true;

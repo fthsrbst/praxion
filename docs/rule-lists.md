@@ -92,7 +92,15 @@ it is a value the perception policy could not answer.
 Every action is a primitive with a versioned record
 (`body/crates/rules/src/registry.rs`): typed parameters, discrete or
 continuous, cancellation class, default `max_ticks`, declared effects and the
-evidence kind that settles its receipt. `do skill(...)` calls another skill.
+evidence kind that settles its receipt. Effects come from game data, not from
+hand: `craft` consumes and produces exactly what the 26.3 recipe says
+(`body/crates/gamedata/src/recipes.rs`), and `mine`/`attack` carry the possible
+drops, count ranges and tool requirements of the 26.3 loot tables. The tables
+are read from the pinned server jar when `praxion-gamedata` is built. For a
+primitive whose effect depends on its first argument, `effects_for(args)` gives
+the exact effect; the record's `effects` is the union over all arguments.
+`observe(fact)` is discrete, settles with evidence `FactKnown`, and times out
+at its record's default `max_ticks` (20). `do skill(...)` calls another skill.
 `done` finishes the skill; `fail(kind)` fails it.
 
 ## One tick
@@ -122,18 +130,24 @@ evidence kind that settles its receipt. `do skill(...)` calls another skill.
   until `G` becomes true. The rule keeps running while its own guard is T and
   `G` is not T (F or U), and is released when `G` is T, when its own guard
   stops being T, or at `max_ticks` (the rule's, else the primitive record's
-  default). `until_active()` exposes this to the arbiter's same-tier switch
-  rule. So `mine(stone) until count(cobblestone) >= 3` mines until three
-  cobblestone are in the inventory.
+  default). A non-primitive action (`do`, `done`, `fail`) has no record, so its
+  default bound is `DEFAULT_MAX_TICKS` = 1200 ticks. `until_active()` exposes
+  this to the arbiter's same-tier switch rule. So `mine(stone) until
+  count(cobblestone) >= 3` mines until three cobblestone are in the inventory.
 - **Composition:** a call is a frame on a stack; the deepest frame with a T
   rule fires. A child's `failed(kind)` makes the calling rule ineligible for
-  that tick, so the parent falls to its next rule. A preemption suspends the
-  whole stack and abandons an in-flight discrete action (it settles
-  `preempted`); on resume every frame re-evaluates from the top.
+  that tick, so the parent falls to its next rule. A child's `done` pops the
+  frame and returns `Waiting("child done")`; the parent re-selects on the next
+  tick, not in the same one. A preemption suspends the whole stack and
+  abandons an in-flight discrete action (it settles `preempted`); on resume
+  every frame re-evaluates from the top.
 - **A failed primitive** is retried on the next tick: the outcome is recorded
   (`last_failure()`), but the world did not change, so the same rule is still
   the highest true one. A retry does not start a second action in the same
-  tick.
+  tick. Three consecutive failures of the same rule's primitive, with no other
+  rule firing in between, fail that skill with the last kind
+  (`MAX_PRIMITIVE_FAILURES` = 3). A success or a different rule firing resets
+  the count.
 - **Preemption** is not a failure. The skill keeps its stack and continues.
 
 Limits, checked at load with a line and column: at most 30 rules per skill,
@@ -149,19 +163,26 @@ carries its cap, and the interpreter enforces the same one at run time. A
 depth-5 chain is rejected for the core.
 
 The core skill sizes are small on purpose: 2 to 6 rules each, and a step is
-composed with `do` rather than inlined. The deepest chain is:
+composed with `do` rather than inlined. A leaf can be reached at more than one
+depth, so its depth is not a property of the skill itself. The deepest chain
+is:
 
 ```
-get_stone_pickaxe          root, depth 1
-  get_cobblestone          depth 2
-    get_wooden_pickaxe     depth 3
-      get_sticks           depth 4, a leaf
+get_stone_pickaxe                    root, depth 1
+  get_sticks                         depth 2, a leaf
+  get_crafting_table_near            depth 2, a leaf
+  get_cobblestone                    depth 2
+    get_wooden_pickaxe               depth 3
+      get_planks                     depth 4, a leaf
+      get_sticks                     depth 4, a leaf
+      get_crafting_table_near        depth 4, a leaf
 ```
 
-`get_planks`, `get_sticks` and `get_crafting_table_near` are leaves: the
-pickaxe calls them at depth 4, so they mine and craft their own inputs instead
-of calling further down. `get_crafting_table` is the composed variant used on
-its own, and `get_wood` remains the basic log skill.
+`get_planks`, `get_sticks` and `get_crafting_table_near` are leaves: at depth
+4 they mine and craft their own inputs instead of calling further down. The
+same leaves are also called directly by `get_stone_pickaxe` at depth 2.
+`get_crafting_table` is the composed variant used on its own, and `get_wood`
+remains the basic log skill.
 
 ## Worked example, tick by tick
 
