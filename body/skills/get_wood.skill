@@ -1,8 +1,10 @@
 # Collect logs of any wood type. The first rung of the first-night chain: no
 # tool needed. `#logs` comes from the 26.3 block tag, so birch, spruce and the
-# other woods work on any seed.
+# other woods work on any seed. No log in sight means walk to a frontier of the
+# perception known map before mining; `explore` sleeps at most 1200 ticks.
 skill get_wood(n: int = 1)
   doc "Collect at least n logs of any wood type."
   rules:
     count(#logs) >= $n -> done
+    not near(#logs, 5) -> explore(#logs)
     true -> mine(#logs)

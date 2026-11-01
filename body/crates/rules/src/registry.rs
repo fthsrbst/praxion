@@ -19,6 +19,21 @@ use praxion_gamedata as gamedata;
 
 use crate::ast::{ArgType, ArgValue, ValueType};
 
+/// The tick budget of `explore`: how long one call may search before it fails
+/// with `not_found`.
+pub const EXPLORE_MAX_TICKS: u32 = 1200;
+
+/// How close `explore` must bring its target before it succeeds: the radius of
+/// the `mine` search (see `block_target`), so the target is in mining reach
+/// when the primitive returns. An exploration call still scans the wider
+/// perception known map for frontiers.
+pub const EXPLORE_NEAR_RADIUS: u32 = 5;
+
+/// How far `explore` looks for its target in the perception known map before
+/// it falls back to walking to a frontier. The sweep fills the same radius, so
+/// a tree seen at 20 blocks is approached instead of wandered past.
+pub const EXPLORE_SEARCH_RADIUS: u32 = 32;
+
 /// The signature of one fact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FactSig {
@@ -206,7 +221,8 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Continuous,
             cancellation: CancellationClass::Interruptible,
-            default_max_ticks: 60,
+            // Covers the runner's 80-tick wait for an unseen target.
+            default_max_ticks: 100,
             effects: Effects::default(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::NoCorrection,
@@ -227,9 +243,10 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            // The dig intent's own window is 160 ticks (slow blocks, no tool);
-            // the interpreter must not preempt it earlier.
-            default_max_ticks: 180,
+            // The dig intent's own window is 160 ticks (slow blocks, no tool),
+            // then the post-break walk to the drop may take 60 more; the
+            // interpreter must not preempt the pickup earlier.
+            default_max_ticks: 240,
             effects: Effects {
                 produces: mine_produces,
                 drops: mine_drops,
@@ -372,6 +389,23 @@ impl Primitives {
         });
 
         primitives.add(PrimitiveRecord {
+            name: "explore",
+            version: 1,
+            params: vec![PrimParam {
+                name: "target",
+                ty: ArgType::Value(ValueType::Block),
+            }],
+            kind: PrimitiveKind::Continuous,
+            cancellation: CancellationClass::Interruptible,
+            // One exploration call searches until the target is in sight of the
+            // known map or this budget runs out.
+            default_max_ticks: EXPLORE_MAX_TICKS,
+            effects: Effects::default(),
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::NoCorrection,
+        });
+
+        primitives.add(PrimitiveRecord {
             name: "wait",
             version: 1,
             params: vec![PrimParam {
@@ -395,7 +429,8 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            default_max_ticks: 20,
+            // Covers the runner's 80-tick alignment wait plus the 40-tick fact window.
+            default_max_ticks: 120,
             effects: Effects::default(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::FactKnown,
@@ -591,7 +626,8 @@ mod tests {
     fn every_required_record_exists() {
         let primitives = Primitives::standard();
         for name in [
-            "move_to", "mine", "place", "craft", "eat", "attack", "equip", "wait", "observe",
+            "move_to", "mine", "place", "craft", "eat", "explore", "attack", "equip", "wait",
+            "observe",
         ] {
             let record = primitives.get(name).unwrap_or_else(|| panic!("missing {name}"));
             assert_eq!(record.version, 1);
@@ -604,6 +640,19 @@ mod tests {
         let p = Primitives::standard();
         assert_eq!(p.get("mine").unwrap().kind, PrimitiveKind::Discrete);
         assert_eq!(p.get("move_to").unwrap().kind, PrimitiveKind::Continuous);
+        assert_eq!(p.get("explore").unwrap().kind, PrimitiveKind::Continuous);
+        assert_eq!(
+            p.get("explore").unwrap().default_max_ticks,
+            EXPLORE_MAX_TICKS
+        );
+        assert_eq!(
+            p.get("explore").unwrap().params,
+            vec![PrimParam {
+                name: "target",
+                ty: ArgType::Value(ValueType::Block),
+            }]
+        );
+        assert_eq!(p.get("explore").unwrap().evidence, EvidenceKind::NoCorrection);
         assert_eq!(p.get("mine").unwrap().evidence, EvidenceKind::BlockBecomesAir);
         assert_eq!(
             p.get("craft").unwrap().evidence,
@@ -611,7 +660,7 @@ mod tests {
         );
         assert_eq!(p.get("observe").unwrap().kind, PrimitiveKind::Discrete);
         assert_eq!(p.get("observe").unwrap().evidence, EvidenceKind::FactKnown);
-        assert_eq!(p.get("observe").unwrap().default_max_ticks, 20);
+        assert_eq!(p.get("observe").unwrap().default_max_ticks, 120);
     }
 
     #[test]

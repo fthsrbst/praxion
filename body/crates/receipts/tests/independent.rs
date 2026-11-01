@@ -410,6 +410,179 @@ fn property_no_confirmed_without_own_evidence() {
     }
 }
 
+fn dirt() -> BlockState {
+    BlockState::from(BlockKind::Dirt)
+}
+
+// --- Step 8b adversarial receipts tests ---
+
+#[test]
+fn place_early_block_update_different_position_does_not_confirm() {
+    let mut h = Harness::new("place-early-diff-pos");
+    let pos = BlockPos::new(0, 64, 0);
+    let other = BlockPos::new(1, 64, 0);
+    let seq = 5u32;
+    h.tick = 0;
+    // A block update for a *different* cell arrives before the intent starts.
+    h.observe_at(0, block_update(other, stone()));
+    h.tick = 5;
+    let receipt = h.register(Intent::place(1, pos, "stone", seq, 5).with_window(10));
+    // Only the ack arrives; the placed block was never observed at `pos`.
+    h.observe_at(6, block_ack(seq));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn place_early_block_update_different_block_does_not_confirm() {
+    let mut h = Harness::new("place-early-diff-block");
+    let pos = BlockPos::new(2, 64, 0);
+    let seq = 6u32;
+    h.tick = 0;
+    // A different block lands in the target cell before registration.
+    h.observe_at(0, block_update(pos, dirt()));
+    h.tick = 5;
+    let receipt = h.register(Intent::place(2, pos, "stone", seq, 5).with_window(10));
+    h.observe_at(6, block_ack(seq));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn place_observed_carry_stale_initial_not_air_does_not_confirm() {
+    let mut h = Harness::new("place-carry-stale-initial");
+    let pos = BlockPos::new(3, 64, 0);
+    let seq = 7u32;
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::place(3, pos, "stone", seq, 0)
+            .with_window(10)
+            .with_initial_block(Some(stone()))
+            .with_observed_block(Some(stone())),
+    );
+    h.observe_at(1, block_ack(seq));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn place_observed_carry_wrong_observed_block_does_not_confirm() {
+    let mut h = Harness::new("place-carry-wrong-observed");
+    let pos = BlockPos::new(4, 64, 0);
+    let seq = 8u32;
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::place(4, pos, "stone", seq, 0)
+            .with_window(10)
+            .with_initial_block(Some(air()))
+            .with_observed_block(Some(dirt())),
+    );
+    h.observe_at(1, block_ack(seq));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn tag_inventory_non_tag_arrival_does_not_confirm() {
+    let mut h = Harness::new("tag-non-tag");
+    h.world
+        .apply_clientbound_play(0, &content_packet(0, 0, vec![]));
+    h.tick = 0;
+    let receipt = h.register(Intent::inventory(1, "eat", "#planks", 1, 0).with_window(10));
+    // Only a non-tag item arrives.
+    h.observe_at(1, content(0, 1, vec![ItemStack::new(ItemKind::Stone, 1)]));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn tag_inventory_leave_and_arrive_same_tick_does_not_confirm() {
+    let mut h = Harness::new("tag-swap-same-tick");
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::OakPlanks, 1)]),
+    );
+    h.tick = 0;
+    let receipt = h.register(Intent::inventory(2, "eat", "#planks", 1, 0).with_window(10));
+    // One plank leaves and a different plank arrives in the same content packet:
+    // net count unchanged, so no delta evidence.
+    h.observe_at(
+        1,
+        content(0, 1, vec![ItemStack::new(ItemKind::OakPlanks, 1)]),
+    );
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn place_same_batch_update_without_matching_ack_does_not_confirm() {
+    let mut h = Harness::new("place-piston");
+    let pos = BlockPos::new(5, 64, 0);
+    let seq = 9u32;
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::place(5, pos, "stone", seq, 0)
+            .with_window(10)
+            .with_initial_block(Some(air())),
+    );
+    // A same-batch update turns the cell into the placed block (piston/other
+    // player), but no ack for our seq arrives.
+    h.observe_at(1, block_update(pos, stone()));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn place_same_batch_update_with_lower_ack_does_not_confirm() {
+    let mut h = Harness::new("place-lower-ack");
+    let pos = BlockPos::new(6, 64, 0);
+    let seq = 10u32;
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::place(6, pos, "stone", seq, 0)
+            .with_window(10)
+            .with_initial_block(Some(air())),
+    );
+    h.observe_at(1, block_update(pos, stone()));
+    h.observe_at(1, block_ack(1));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn dig_same_batch_air_update_without_matching_ack_does_not_confirm() {
+    let mut h = Harness::new("dig-piston");
+    let pos = BlockPos::new(7, 64, 0);
+    let seq = 11u32;
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::dig(7, pos, seq, 0)
+            .with_window(10)
+            .with_initial_block(Some(stone())),
+    );
+    // The block becomes air from a piston in the same batch.
+    h.observe_at(1, block_update(pos, air()));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn dig_same_batch_air_update_with_lower_ack_does_not_confirm() {
+    let mut h = Harness::new("dig-lower-ack");
+    let pos = BlockPos::new(8, 64, 0);
+    let seq = 12u32;
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::dig(8, pos, seq, 0)
+            .with_window(10)
+            .with_initial_block(Some(stone())),
+    );
+    h.observe_at(1, block_update(pos, air()));
+    h.observe_at(1, block_ack(1));
+    h.advance_at(10);
+    assert_ne!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
 #[test]
 fn no_panic_on_degenerate_inputs() {
     let mut h = Harness::new("degenerate");

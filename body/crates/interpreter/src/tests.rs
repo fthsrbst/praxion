@@ -477,6 +477,150 @@ fn explicit_fail_at_the_root_is_the_decision() {
 }
 
 #[test]
+fn three_consecutive_child_failures_fail_the_parent() {
+    let program = program(
+        r#"
+skill child()
+  rules:
+    true -> fail(broken)
+skill parent()
+  rules:
+    true -> do child()
+"#,
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("parent", Vec::new()).unwrap();
+
+    for _ in 0..2 {
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into()),
+            "the child fails once; the parent retries on the next tick"
+        );
+    }
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed("broken".into()),
+        "the third consecutive child failure fails the parent with its kind"
+    );
+    assert_eq!(interpreter.last_failure(), Some("broken"));
+    assert!(interpreter.finished());
+}
+
+#[test]
+fn a_child_success_resets_the_parents_failure_streak() {
+    let program = program(
+        r#"
+skill child()
+  rules:
+    has(ok) -> done
+    true -> fail(broken)
+skill parent()
+  rules:
+    true -> do child()
+"#,
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("parent", Vec::new()).unwrap();
+
+    // Two failures, then a success, then two failures: no parent failure.
+    for _ in 0..2 {
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+    facts.bools.insert("ok".into(), true);
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Waiting("child done".into())
+    );
+    facts.bools.insert("ok".into(), false);
+    for _ in 0..2 {
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into()),
+            "the success reset the count, so two fresh failures are safe"
+        );
+    }
+    assert!(!interpreter.finished());
+}
+
+#[test]
+fn a_different_parent_rule_resets_the_child_failure_streak() {
+    let program = program(
+        r#"
+skill child()
+  rules:
+    true -> fail(broken)
+skill parent()
+  rules:
+    has(tool) -> do child()
+    count(pause) >= 1 -> wait(5)
+"#,
+    );
+    let mut facts = Mock::default();
+    facts.bools.insert("tool".into(), true);
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("parent", Vec::new()).unwrap();
+
+    // Two child failures, then the other rule fires for one tick.
+    for _ in 0..2 {
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+    facts.bools.insert("tool".into(), false);
+    facts.ints.insert("pause".into(), 1);
+    assert_eq!(wait_ticks(&started(&mut interpreter, &mut facts, &mut act)), 5);
+    // The streak is gone; two fresh child failures do not fail the parent.
+    facts.bools.insert("tool".into(), true);
+    facts.ints.insert("pause".into(), 0);
+    for _ in 0..2 {
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+    assert!(!interpreter.finished());
+}
+
+#[test]
+fn a_child_no_rule_failure_counts_towards_the_parent_streak() {
+    let program = program(
+        r#"
+skill child()
+  rules:
+    false -> done
+skill parent()
+  rules:
+    true -> do child()
+"#,
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("parent", Vec::new()).unwrap();
+
+    for _ in 0..2 {
+        assert_eq!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Waiting("retry".into())
+        );
+    }
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed("no_rule".into())
+    );
+}
+
+#[test]
 fn primitive_failure_retries_on_the_next_tick() {
     let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
     let mut facts = Mock::default();

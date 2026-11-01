@@ -39,8 +39,9 @@ pub use error::Error;
 pub use parser::parse;
 pub use print::print;
 pub use registry::{
-    BlockChange, BlockRef, CancellationClass, Effects, EvidenceKind, FactSig, Facts, ItemDelta,
-    ItemDrop, PrimParam, PrimitiveKind, PrimitiveRecord, Primitives,
+    BlockChange, BlockRef, CancellationClass, EvidenceKind, EXPLORE_MAX_TICKS,
+    EXPLORE_NEAR_RADIUS, EXPLORE_SEARCH_RADIUS, Effects, FactSig, Facts, ItemDelta, ItemDrop,
+    PrimParam, PrimitiveKind, PrimitiveRecord, Primitives,
 };
 
 /// Removes an optional `minecraft:` namespace from an identifier.

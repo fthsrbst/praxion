@@ -119,24 +119,44 @@ impl Receipt {
             fact_hit: None,
             correction_hit: None,
         };
-        // A place's block update can arrive in the batch before the intent is
+        // A block update can arrive in the batch before the intent is
         // registered (the driver registers it from the previous tick's
-        // report). The actuator's pre-click snapshot proves the cell was air;
-        // if the world already shows the placed block, that is the update, and
-        // only the ack is still outstanding.
-        if let Expect::BlockState { block, .. } = &receipt.intent.expect
-            && receipt
-                .initial_block
-                .as_ref()
-                .is_some_and(|initial| initial.state.is_air())
-            && receipt.intent.observed_block.is_some_and(|state| {
-                normalize(BlockDescription::of(state).name()) == normalize(block)
-            })
-        {
-            receipt.block_hit = Some(EvidenceRef {
-                kind: "block_state".to_owned(),
-                tick: receipt.intent.start_tick,
-            });
+        // report). The actuator's pre-click snapshot plus the state the
+        // driver observes at registration prove the change; only the ack is
+        // then still outstanding. This covers a place (the observed state is
+        // the placed block) and a dig (the observed state is air after a
+        // non-air pre-click snapshot).
+        match &receipt.intent.expect {
+            Expect::BlockState { block, .. }
+                if receipt
+                    .initial_block
+                    .as_ref()
+                    .is_some_and(|initial| initial.state.is_air())
+                    && receipt.intent.observed_block.is_some_and(|state| {
+                        normalize(BlockDescription::of(state).name()) == normalize(block)
+                    }) =>
+            {
+                receipt.block_hit = Some(EvidenceRef {
+                    kind: "block_state".to_owned(),
+                    tick: receipt.intent.start_tick,
+                });
+            }
+            Expect::BlockBecomesAir { .. }
+                if receipt
+                    .initial_block
+                    .as_ref()
+                    .is_some_and(|initial| !initial.state.is_air())
+                    && receipt
+                        .intent
+                        .observed_block
+                        .is_some_and(|state| state.is_air()) =>
+            {
+                receipt.block_hit = Some(EvidenceRef {
+                    kind: "block_air".to_owned(),
+                    tick: receipt.intent.start_tick,
+                });
+            }
+            _ => {}
         }
         receipt
     }

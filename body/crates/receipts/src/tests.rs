@@ -414,6 +414,99 @@ fn a_place_update_before_registration_still_confirms_with_its_ack() {
 }
 
 #[test]
+fn a_dig_update_before_registration_still_confirms_with_its_ack() {
+    // Captured from a live run (seed 101, step 9c): the dig at (-352, 74,
+    // -144) started on tick 2641 with a stone pre-click snapshot, the server's
+    // block update was already in the world when the intent registered on
+    // 2642, and the ack (seq 217) arrived on 2643. The old receipt saw only
+    // the ack and settled `unconfirmed(missing_block)` although the block was
+    // air.
+    let mut h = Harness::new("dig-before-register");
+    let pos = BlockPos::new(-352, 74, -144);
+    h.apply(&block_update(pos, BlockState::AIR));
+    h.tick = 2642;
+    let receipt = h.register(
+        Intent::dig(15, pos, 217, 2641)
+            .with_window(160)
+            .with_initial_block(Some(stone()))
+            .with_observed_block(Some(BlockState::AIR)),
+    );
+    h.observe_at(2643, block_ack(217));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+    let evidence: Vec<_> = h
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            EventKind::ReceiptSettled { evidence, .. } => Some(evidence),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        evidence.iter().any(|hit| hit.kind == "block_air" && hit.tick == 2641),
+        "the pre-click stone plus the observed air is the block evidence: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|hit| hit.kind == "block_changed_ack" && hit.tick == 2643),
+        "the ack still has to arrive: {evidence:?}"
+    );
+
+    // A dig whose block was already air before the click is not evidence.
+    let already = h.register(
+        Intent::dig(16, pos, 218, 2644)
+            .with_window(160)
+            .with_initial_block(Some(BlockState::AIR))
+            .with_observed_block(Some(BlockState::AIR)),
+    );
+    h.observe_at(2645, block_ack(218));
+    h.advance_at(2820);
+    assert_eq!(h.outcome(already), Some(Outcome::Unconfirmed));
+}
+
+#[test]
+fn the_live_place_order_confirms_with_the_observed_state_and_the_same_batch_ack() {
+    // The live driver registers the place from the previous tick's applied
+    // report, after the world feed has already applied the block update. The
+    // receipt therefore starts with the actuator's pre-click air snapshot and
+    // the placed state the driver observed, then folds the same batch's block
+    // update and ack. This is the exact order captured from a stocked run.
+    let mut h = Harness::new("place-live-order");
+    let pos = BlockPos::new(-276, 71, -111);
+    h.apply(&block_update(pos, stone()));
+    h.tick = 303;
+    let receipt = h.register(
+        Intent::place(1, pos, "stone", 7, 300)
+            .with_initial_block(Some(BlockState::AIR))
+            .with_observed_block(Some(stone())),
+    );
+    h.observe_at(303, block_update(pos, stone()));
+    h.observe_at(303, block_ack(7));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+
+    let evidence: Vec<_> = h
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            EventKind::ReceiptSettled { evidence, .. } => Some(evidence),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        evidence.iter().any(|hit| hit.kind == "block_state" && hit.tick == 300),
+        "block evidence comes from the pre-action air plus the observed placed state: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|hit| hit.kind == "block_changed_ack" && hit.tick == 303),
+        "the same batch's ack completes the place: {evidence:?}"
+    );
+}
+
+#[test]
 fn attack_confirms_on_a_damage_event_for_the_target() {
     let mut h = Harness::new("attack-damage-event");
     h.tick = 0;

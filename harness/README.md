@@ -61,6 +61,57 @@ python -m praxion_harness clean-runs --older-than-hours 24 --dry-run
 `clean-runs` skips a directory whose `server/world/session.lock` is locked by a live
 server, and never touches `fwd-*`, `raw-*`, `manual-*` or `cli-*`.
 
+## The body
+
+`body/target/release/praxion-body` is the one process that plays a goal. It
+connects to the forwarder as a game client and to its tee, runs
+tee -> decoder -> world -> perception, and drives the headless session's 20 Hz
+tick through reflexes, the arbiter, the interpreter and the primitives.
+
+```sh
+praxion-body --forwarder 127.0.0.1:25640 --tee 127.0.0.1:25641 \
+             --name Praxion --goal get_stone_pickaxe \
+             --run-dir runs/body-pickaxe \
+             [--goal-args ...] [--max-ticks 6000] \
+             [--settings body/config/reflexes.toml] [--skills body/skills] \
+             [--start-delay-ticks 60] [--linger-ticks 60] [--verbose]
+```
+
+- `--forwarder` is the forwarder's game listener, `--tee` its tee listener.
+- `--goal` names a skill in `body/skills`; `--goal-args` are typed from the
+  skill's parameters (int, item, block, entity_kind or bool).
+- `--start-delay-ticks` waits after the first usable tick so fixtures can give
+  items, set the time and summon mobs.
+- `--linger-ticks` keeps the player connected after the goal settles so the
+  referee can read the inventory while the body is still in the world.
+- `--run-dir` gets `events.jsonl` (the first event is `run_started` with the
+  manifest pins and the git commit) and `summary.json`.
+
+Exit codes: `0` goal `done`, `1` `failed(kind)`, `2` `--max-ticks`, `3`
+Ctrl+C. Every exit disconnects cleanly.
+
+`summary.json` carries the goal and its outcome, ticks, tick-time p50/p99 for
+the body's work and the tick period, receipts by outcome, reflex activations,
+deaths seen and world warnings. Ticks over 25 ms also become `slow_tick` events
+in `events.jsonl`.
+
+The Python helper `praxion_harness/body.py` starts a server, a forwarder and the
+body for one seed and returns the run, the referee and the fixture channel:
+
+```python
+from praxion_harness.body import start_body
+
+def setup(fixture, referee, run):
+    fixture.give("Praxion", "oak_log", 3)
+
+with start_body(101, "get_wooden_pickaxe", setup=setup) as run:
+    summary = run.wait_for_outcome(timeout=240)
+    assert run.referee.player_inventory()["minecraft:wooden_pickaxe"] >= 1
+```
+
+It uses only ports 25640-25659. `tests/test_body_smoke.py` is the level-2 smoke
+test (`-m server`).
+
 ## Test markers
 
 | Marker | Meaning |
@@ -122,4 +173,5 @@ Captured with the real server in `tests/fixtures/observed-26.3.txt`.
 | `praxion_harness/referee.py` | server facts and verdicts (health, inventory, time, blocks, deaths, first night) |
 | `praxion_harness/cleanup.py` | stale run-dir deletion and session-lock check |
 | `praxion_harness/cli.py` | `serve`, `query`, `clean-runs` |
+| `praxion_harness/body.py` | server + forwarder + `praxion-body` for one seed; summary and events |
 | `tests/` | unit tests (default) and live-server tests (`-m server`) |

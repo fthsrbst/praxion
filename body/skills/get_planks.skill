@@ -1,10 +1,12 @@
 # Turn logs into planks. One log yields four planks (26.3 recipe data).
 # Leaf skill: the pickaxe's children must stay leaves so that the chain
 # get_stone_pickaxe -> get_cobblestone -> get_wooden_pickaxe -> leaf fits the
-# core depth of 4. It therefore mines its own logs instead of calling get_wood.
+# core depth of 4. It therefore mines its own logs instead of calling get_wood,
+# and explores when no log is in sight.
 skill get_planks(n: int = 4)
   doc "Craft at least n planks of any wood type."
   rules:
     count(#planks) >= $n -> done
     count(#logs) >= 1 -> craft(#planks)
+    not near(#logs, 5) -> explore(#logs)
     true -> mine(#logs)

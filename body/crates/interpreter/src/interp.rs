@@ -14,8 +14,9 @@ use crate::{
 /// (a `do`, `done` or `fail`).
 pub const DEFAULT_MAX_TICKS: u32 = 1200;
 
-/// Consecutive failures of the same rule's primitive before that skill fails
-/// with the last failure kind. A different rule firing resets the count.
+/// Consecutive failures of the same rule, primitive or child skill, before that
+/// skill fails with the last failure kind. A different rule firing or a success
+/// resets the count.
 pub const MAX_PRIMITIVE_FAILURES: u32 = 3;
 
 /// Guards a selection loop against a pathological ruleset. The load-time
@@ -361,17 +362,23 @@ impl Interpreter {
                     self.stop_continuous(actuator);
                     return Decision::Observe(fact);
                 }
+                // A rule whose child failed this tick waits for the retry
+                // instead of failing `no_rule` when it is the only true rule.
+                if self.stack[depth].retry.is_some() {
+                    return Decision::Waiting("retry".into());
+                }
                 // Step 5: no eligible rule.
                 if depth == 0 {
                     self.finished = true;
                     self.stop_continuous(actuator);
                     return Decision::Failed("no_rule".into());
                 }
-                let call_rule = self.stack[depth].call_rule.unwrap_or(0);
-                self.stack.pop();
-                let parent = self.stack.len() - 1;
-                self.stack[parent].ineligible = Some(call_rule);
-                self.clear_until_at(parent, call_rule);
+                // The child had no eligible rule, so it failed with `no_rule`.
+                // That is a failure of the calling rule, not of the parent on
+                // this tick (see `note_child_failure`).
+                if let Some(decision) = self.fail_skill(depth, "no_rule".into(), actuator) {
+                    return decision;
+                }
                 continue;
             };
 
@@ -412,7 +419,18 @@ impl Interpreter {
                         self.finished = true;
                         return Decision::Done;
                     }
+                    let call_rule = self.stack[depth].call_rule.unwrap_or(0);
                     self.stack.pop();
+                    // A completed child is a success of the calling rule, so it
+                    // ends that rule's failure streak.
+                    if let Some(parent) = self.stack.get_mut(depth - 1)
+                        && parent
+                            .streak
+                            .as_ref()
+                            .is_some_and(|streak| streak.rule == call_rule)
+                    {
+                        parent.streak = None;
+                    }
                     // A commitment owned by this frame ends with it; a parent's
                     // commitment survives a child completing.
                     if matches!(&self.until, Some(until) if until.depth >= depth) {
@@ -422,16 +440,9 @@ impl Interpreter {
                 }
                 ActionKind::Fail(kind) => {
                     self.stop_continuous(actuator);
-                    self.last_failure = Some(kind.clone());
-                    if depth == 0 {
-                        self.finished = true;
-                        return Decision::Failed(kind);
+                    if let Some(decision) = self.fail_skill(depth, kind, actuator) {
+                        return decision;
                     }
-                    let call_rule = self.stack[depth].call_rule.unwrap_or(0);
-                    self.stack.pop();
-                    let parent = self.stack.len() - 1;
-                    self.stack[parent].ineligible = Some(call_rule);
-                    self.clear_until_at(parent, call_rule);
                     continue;
                 }
                 ActionKind::Do {
@@ -566,7 +577,8 @@ impl Interpreter {
     }
 
     /// Fails the skill whose frame is `depth`, mirroring `fail(kind)`: a child
-    /// pops and makes its caller ineligible, the root ends the interpreter.
+    /// pops and counts one failure of its calling rule, the root ends the
+    /// interpreter.
     fn fail_skill(
         &mut self,
         depth: usize,
@@ -582,8 +594,44 @@ impl Interpreter {
         let call_rule = self.stack[depth].call_rule.unwrap_or(0);
         self.stack.truncate(depth);
         let parent = depth - 1;
-        self.stack[parent].ineligible = Some(call_rule);
         self.clear_until_at(parent, call_rule);
+        self.note_child_failure(parent, call_rule, kind, actuator)
+    }
+
+    /// Counts one failure of `rule` in the frame at `depth`, the same streak a
+    /// failed primitive of that rule uses. Below the limit the rule is
+    /// ineligible for this tick and retried on the next one; at the limit the
+    /// frame's skill fails and the failure propagates to its caller.
+    fn note_child_failure(
+        &mut self,
+        depth: usize,
+        rule: usize,
+        kind: String,
+        actuator: &mut dyn Actuator,
+    ) -> Option<Decision> {
+        let max = self.max_primitive_failures;
+        let count = {
+            let frame = &mut self.stack[depth];
+            match &mut frame.streak {
+                Some(streak) if streak.rule == rule => {
+                    streak.count += 1;
+                    streak.count
+                }
+                _ => {
+                    frame.streak = Some(FailureStreak { rule, count: 1 });
+                    1
+                }
+            }
+        };
+        if count >= max {
+            // The skill fails; do not retry this rule.
+            self.stack[depth].streak = None;
+            return self.fail_skill(depth, kind, actuator);
+        }
+        self.stack[depth].ineligible = Some(rule);
+        // If no other rule is true this tick, the frame waits for the retry
+        // instead of failing `no_rule`; the child is called again next tick.
+        self.stack[depth].retry = Some(rule);
         None
     }
 

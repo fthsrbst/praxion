@@ -1,6 +1,7 @@
 # Have a crafting table placed within 4 blocks: craft and place one if needed.
 # Leaf skill, because get_wooden_pickaxe calls it at the core depth limit. It
 # only places while no table is near, which keeps duplicate placements at zero.
+# When no log is in sight it explores before mining.
 skill get_crafting_table_near()
   doc "Have a crafting table placed within 4 blocks."
   rules:
@@ -8,4 +9,5 @@ skill get_crafting_table_near()
     has(crafting_table) -> place(crafting_table)
     count(#planks) >= 4 -> craft(crafting_table)
     count(#logs) >= 1 -> craft(#planks)
+    not near(#logs, 5) -> explore(#logs)
     true -> mine(#logs)

@@ -1,9 +1,11 @@
 # Two planks make four sticks (26.3 recipe data). Leaf skill (see get_planks):
-# it crafts its own planks and mines its own logs.
+# it crafts its own planks and mines its own logs, exploring when none is in
+# sight.
 skill get_sticks(n: int = 2)
   doc "Craft at least n sticks."
   rules:
     count(stick) >= $n -> done
     count(#planks) >= 2 -> craft(stick)
     count(#logs) >= 1 -> craft(#planks)
+    not near(#logs, 5) -> explore(#logs)
     true -> mine(#logs)

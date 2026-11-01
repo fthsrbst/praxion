@@ -20,9 +20,9 @@
 //! commitment: `ACTION until G` keeps running the rule's action while the
 //! rule's own guard is `T` and `G` is not `T` (`F` or `U`). The commitment is
 //! released when `G` becomes `T`, when the own guard stops being `T`, or at
-//! `max_ticks`. A primitive failure is retried, but a rule whose primitive
-//! fails [`MAX_PRIMITIVE_FAILURES`] times in a row fails its skill with the
-//! last kind.
+//! `max_ticks`. A primitive failure is retried, but a rule whose primitive or
+//! child skill fails [`MAX_PRIMITIVE_FAILURES`] times in a row fails its skill
+//! with the last kind. A success or a different rule firing resets the count.
 
 mod interp;
 

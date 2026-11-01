@@ -20,22 +20,23 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 ## Open
 
 ### End-to-end skills from a free spawn
-- Source: OpenCode DeepSeek V4.1 Flash, 2026-11-01
-- State: Stocked runs (three logs and three cobblestone given, real spawn, no teleport) pass
-  `get_wooden_pickaxe` and `get_stone_pickaxe` on seeds 101, 202, 303 (177-235 ticks). Free spawn
-  fails: `mine(#logs)` searches only 5 blocks and no skill explores, so every attempt returns
-  `no_block`; the interpreter then retries the failed child indefinitely (202/303: 900 ticks, 29
-  `no_block`, outcome null; 101: 3599 ticks). In 5 of 6 stocked runs one place settlement was
-  `Unconfirmed` (`missing_block`) although the table was placed (the skill's near fact and the later
-  craft prove it): a receipt false negative, not a false confirm.
-- Remaining: (1) a bounded child-failure policy (fail the skill after N child failures, or keep a
-  child rule ineligible until its guard changes); (2) an exploration/approach step before `mine`
-  (`move_to(#logs)` or a search); (3) pickup for drops farther than about one block; (4) understand
-  and remove the place `missing_block` false negative (block update before registration when the
-  observed state is not yet in the store); (5) free-spawn runs on all seeds with the fixed driver.
-- Pointers: `logs/s8b/e2e-freespawn-45s.log`, `logs/s8b/e2e-freespawn-final.log`,
-  `logs/s8b/e2e-stocked-all.log`, `runs/s8b-*-e2e-*/`, `body/crates/interpreter/src/interp.rs`,
-  `body/crates/primitives/src/live.rs`
+- Source: OpenCode DeepSeek V4.1 Flash, 2026-11-02
+- State: Step 9c added the frontier `explore` primitive, bounded child failures, drop pickup, and
+  fixed the block-receipt false negative (a place into a replaceable clicked block, and a dig whose
+  block update arrived before registration). Stocked runs now pass 6/6 with every receipt confirmed
+  and zero failures (186-195 ticks). Fresh-spawn `get_wooden_pickaxe` passed on seeds 101 (1113
+  ticks), 202 (1704) and 303 (1292), all referee-confirmed. The far-logs desert run (seed 202,
+  teleported to 2000/-3056, no log within 40 by referee queries) found a tree and finished in 496
+  ticks. Fresh-spawn `get_stone_pickaxe` from nothing did not reach the pickaxe within 600 s on any
+  seed; a 1200 s 101 attempt was still churning planks/logs at tick 7136 when stopped.
+- Remaining: (1) make the fresh stone chain reliable: keep a spare table or enough planks after the
+  wooden pickaxe (gathering nine planks would leave four), return to the placed table instead of
+  crafting another, and approach cave stone from an exposed face; (2) `explore` forgets its explored
+  set between calls, so a fruitless 1200-tick path can repeat (the child-failure bound stops the
+  livelock, but the search is not cumulative); a per-run explored set or a rotating start direction
+  would fix it; (3) rerun the fresh stone chain with a longer cap once (1) lands.
+- Pointers: `logs/s9c/e2e-stocked-final-stocked.json`, `logs/s9c/e2e-fresh-final.json`,
+  `logs/s9c/e2e-202-303.json`, `runs/s9c-*`, `notes.md` 2026-11-02.
 
 ### Biome and light in the raw store (F3 facts)
 - Source: OpenCode DeepSeek V4.1 Flash, 2026-11-01

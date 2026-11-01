@@ -75,8 +75,15 @@ the same calls.
 |---|---|---|
 | `count(item)` | `int` | items in the inventory |
 | `has(item)` | `bool` | at least one item in the inventory |
-| `near(block, r)` | `bool` | a block of that kind within `r` |
+| `near(block, r)` | `bool` | a block of that kind within `r` of the known map |
 | `near_entity(kind, r)` | `bool` | an entity of that kind within `r` |
+
+The live body answers `near` from the perception known map: a target is near
+when a cell the perception instance has seen inside `r` holds it. It spends no
+rays, and it answers `false` when the map knows of none, so `not near(T, R)`
+can start an exploration. A tag target (`near(#logs, 5)`) matches any member.
+The gathering skills use `5`, the radius of the `mine` search, so a target the
+map knows about is actually in mining reach.
 
 An `item` or `block` argument may be a tag: `count(#logs)`, `has(#planks)`,
 `mine(#logs)`, `near(#logs, 4)`, `craft(#planks)`. Tags are the 26.3 data pack's
@@ -112,8 +119,14 @@ are read from the pinned server jar when `praxion-gamedata` is built. For a
 primitive whose effect depends on its first argument, `effects_for(args)` gives
 the exact effect; the record's `effects` is the union over all arguments.
 `observe(fact)` is discrete, settles with evidence `FactKnown`, and times out
-at its record's default `max_ticks` (20). `do skill(...)` calls another skill.
-`done` finishes the skill; `fail(kind)` fails it.
+at its record's default `max_ticks` (20). `explore(target)` is continuous with a
+1200-tick budget: while no target cell is in the perception known map within 32
+blocks it walks to the nearest frontier (a known walkable cell next to unknown
+cells, scored away from cells already explored in that call); once a target is
+known it plans straight to it. It finishes `Confirmed` when `near(target, 5)` is
+known — the radius of the `mine` search, so the target is in reach — or
+`Failed(not_found)` at the budget. `do skill(...)` calls another skill. `done`
+finishes the skill; `fail(kind)` fails it.
 
 ## One tick
 
@@ -148,18 +161,20 @@ at its record's default `max_ticks` (20). `do skill(...)` calls another skill.
   count(cobblestone) >= 3` mines until three cobblestone are in the inventory.
 - **Composition:** a call is a frame on a stack; the deepest frame with a T
   rule fires. A child's `failed(kind)` makes the calling rule ineligible for
-  that tick, so the parent falls to its next rule. A child's `done` pops the
-  frame and returns `Waiting("child done")`; the parent re-selects on the next
-  tick, not in the same one. A preemption suspends the whole stack and
-  abandons an in-flight discrete action (it settles `preempted`); on resume
-  every frame re-evaluates from the top.
+  that tick, so the parent falls to its next rule; if no other rule is true,
+  the parent waits and calls the child again on the next tick. A child's
+  `done` pops the frame and returns `Waiting("child done")`; the parent
+  re-selects on the next tick, not in the same one. A preemption suspends the
+  whole stack and abandons an in-flight discrete action (it settles
+  `preempted`); on resume every frame re-evaluates from the top.
 - **A failed primitive** is retried on the next tick: the outcome is recorded
   (`last_failure()`), but the world did not change, so the same rule is still
   the highest true one. A retry does not start a second action in the same
-  tick. Three consecutive failures of the same rule's primitive, with no other
-  rule firing in between, fail that skill with the last kind
-  (`MAX_PRIMITIVE_FAILURES` = 3). A success or a different rule firing resets
-  the count.
+  tick. Three consecutive failures of the same rule, primitive or child skill,
+  with no other rule firing in between, fail that skill with the last kind
+  (`MAX_PRIMITIVE_FAILURES` = 3). The child's kind is the parent's failure
+  kind. A success (a primitive or a child's `done`) or a different rule firing
+  resets the count.
 - **Preemption** is not a failure. The skill keeps its stack and continues.
 
 Limits, checked at load with a line and column: at most 30 rules per skill,
@@ -204,20 +219,25 @@ remains the basic log skill.
 skill get_wood(n: int = 1)
   rules:
     count(oak_log) >= $n -> done
+    not near(oak_log, 5) -> explore(oak_log)
     true -> mine(oak_log)
 ```
 
 The fake world's `mine` takes 6 ticks and its record's default `max_ticks` is
-40. Both mines drop one log; there are oak trees nearby and the inventory starts
-empty.
+40. Both mines drop one log; there are oak trees nearby (so `near(oak_log, 5)`
+is true and the explore rule is skipped) and the inventory starts empty.
 
 | Tick | What happens | Decision |
 |---|---|---|
-| 1 | guard 1 `0 >= 2` is F, guard 2 is T | `Run mine(oak_log)`, frame `get_wood` rule 2 |
+| 1 | guard 1 `0 >= 2` is F, guard 2 is F (an oak log is near), guard 3 is T | `Run mine(oak_log)`, frame `get_wood` rule 3 |
 | 2–6 | the mine is in flight; no switching | `Waiting("mine in flight")` |
 | 7 | the mine settles `confirmed`, inventory has 1 log; guard 1 `1 >= 2` is F | `Run mine(oak_log)` |
 | 8–12 | in flight | `Waiting("mine in flight")` |
 | 13 | the mine settles, inventory has 2 logs; guard 1 is T | `Done` |
+
+On a free spawn with no log in sight, guard 2 is T: the skill calls
+`explore(oak_log)` and walks to the nearest frontier of the known map until a
+log is within 5 blocks or the 1200-tick budget ends (`failed(not_found)`).
 
 If the mine at tick 7 had reported `failed(block_resisted)`, tick 7 would be
 `Waiting("retry")` and tick 8 would start the same mine again. The skill state is
@@ -240,13 +260,14 @@ skill get_stone_pickaxe()
 skill get_cobblestone(n: int = 3)
   rules:
     count(cobblestone) >= $n -> done
+    has(wooden_pickaxe) and not near(stone, 5) -> explore(stone)
     has(wooden_pickaxe) -> mine(stone) until count(cobblestone) >= $n
     true -> do get_wooden_pickaxe()
 ```
 
 | Tick | What happens | Decision |
 |---|---|---|
-| 1 | parent rule 3 (`0 < 3`); child rule 2 starts the commitment | `Run mine(stone)`, frames `get_stone_pickaxe` rule 3, `get_cobblestone` rule 2 |
+| 1 | parent rule 3 (`0 < 3`); child rule 1 is F, rule 2 is F (stone is in reach), rule 3 starts the commitment | `Run mine(stone)`, frames `get_stone_pickaxe` rule 3, `get_cobblestone` rule 3 |
 | 2–6 | the mine is in flight | `Waiting("mine in flight")` |
 | 7 | confirmed, 1 cobblestone; the goal `1 >= 3` is F, so the commitment holds | `Run mine(stone)` |
 | 8–12 | in flight | `Waiting("mine in flight")` |

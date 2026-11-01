@@ -6,7 +6,51 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
-## 2026-11-01 - OpenCode DeepSeek V4.1 Flash - s8b live: four driver/timeout bugs behind the skill failures
+## 2026-11-02 - OpenCode DeepSeek V4.1 Flash - s9c: explore, child failures, pickup and the place false negative
+
+- **Bounded child failures**: a child's `failed(kind)` now increments the calling rule's failure
+  streak; below three the parent waits `Waiting("retry")` instead of failing `no_rule`, so a parent
+  with no other true rule retries next tick. `done` and a different rule firing reset the streak.
+  Tests: `three_consecutive_child_failures_fail_the_parent`, the success-reset and different-rule-reset
+  tests, and `a_child_no_rule_failure_counts_towards_the_parent_streak`.
+- **Place false negative, root cause (captured tee, stocked 202 wooden)**: place intent 5 registered on
+  tick 154, actuator hit `(-13,65,11)` face North; the driver watched the adjacent `(-13,65,10)`. The
+  decoded capture has the `crafting_table` at `(-13,65,11)` (the clicked cell) and air at the adjacent
+  cell: the clicked block was replaceable (tall grass), so the server placed *into* it. The receipt
+  watched the wrong cell and settled `unconfirmed(missing_block)`. Fix: `place_target` skips
+  replaceable supports (`place_support`), and `Place` re-plans if the target becomes the body's feet
+  or head cell after a step (the 303 stone failure: the target was the head cell and the server
+  refused). After the fix all six stocked runs have zero `missing_block`.
+- **Dig false negative, same before-registration shape (captured tee, fresh 101 stone)**: dig intent 15
+  registered on 2642 with start tick 2641, target `(-352,74,-144)`, pre-click stone, the world already
+  air; the ack (seq 217) arrived on 2643. The old receipt saw only the ack and settled
+  `unconfirmed(missing_block)`, while the decoded final block is air. Fix: the driver passes the
+  observed block on dig intents and `Receipt::new` presets `block_air` from non-air pre-click + air
+  observed. Test: `a_dig_update_before_registration_still_confirms_with_its_ack`. Fault injection stays
+  at 0 false confirmed.
+- **Explore radius readings**: the skills guard on `not near(T, 5)`, the radius of the `mine` search,
+  because `near(T, 32)` alone let mine fail `no_block` at 20 blocks. `explore` searches 16 blocks for a
+  known target (32 cost too much tick time), approaches a known target directly, and only falls back
+  to a frontier. The frontier scan prefers the player's level (a cave dive was the first failure),
+  rejects cells behind unknown cells, avoids explored cells, drops world-change moves, and blacklists
+  the cell where a follower stalled. First version scanned 32 blocks every tick and dropped the live
+  loop to ~3 TPS; the wide scan now runs only when a new plan is needed.
+- **Pickup**: after a confirmed break the runner walks to the item entity for at most 60 ticks; the
+  mine receipt remains the block-break receipt, no inventory receipt is invented.
+- **Open proposal**: `get_wooden_pickaxe` leaves three planks, so the later stone skill often explores
+  for one more log to craft its table. Gathering nine planks (three logs) would leave a spare table's
+  worth; not done because it changes the first-night curriculum beyond this step.
+- **Live, final binary**: the stocked table is 6/6 with 7 receipts confirmed each and zero failures
+  (186-195 ticks). Fresh spawn `get_wooden_pickaxe`: 101 1113 ticks, 202 1704, 303 1292, all
+  referee-confirmed and zero failures (each on the explore build; 303 from the earlier batch, the
+  later 303 attempt found a tree at tick ~4000 but the 600 s cap cut the craft). The far-logs desert
+  check (seed 202, teleported to a desert at 2000/-3056 with no log within 40 by referee queries)
+  found a tree and finished `get_wood` in 496 ticks. Fresh-spawn `get_stone_pickaxe` from nothing did
+  not reach the pickaxe within 600 s; the long 1200 s attempt still gathers wood at tick ~4700. The
+  stocked stone 3/3 pass, so the remaining gap is curriculum/exploration efficiency, not a primitive
+  or receipt failure.
+
+
 
 - `praxion-live` in skill mode finished the whole skill on the first primitive outcome, twice: the
   `runner.outcome()` precheck and the post-tick `result.outcome` check. The interpreter never advanced.

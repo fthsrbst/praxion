@@ -1955,6 +1955,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-body"
+version = "0.0.0"
+dependencies = [
+ "praxion-arbiter",
+ "praxion-eventlog",
+ "praxion-facts",
+ "praxion-headless",
+ "praxion-interpreter",
+ "praxion-manifest",
+ "praxion-perception",
+ "praxion-planner",
+ "praxion-primitives",
+ "praxion-receipts",
+ "praxion-reflexes",
+ "praxion-rules",
+ "praxion-world",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "praxion-decoder"
 version = "0.0.0"
 dependencies = [
@@ -1977,6 +1999,23 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "praxion-facts"
+version = "0.0.0"
+dependencies = [
+ "azalea-buf",
+ "azalea-core",
+ "azalea-protocol",
+ "azalea-registry",
+ "azalea-world",
+ "praxion-gamedata",
+ "praxion-interpreter",
+ "praxion-perception",
+ "praxion-rules",
+ "praxion-world",
+ "uuid",
 ]
 
 [[package]]

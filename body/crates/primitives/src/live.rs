@@ -11,13 +11,13 @@ use praxion_interpreter::{
     Actuator, Decision, Facts as InterpreterFacts, IntValue, Interpreter, Outcome, StartAction,
     Truth,
 };
-use praxion_perception::{Answer, BlockFilter, BlockRegion, Caller, Perception};
+use praxion_perception::{Answer, Caller, Perception};
 use praxion_receipts::{Engine, Intent, ReceiptId};
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::World;
 use serde::Serialize;
 
-use crate::runner::{Ctx, IntentSpec, Runner, fact_known};
+use crate::runner::{Ctx, IntentSpec, Runner, fact_known, near_block};
 
 /// What the live binary should run.
 #[derive(Clone, Debug)]
@@ -179,7 +179,12 @@ impl LiveDriver {
                 Some(
                     Intent::dig(intent_id, target, seq, report_tick)
                         .with_window(*window)
-                        .with_initial_block(before),
+                        .with_initial_block(before)
+                        // The block update can already be in the world when
+                        // the intent registers (the feed applies packets
+                        // before the driver sees them); the observed state
+                        // then proves the dig without a later packet.
+                        .with_observed_block(world.block_state(target)),
                 )
             }
             IntentSpec::Place { block, window, .. } => {
@@ -628,35 +633,9 @@ fn count(world: &World, wanted: &str) -> u32 {
         .sum()
 }
 
-fn near_block(
-    perception: &mut Perception,
-    world: &World,
-    wanted: &str,
-    radius: u32,
-) -> Option<bool> {
-    if let Some(tag) = wanted.strip_prefix('#') {
-        let eye = perception.eye_cell(world)?;
-        let region = BlockRegion::around(eye, radius);
-        match perception.blocks_in(Caller::Other, world, region, BlockFilter::Any) {
-            Answer::Known { value, .. } => Some(
-                value
-                    .iter()
-                    .any(|fact| praxion_gamedata::block_in_tag(fact.kind.to_str(), tag)),
-            ),
-            Answer::Unknown(_) => None,
-        }
-    } else {
-        let kind = wanted.parse::<azalea_registry::builtin::BlockKind>().ok()?;
-        match perception.nearest_block(Caller::Other, world, kind, radius) {
-            Answer::Known { .. } => Some(true),
-            Answer::Unknown(_) => None,
-        }
-    }
-}
-
 fn argument(primitive: &str, arg: String) -> ArgValue {
     match primitive {
-        "mine" | "move_to" => ArgValue::Block(arg),
+        "mine" | "move_to" | "explore" => ArgValue::Block(arg),
         "attack" => ArgValue::EntityKind(arg),
         _ => ArgValue::Item(arg),
     }

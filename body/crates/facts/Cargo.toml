@@ -1,0 +1,26 @@
+[package]
+name = "praxion-facts"
+description = "The interpreter's three-valued facts over perception, for every fact the rules registry declares"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "praxion_facts"
+path = "src/lib.rs"
+
+[dependencies]
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+praxion-gamedata = { path = "../gamedata" }
+praxion-interpreter = { path = "../interpreter" }
+praxion-perception = { path = "../perception" }
+praxion-rules = { path = "../rules" }
+praxion-world = { path = "../world" }
+
+[dev-dependencies]
+azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-world = { path = "../../../third_party/azalea/azalea-world" }
+uuid = "1.23.4"
