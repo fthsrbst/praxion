@@ -1,0 +1,11 @@
+[package]
+name = "praxion-forwarder"
+description = "The Minecraft TCP forwarder: bytes untouched, a tee copy that never blocks the game connection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+praxion-manifest = { path = "../manifest" }
+praxion-tee = { path = "../tee" }

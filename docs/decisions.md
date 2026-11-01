@@ -41,6 +41,13 @@ All on Claude's recommendation.
   tee subscriber that joins while a game connection is open first gets a gap for it, since it cannot
   decode a stream it joined mid-way. One subscriber at a time; a full tee queue drops tee bytes, never
   game bytes. (Claude.)
+- **See-through blocks (closes the transparent-materials [O] of architecture §5.1):** a sight ray is
+  tested against the block's collision boxes and passes if it misses them all. Overrides: full-collision
+  blocks that are see-through (glass, stained glass and panes, tinted glass, ice, leaves, slime, honey,
+  barrier, spawner, beacon) and no-collision blocks that block sight (lava, powder snow). A block is
+  visible if a ray reaches its center or the center of a face bordering a see-through cell (at most 7
+  rays); an entity if a ray reaches its eye, center or feet. Reason: exact for slabs, stairs and plants
+  without a hand-made shape table. (Claude.)
 - **Secrets live in an ignored `.env`** (`TYPESAFE_API_KEY`, `OPENAI_API_KEY`); `.env.example` documents
   the names. The user fills in the keys. (User.)
 

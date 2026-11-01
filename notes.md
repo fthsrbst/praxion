@@ -6,6 +6,23 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-01 · Claude Opus 5.5 · Free models on Demo-0: good reviewers, weak long coders
+
+- Beam Free: a strong source survey (Azalea headless, every claim with file:line) and a good
+  independent tester (9 new forwarder tests, 4 real findings, a live status ping). But on the harness
+  (a long coding job) it timed out after 60 min with no report.
+- Iceman Contributor Free: the server survey left easy checks "unverified"; the headless login attempt
+  timed out after 80 min with code that does not compile (pulled azalea-auth and bevy). Reviews only.
+- DeepSeek v4.1 Flash finished every coding job it got (manifest, move, forwarder, decoder, harness,
+  Azalea patch). Default: DeepSeek writes, Beam tests and reviews, Iceman takes small reviews.
+- An independent test that "flaked once" failed 8 of 15 in a loop. Always loop a reported flake.
+  Root cause: on Windows a socket handle duplicated with `TcpStream::try_clone` can stay "not
+  connected" (WSAENOTCONN) for `shutdown` while reads and writes work, so the half-close FIN is never
+  sent and the connection hangs. The forwarder now shares one handle per socket through `Arc` and tears
+  the pair down if a half-close fails. Watch for `try_clone` + `shutdown` in any other socket code.
+
+---
+
 ## 2026-11-01 · Claude Opus 5.5 · Never let a worker edit a script that running workers execute
 
 Three parallel `oc-run.sh` runs died with exit 2 ("syntax error near `)'") when a fourth worker edited
