@@ -1,0 +1,100 @@
+# Real Minecraft 26.3 singleplayer server output, captured 2026-11-01 with
+# TestServer + RCON (harness step 2). One "CMD:" line, one "OUT:" line.
+# Command replies reproduced verbatim; '\n' joins multi-line replies.
+
+CMD: time query daytime
+OUT: "Can't find element 'minecraft:daytime' of type 'minecraft:timeline'...ry daytime<--[HERE]"
+
+CMD: time query day
+OUT: 'Timeline minecraft:day is at 1002 tick(s)'
+
+CMD: time query gametime
+OUT: 'The game time is 66 tick(s)'
+
+CMD: time query time
+OUT: 'Clock minecraft:overworld is at 1006 tick(s)'
+
+CMD: time set day
+OUT: 'Set minecraft:overworld to time marker minecraft:day'
+
+CMD: time set midnight
+OUT: 'Set minecraft:overworld to time marker minecraft:midnight'
+
+CMD: time set noon
+OUT: 'Set minecraft:overworld to time marker minecraft:noon'
+
+CMD: time set 1000
+OUT: 'Set minecraft:overworld to 1000 tick(s)'
+
+CMD: gamerule
+OUT: 'Unknown or incomplete command. See below for errorgamerule<--[HERE]'
+
+CMD: help gamerule
+OUT: '/gamerule respawn_radius [<value>]/gamerule minecraft:respawn_radius [<value>]/gamerule tnt_explosion_drop_decay [<value>]/gamerule minecraft:tnt_explosion_drop_decay [<value>]/gamerule elytra_movement_check [<value>]/gamerule minecraft:elytra_movement_check [<value>]/gamerule fire_damage [<value>]/gamerule minecraft:fire_damage [<value>]/gamerule block_explosion_drop_decay [<value>]/gamerule minecraft:block_explosion_drop_decay [<value>]/gamerule random_tick_speed [<value>]/gamerule minecraft:random_tick_speed [<value>]/gamerule fire_spread_radius_around_player [<value>]/gamerule minecraft:fire_spread_radius_around_player [<value>]/gamerule spectators_generate_chunks [<value>]/gamerule minecraft:spectators_generate_chunks [<value>]/gamerule max_command_forks [<value>]/gamerule minecraft:max_command_forks [<value>]/gamerule log_admin_commands [<value>]/gamerule minecraft:log_admin_commands [<value>]/gamerule immediate_respawn [<value>]/gamerule minecraft:immediate_respawn [<value>]/gamerule spread_vines [<value>]/gamerule minecraft:spread_vines [<value>]/gamerule spawn_wandering_traders [<value>]/gamerule minecraft:spawn_wandering_traders [<value>]/gamerule locator_bar [<value>]/gamerule minecraft:locator_bar [<value>]/gamerule max_block_modifications [<value>]/gamerule minecraft:max_block_modifications [<value>]/gamerule water_source_conversion [<value>]/gamerule minecraft:water_source_conversion [<value>]/gamerule limited_crafting [<value>]/gamerule minecraft:limited_crafting [<value>]/gamerule forgive_dead_players [<value>]/gamerule minecraft:forgive_dead_players [<value>]/gamerule freeze_damage [<value>]/gamerule minecraft:freeze_damage [<value>]/gamerule spawner_blocks_work [<value>]/gamerule minecraft:spawner_blocks_work [<value>]/gamerule spawn_mobs [<value>]/gamerule minecraft:spawn_mobs [<value>]/gamerule drowning_damage [<value>]/gamerule minecraft:drowning_damage [<value>]/gamerule mob_explosion_drop_decay [<value>]/gamerule minecraft:mob_explosion_drop_decay [<value>]/gamerule advance_weather [<value>]/gamerule minecraft:advance_weather [<value>]/gamerule advance_time [<value>]/gamerule minecraft:advance_time [<value>]/gamerule show_death_messages [<value>]/gamerule minecraft:show_death_messages [<value>]/gamerule keep_inventory [<value>]/gamerule minecraft:keep_inventory [<value>]/gamerule max_entity_cramming [<value>]/gamerule minecraft:max_entity_cramming [<value>]/gamerule spawn_patrols [<value>]/gamerule minecraft:spawn_patrols [<value>]/gamerule mob_griefing [<value>]/gamerule minecraft:mob_griefing [<value>]/gamerule player_movement_check [<value>]/gamerule minecraft:player_movement_check [<value>]/gamerule fall_damage [<value>]/gamerule minecraft:fall_damage [<value>]/gamerule players_sleeping_percentage [<value>]/gamerule minecraft:players_sleeping_percentage [<value>]/gamerule pvp [<value>]/gamerule minecraft:pvp [<value>]/gamerule show_advancement_messages [<value>]/gamerule minecraft:show_advancement_messages [<value>]/gamerule ender_pearls_vanish_on_death [<value>]/gamerule minecraft:ender_pearls_vanish_on_death [<value>]/gamerule allow_entering_nether_using_portals [<value>]/gamerule minecraft:allow_entering_nether_using_portals [<value>]/gamerule players_nether_portal_default_delay [<value>]/gamerule minecraft:players_nether_portal_default_delay [<value>]/gamerule universal_anger [<value>]/gamerule minecraft:universal_anger [<value>]/gamerule projectiles_can_break_blocks [<value>]/gamerule minecraft:projectiles_can_break_blocks [<value>]/gamerule max_command_sequence_length [<value>]/gamerule minecraft:max_command_sequence_length [<value>]/gamerule mob_drops [<value>]/gamerule minecraft:mob_drops [<value>]/gamerule block_drops [<value>]/gamerule minecraft:block_drops [<value>]/gamerule entity_drops [<value>]/gamerule minecraft:entity_drops [<value>]/gamerule max_snow_accumulation_height [<value>]/gamerule minecraft:max_snow_accumulation_height [<value>]/gamerule spawn_phantoms [<value>]/gamerule minecraft:spawn_phantoms [<value>]/gamerule global_sound_events [<value>]/gamerule minecraft:global_sound_events [<value>]/gamerule raids [<value>]/gamerule minecraft:raids [<value>]/gamerule spawn_monsters [<value>]/gamerule minecraft:spawn_monsters [<value>]/gamerule spawn_wardens [<value>]/gamerule minecraft:spawn_wardens [<value>]/gamerule send_command_feedback [<value>]/gamerule minecraft:send_command_feedback [<value>]/gamerule tnt_explodes [<value>]/gamerule minecraft:tnt_explodes [<value>]/gamerule command_blocks_work [<value>]/gamerule minecraft:command_blocks_work [<value>]/gamerule natural_health_regeneration [<value>]/gamerule minecraft:natural_health_regeneration [<value>]/gamerule reduced_debug_info [<value>]/gamerule minecraft:reduced_debug_info [<value>]/gamerule command_block_output [<value>]/gamerule minecraft:command_block_output [<value>]/gamerule lava_source_conversion [<value>]/gamerule minecraft:lava_source_conversion [<value>]/gamerule players_nether_portal_creative_delay [<value>]/gamerule minecraft:players_nether_portal_creative_delay [<value>]'
+
+CMD: gamerule advance_time
+OUT: 'Game rule advance_time is currently set to true'
+
+CMD: gamerule advance_time false
+OUT: 'Game rule advance_time is now set to false'
+
+CMD: gamerule spawn_mobs
+OUT: 'Game rule spawn_mobs is currently set to true'
+
+CMD: gamerule spawn_mobs false
+OUT: 'Game rule spawn_mobs is now set to false'
+
+CMD: gamerule keep_inventory
+OUT: 'Game rule keep_inventory is currently set to false'
+
+CMD: gamerule keep_inventory true
+OUT: 'Game rule keep_inventory is now set to true'
+
+CMD: gamerule keep_inventory false
+OUT: 'Game rule keep_inventory is already set to false'
+
+# Not gamerules: 26.3 uses snake_case and has no doDaylightCycle / doMobSpawning.
+CMD: gamerule doDaylightCycle
+OUT: 'Incorrect argument for commandgamerule doDaylightCycle<--[HERE]'
+
+CMD: gamerule doMobSpawning
+OUT: 'Incorrect argument for commandgamerule doMobSpawning<--[HERE]'
+
+CMD: forceload add 0 0
+OUT: 'Marked chunk [0, 0] in minecraft:overworld to be force loaded'
+
+CMD: setblock 0 64 0 minecraft:stone
+OUT: 'Changed the block at 0, 64, 0'
+
+CMD: execute if block 0 64 0 minecraft:stone
+OUT: 'Test passed'
+
+CMD: execute if block 0 64 0 minecraft:dirt
+OUT: 'Test failed'
+
+CMD: data get block 0 64 0
+OUT: 'The target block is not a block entity'
+
+CMD: scoreboard objectives add praxion_deaths deathCount
+OUT: 'Created new objective [praxion_deaths]'
+
+CMD: scoreboard objectives list
+OUT: 'There are 1 objective(s): [praxion_deaths]'
+
+CMD: scoreboard players get Steve praxion_deaths
+OUT: "Can't get value of praxion_deaths for Steve; none is set"
+
+CMD: scoreboard players add Steve praxion_deaths 5
+OUT: 'Added 5 to [praxion_deaths] for Steve (now 5)'
+
+CMD: scoreboard players get Steve praxion_deaths
+OUT: 'Steve has 5 [praxion_deaths]'
+
+CMD: scoreboard objectives remove praxion_deaths
+OUT: 'Removed objective [praxion_deaths]'
+
+CMD: list
+OUT: 'There are 0 of a max of 4 players online: '
+
+CMD: data get entity Steve Health
+OUT: 'No entity was found'

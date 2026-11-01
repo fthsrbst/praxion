@@ -14,3 +14,14 @@ test = ["pytest>=8"]
 # Run pytest from anywhere and `import praxion_harness` still resolves.
 pythonpath = ["."]
 testpaths = ["tests"]
+# Default run: unit tests only, no server. Run the live tests with `-m server`.
+addopts = "-m 'not server and not needs_player'"
+markers = [
+    "server: requires a real Minecraft server (starts one)",
+    "needs_player: requires a logged-in player",
+]
+# Never let a thread exception or a misnamed test class hide as a warning.
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+    "error::pytest.PytestCollectionWarning",
+]
