@@ -1,0 +1,10 @@
+# The first-night stone pickaxe: 3 cobblestone and 2 sticks at a placed table.
+# Depth 4: get_stone_pickaxe -> get_cobblestone -> get_wooden_pickaxe -> leaf.
+skill get_stone_pickaxe()
+  doc "Have a stone pickaxe."
+  rules:
+    count(stone_pickaxe) >= 1 -> done
+    count(cobblestone) >= 3 and count(stick) >= 2 and near(crafting_table, 4) -> craft(stone_pickaxe)
+    count(cobblestone) < 3 -> do get_cobblestone(3)
+    count(stick) < 2 -> do get_sticks(2)
+    true -> do get_crafting_table_near()

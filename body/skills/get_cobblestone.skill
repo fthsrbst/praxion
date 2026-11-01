@@ -1,0 +1,8 @@
+# Stone needs a wooden pickaxe or better; this skill builds the pickaxe if
+# it has none. Depth 3: get_cobblestone -> get_wooden_pickaxe -> leaf.
+skill get_cobblestone(n: int = 3)
+  doc "Collect at least n cobblestone, crafting a wooden pickaxe first if needed."
+  rules:
+    count(cobblestone) >= $n -> done
+    has(wooden_pickaxe) -> mine(stone) until count(cobblestone) >= $n
+    true -> do get_wooden_pickaxe()

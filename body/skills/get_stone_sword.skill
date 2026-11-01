@@ -1,0 +1,10 @@
+# A stone sword needs 2 cobblestone and 1 stick, and a placed crafting table.
+# Depth 4, the same shape as get_stone_pickaxe.
+skill get_stone_sword()
+  doc "Have a stone sword."
+  rules:
+    count(stone_sword) >= 1 -> done
+    count(cobblestone) >= 2 and count(stick) >= 1 and near(crafting_table, 4) -> craft(stone_sword)
+    count(cobblestone) < 2 -> do get_cobblestone(2)
+    count(stick) < 1 -> do get_sticks(1)
+    true -> do get_crafting_table_near()

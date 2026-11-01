@@ -48,6 +48,19 @@ All on Claude's recommendation.
   visible if a ray reaches its center or the center of a face bordering a see-through cell (at most 7
   rays); an entity if a ray reaches its eye, center or feet. Reason: exact for slabs, stairs and plants
   without a hand-made shape table. (Claude.)
+- **Rule-list DSL details:** `skill NAME(params)`, then ordered rules `GUARD -> ACTION [until GUARD]
+  [max_ticks N]`; guards use `and`/`or`/`not`, comparisons and typed fact calls evaluated in Kleene
+  logic (unknown propagates); actions are a primitive call, `do skill(...)`, `done` or `fail(kind)`.
+  The loader rejects unknown names, type errors, more than 30 rules, cycles, composition depth over 2
+  and unreachable rules. Reference: `docs/rule-lists.md`. (Claude.)
+- **`until` reads as English and composition depth depends on the author.** `ACTION until G` keeps the
+  rule committed until G becomes true (or its own guard falls, or `max_ticks`). Hand-written core skills
+  may compose to depth 4 so each stays at 2 to 6 rules; LLM-written skills keep the depth-2 cap at
+  admission. Amends the depth-2 session pick (architecture §6), which made core skills inline each
+  other's steps (11 repetitive rules for `get_stone_pickaxe`). (Claude.)
+- **The level-1 fake world is a Rust crate** (`body/crates/fakeworld`), not Python under `harness/` as
+  architecture §10 sketched: the interpreter is Rust and level-1 tests must run in seconds through the
+  same `Facts`/`Actuator` traits the real body implements. (Claude.)
 - **Secrets live in an ignored `.env`** (`TYPESAFE_API_KEY`, `OPENAI_API_KEY`); `.env.example` documents
   the names. The user fills in the keys. (User.)
 

@@ -1,0 +1,7 @@
+# Four planks make one crafting table (26.3 recipe data).
+skill get_crafting_table()
+  doc "Have a crafting table in the inventory."
+  rules:
+    count(crafting_table) >= 1 -> done
+    count(oak_planks) >= 4 -> craft(crafting_table)
+    true -> do get_planks(4)

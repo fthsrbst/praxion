@@ -1,0 +1,7 @@
+[package]
+name = "praxion-rules"
+description = "The rule-list DSL: lexer, parser, AST, registry types and the load-time type checker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false

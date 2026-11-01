@@ -1,0 +1,10 @@
+[package]
+name = "praxion-interpreter"
+description = "The three-valued teleo-reactive rule-list interpreter (architecture §6.1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+praxion-rules = { path = "../rules" }

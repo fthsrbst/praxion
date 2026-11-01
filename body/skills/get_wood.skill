@@ -1,0 +1,6 @@
+# Collect oak logs. The first rung of the first-night chain: no tool needed.
+skill get_wood(n: int = 1)
+  doc "Collect at least n oak logs."
+  rules:
+    count(oak_log) >= $n -> done
+    true -> mine(oak_log)
