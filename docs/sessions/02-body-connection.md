@@ -514,9 +514,7 @@ a system setting), E14 (written comparison), E15, E16.
   old connection's world is stale).
 - Patches live in `spikes/patches/`; apply them after cloning Azalea at the pinned commit.
 
-### Proposals for the user (not decided)
-- E13: the body process sets `nothrottle,high,mmcss` (process-local; no system settings) as a requirement.
-- E7: hold keys for a number of client ticks counted from the proxy's `client_tick_end`, not for a fixed
-  50 ms; a fixed hold misses or doubles about 3% of the time depending on phase.
-- The first relative move after a grab is dropped: after a grab the body sends a 1-count primer, or
-  checks the resulting rotation in the proxy stream.
+### Decisions after the Windows runs (2026-11-01)
+All proposals were accepted; see `docs/decisions.md` 2026-11-01: split product-code gate (Demo-0 may
+start), Azalea with local patches as the decoder, `nothrottle,high,mmcss` in the body's loop process, key
+holds counted in client ticks, a 1-count mouse primer after every grab plus proxy-verified turns.

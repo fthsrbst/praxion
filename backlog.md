@@ -135,16 +135,18 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   player-bound fair-perception benchmark. Revisit after Demo-1.
 - Pointers: `docs/reviews/2026-10-29-arch-r1/synthesis.md` "Ideas worth adopting"
 
-### Run the session 2.7 experiments
-- Source: Claude Opus 5.5, 2026-10-31 (Windows runs)
-- State: Round 0 and most of rounds 1-2 ran on the Windows PC on 2026-10-31; results in
-  `docs/sessions/02-body-connection.md` "2.7 Windows runs". Pass: E1, E2 (with local Azalea patches,
-  `spikes/patches/`), E3, E5, E6, E7, E13 (only with process settings). Measured: E4, E9.
-- Remaining: user decisions on the three open proposals in that section; E8, E10,
-  E11, E12 (needs the user's physical key presses), E5 pointer-speed matrix (user changes the setting),
-  E14, E15, E16. Hands spike review finding #1 (key slot published before its scancode; guarded by the
-  gate except on a same-thread panic) and #6-8 (E12 timestamps) are open in `spikes/hands`.
-- Pointers: `spikes/README.md`, `logs/briefs/` (worker briefs, ignored), `spikes/captures/` (ignored)
+### Finish the session 2.7 hands experiments (gate for Demo-1 code)
+- Source: Claude Opus 5.5, 2026-11-01
+- State: E1, E2 (with Azalea patches), E3, E5, E6, E7, E13 passed; E4, E9 measured; all proposals decided
+  (`docs/decisions.md` 2026-11-01). Demo-0 is unblocked. Results: `docs/sessions/02-body-connection.md`
+  "2.7 Windows runs". Setup: `python spikes/setup.py`.
+- Remaining (before any Demo-1 code): E8 (needs a mouse-button command in `spikes/hands` and a live decode
+  tap), E10 (menu clicks at GUI scales 1-4), E11 (window modes; use a separate `--gameDir` so the user's
+  `options.txt` is untouched), E12 (needs the user's physical key presses), E15, E16; E5 pointer-speed
+  matrix (the user changes the system setting). `spikes/hands` review leftovers: finding #1 (key slot
+  published before its scancode; guarded by the gate except on a same-thread panic) and #6-8 (E12
+  timestamps taken at the wrong points) must be fixed before E12.
+- Pointers: `spikes/README.md`, `spikes/SETUP.md`, `logs/briefs/` (worker briefs, ignored)
 
 ## Done
 

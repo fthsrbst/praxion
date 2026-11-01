@@ -46,7 +46,8 @@ Engineering principle 3 needs a gate for "first code". Proposed, in dependency o
 | Demo-2 | brain: Jev and LLM clients, curriculum, skill writer and admission, memory briefing | Praxion writes and admits its own skills |
 
 First product code is gated on the reviewed draft and the passed 2.7 experiments [D], and then
-starts with Demo-0 only [D].
+starts with Demo-0 only [D]. The gate is split (2026-11-01) [D]: Demo-0 depends on E1-E4 and E13,
+which passed; Demo-1 code waits for E8, E10, E11, E12, E15 and E16.
 
 ## 2. System overview
 

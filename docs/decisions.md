@@ -3,6 +3,31 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-01
+
+All four on Claude's recommendation, after the 2.7 Windows runs (`docs/sessions/02-body-connection.md`).
+
+- **The product-code gate is split.** Demo-0 code may start now: every experiment it depends on has
+  passed (E1 forwarding latency, E2 decoding with the local Azalea patches, E3 decode and world update,
+  E4 measured, E13 loop timing with the process settings below). Demo-1 code (SendInput actuator,
+  take-over, indicator) waits until E8, E10, E11, E12, E15 and E16 have passed. Supersedes "first product
+  code is gated on the passed 2.7 experiments" for Demo-0 only. Rejected: finishing every hands
+  experiment first (Demo-0 has no SendInput, so they cannot change it). (User.)
+- **Decoder: Azalea at the pinned `26.3` commit with local patches** (`spikes/patches/`), applied by
+  `spikes/setup.py`. The patches carry 26.3 layouts read from the server's own classes
+  (`level_particles`, `update_advancements`). Fallback stays MCProtocolLib. (User; E14's written
+  comparison is reduced to this entry.)
+- **The body's loop process applies `nothrottle`, `high` and `mmcss` to itself** (opt out of power
+  throttling including timer-resolution throttling, `HIGH_PRIORITY_CLASS` with a time-critical loop
+  thread, MMCSS task "Games"). Process-local only; system settings are never changed. Reason: E13 p99
+  < 0.9 ms with them, default settings missed the 2 ms threshold in 2 of 3 runs. (User.)
+- **Key holds are counted in client ticks, not milliseconds** (Demo-1). The actuator releases a key
+  after the proxy has seen the wanted number of `client_tick_end` packets with the key down. Reason: E7
+  fixed 50 ms holds gave 97%, with misses and doubles depending on tick phase. (User.)
+- **After every mouse grab the actuator sends a 1-count primer, and every turn is verified from the
+  proxy stream** (Demo-1): the first relative event after a grab is dropped (seen 4 times); a turn that
+  falls short is completed from the observed rotation. (User.)
+
 ## 2026-10-31
 
 - **Interface technology: a local web interface.** The Python brain serves a small web page on
