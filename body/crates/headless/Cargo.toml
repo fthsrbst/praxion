@@ -1,0 +1,31 @@
+[package]
+name = "praxion-headless"
+description = "Headless packet client for Demo-0: log in, answer the protocol, stay connected (no physics yet)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "praxion_headless"
+path = "src/lib.rs"
+
+[[bin]]
+name = "praxion-headless"
+path = "src/main.rs"
+
+[dependencies]
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
+azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+praxion-manifest = { path = "../manifest" }
+tokio = { version = "1.54", features = ["rt", "net", "time", "sync", "macros"] }
+uuid = "1.29"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_Console"] }
+
+[dev-dependencies]
+# Only for `GameProfile` in the scripted `login_finished` packet. Offline mode, so no
+# `online-mode` feature and no reqwest: the scripted server never encrypts anything.
+azalea-auth = { path = "../../../third_party/azalea/azalea-auth", default-features = false }

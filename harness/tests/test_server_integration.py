@@ -138,6 +138,6 @@ def test_needs_player_health(server_factory):
     players = srv.rcon.command("list")
     if "0 of a max" in players or "There are 0" in players:
         pytest.skip("no player connected")
-    ref = Referee(srv.rcon)
+    ref = Referee(srv.rcon, player="Bot1")
     assert "of a max" in players
     assert ref.player_health() > 0
