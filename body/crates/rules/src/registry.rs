@@ -227,7 +227,9 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            default_max_ticks: 40,
+            // The dig intent's own window is 160 ticks (slow blocks, no tool);
+            // the interpreter must not preempt it earlier.
+            default_max_ticks: 180,
             effects: Effects {
                 produces: mine_produces,
                 drops: mine_drops,
@@ -255,7 +257,8 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            default_max_ticks: 20,
+            // Select the slot, aim, then the 40-tick place receipt window.
+            default_max_ticks: 80,
             effects: Effects {
                 produces: Vec::new(),
                 drops: Vec::new(),
@@ -281,7 +284,9 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Atomic,
-            default_max_ticks: 20,
+            // Open the table (40), place the clicks, wait for the result (80)
+            // and take it (140); the primitive owns those waits.
+            default_max_ticks: 300,
             effects: craft_summary(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::InventoryDelta,
@@ -303,7 +308,9 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            default_max_ticks: 10,
+            // The Use hold is 32 ticks; the primitive's not-hungry bound is
+            // 140.
+            default_max_ticks: 180,
             effects: Effects {
                 produces: Vec::new(),
                 drops: Vec::new(),
@@ -328,7 +335,9 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Atomic,
-            default_max_ticks: 20,
+            // A long zombie fight is 114 ticks in the live table; the
+            // primitive's own target-alive bound is 400.
+            default_max_ticks: 420,
             effects: Effects {
                 produces: attack_produces,
                 drops: attack_drops,
@@ -355,7 +364,8 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Atomic,
-            default_max_ticks: 5,
+            // A hotbar select is one tick; a menu swap waits up to 40.
+            default_max_ticks: 80,
             effects: Effects::default(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::InventoryDelta,

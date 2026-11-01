@@ -386,6 +386,34 @@ fn a_same_batch_block_update_confirms_with_the_pre_action_state() {
 }
 
 #[test]
+fn a_place_update_before_registration_still_confirms_with_its_ack() {
+    // The live driver registers a place from the previous tick's report; the
+    // server's block update can already be in the world. The actuator's
+    // pre-click air snapshot plus the current state is the update evidence.
+    let mut h = Harness::new("place-before-register");
+    let pos = BlockPos::new(0, 64, 0);
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::place(1, pos, "stone", 7, 0)
+            .with_initial_block(Some(BlockState::AIR))
+            .with_observed_block(Some(stone())),
+    );
+    h.observe_at(1, block_ack(7));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+
+    // The same observed state with no proof it was air before the click is
+    // not evidence, so a bare ack cannot confirm it.
+    let unchanged = h.register(
+        Intent::place(2, pos, "stone", 8, 1)
+            .with_initial_block(Some(stone()))
+            .with_observed_block(Some(stone())),
+    );
+    h.observe_at(2, block_ack(8));
+    h.advance_at(30);
+    assert_eq!(h.outcome(unchanged), Some(Outcome::Unconfirmed));
+}
+
+#[test]
 fn attack_confirms_on_a_damage_event_for_the_target() {
     let mut h = Harness::new("attack-damage-event");
     h.tick = 0;
@@ -454,6 +482,33 @@ fn inventory_delta_confirms_and_late_inventory_is_logged() {
         })
         .count();
     assert_eq!(late, 1);
+}
+
+#[test]
+fn a_tag_inventory_receipt_accepts_any_item_in_the_tag() {
+    // The data-driven skills craft `#planks`; the receipt must count every
+    // wood type in the generated item tag, not look for a literal `#planks`.
+    let mut h = Harness::new("inventory-tag");
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::OakPlanks, 4)]),
+    );
+    h.tick = 0;
+    let receipt = h.register(Intent::inventory(1, "craft", "#planks", 4, 0));
+    h.observe_at(
+        1,
+        content(0, 1, vec![ItemStack::new(ItemKind::OakPlanks, 8)]),
+    );
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+
+    let other = h.register(Intent::inventory(2, "craft", "#planks", 1, 1));
+    h.observe_at(2, content(0, 2, vec![ItemStack::new(ItemKind::Stick, 8)]));
+    h.advance_at(30);
+    assert_eq!(
+        h.outcome(other),
+        Some(Outcome::Unconfirmed),
+        "a stick is not a plank"
+    );
 }
 
 fn content_packet(

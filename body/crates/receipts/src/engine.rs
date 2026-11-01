@@ -104,7 +104,7 @@ impl Receipt {
             }
             _ => None,
         };
-        Self {
+        let mut receipt = Self {
             id,
             intent,
             initial_block,
@@ -118,7 +118,27 @@ impl Receipt {
             hurt_hit: None,
             fact_hit: None,
             correction_hit: None,
+        };
+        // A place's block update can arrive in the batch before the intent is
+        // registered (the driver registers it from the previous tick's
+        // report). The actuator's pre-click snapshot proves the cell was air;
+        // if the world already shows the placed block, that is the update, and
+        // only the ack is still outstanding.
+        if let Expect::BlockState { block, .. } = &receipt.intent.expect
+            && receipt
+                .initial_block
+                .as_ref()
+                .is_some_and(|initial| initial.state.is_air())
+            && receipt.intent.observed_block.is_some_and(|state| {
+                normalize(BlockDescription::of(state).name()) == normalize(block)
+            })
+        {
+            receipt.block_hit = Some(EvidenceRef {
+                kind: "block_state".to_owned(),
+                tick: receipt.intent.start_tick,
+            });
         }
+        receipt
     }
 
     /// A packet that arrived before the intent started may still change the
@@ -1078,16 +1098,25 @@ fn inventory_attributed(packet: &Packet, attribution: Attribution) -> bool {
     }
 }
 
+/// Whether `stack` is the item an intent named. An intent may name an item
+/// tag (`#planks`), which is what the data-driven skills ask for; the tag
+/// comes from the same generated jar data as the recipes.
+fn is_wanted_item(stack: &praxion_world::ItemStack, wanted: &str) -> bool {
+    if let Some(tag) = wanted.strip_prefix('#') {
+        return praxion_gamedata::item_in_tag(stack.kind().to_str(), tag);
+    }
+    match wanted.parse::<ItemKind>() {
+        Ok(kind) => stack.kind() == kind,
+        Err(_) => normalize(&stack.kind().to_str()) == normalize(wanted),
+    }
+}
+
 fn item_count(world: &World, item: &str) -> i64 {
-    let wanted: Option<ItemKind> = item.parse().ok();
     world
         .inventory()
         .iter()
         .chain(std::iter::once(world.carried_item()))
-        .filter(|stack| match &wanted {
-            Some(wanted) => stack.kind() == *wanted,
-            None => normalize(&stack.kind().to_str()) == normalize(item),
-        })
+        .filter(|stack| is_wanted_item(stack, item))
         .map(|stack| i64::from(stack.count()))
         .sum()
 }
@@ -1104,13 +1133,12 @@ fn item_count(world: &World, item: &str) -> i64 {
 /// invisible to the receipt.
 fn storage_count(world: &World, item: &str) -> i64 {
     const PLAYER_STORAGE_SLOTS: usize = 36;
-    let wanted: Option<ItemKind> = item.parse().ok();
     let count = |stack: &praxion_world::ItemStack| {
-        let matches = match &wanted {
-            Some(wanted) => stack.kind() == *wanted,
-            None => normalize(&stack.kind().to_str()) == normalize(item),
-        };
-        if matches { i64::from(stack.count()) } else { 0 }
+        if is_wanted_item(stack, item) {
+            i64::from(stack.count())
+        } else {
+            0
+        }
     };
     let open = world
         .open_container()

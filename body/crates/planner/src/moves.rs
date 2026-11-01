@@ -859,28 +859,29 @@ fn water_moves(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec
                         Err(unknown) => note_unknown(ctx, unknown, node),
                     }
                 }
-                // Climb out one block up: the water must continue beside us
-                // and the cell above it must be standable land.
-                if ctx.world.water(target) == Cell::Free {
-                    let raised = offset(target, 0, 1, 0);
-                    let raised_head = offset(raised, 0, 1, 0);
-                    if !ctx.world.protected_cell(raised) && !ctx.world.protected_cell(raised_head) {
-                        match standable_land(ctx, raised) {
-                            Ok(true) => {
-                                let cost = WALK_ONE_IN_WATER_COST + *JUMP_ONE_BLOCK_COST;
-                                push(
-                                    edges,
-                                    raised,
-                                    false,
-                                    node.placements,
-                                    MoveKind::ExitWater { rise: true },
-                                    cost,
-                                    Vec::new(),
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(unknown) => note_unknown(ctx, unknown, node),
+                // Climb out one block up: the cell above the land beside us
+                // must be standable. A pool dug flush into the floor has a
+                // solid block at feet level beside the water, so requiring
+                // water there (`water(target) == Free`) made every flush pool
+                // a dead end; the land top is exactly `target + 1`.
+                let raised = offset(target, 0, 1, 0);
+                let raised_head = offset(raised, 0, 1, 0);
+                if !ctx.world.protected_cell(raised) && !ctx.world.protected_cell(raised_head) {
+                    match standable_land(ctx, raised) {
+                        Ok(true) => {
+                            let cost = WALK_ONE_IN_WATER_COST + *JUMP_ONE_BLOCK_COST;
+                            push(
+                                edges,
+                                raised,
+                                false,
+                                node.placements,
+                                MoveKind::ExitWater { rise: true },
+                                cost,
+                                Vec::new(),
+                            );
                         }
+                        Ok(false) => {}
+                        Err(unknown) => note_unknown(ctx, unknown, node),
                     }
                 }
             }

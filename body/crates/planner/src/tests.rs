@@ -321,6 +321,43 @@ fn a_pond_is_crossed_by_swimming() {
 }
 
 #[test]
+fn a_two_deep_flush_pond_is_left_by_climbing_one_block_up() {
+    // The pool is dug into the floor, so the land beside it is solid at the
+    // depth the body swims at and its top is exactly one block above. The
+    // exit is `ExitWater { rise: true }` onto that top (the earlier climb
+    // branch demanded water beside the body and made this a dead end).
+    let mut world = TestWorld::flat(62, 12);
+    for x in 2..=6 {
+        for z in -12..=12 {
+            world.set(x, 60, z, stone());
+            world.remove(x, 62, z);
+            world.set(x, 61, z, water());
+            world.set(x, 62, z, water());
+        }
+    }
+    let state = state_with(&[]);
+    let plan = plan_once(
+        &mut world,
+        &state,
+        pos(0, 63, 0),
+        Goal::Block(pos(8, 63, 0)),
+    );
+
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    let names = kinds(&plan);
+    assert!(names.contains(&"enter_water"), "{names:?}");
+    assert!(names.contains(&"swim"), "{names:?}");
+    let exits: Vec<&Step> = plan
+        .steps
+        .iter()
+        .filter(|step| step.kind == MoveKind::ExitWater { rise: true })
+        .collect();
+    assert_eq!(exits.len(), 1, "the only way out is up: {names:?}");
+    assert_eq!(exits[0].to, pos(7, 63, 0), "onto the land top");
+    assert_valid_steps(&plan);
+}
+
+#[test]
 fn a_water_column_is_climbed_with_swim_up() {
     let mut world = TestWorld::flat(62, 12);
     for x in 2..=4 {

@@ -2123,6 +2123,7 @@ dependencies = [
  "azalea-registry",
  "praxion-decoder",
  "praxion-eventlog",
+ "praxion-gamedata",
  "praxion-interpreter",
  "praxion-rules",
  "praxion-tee",

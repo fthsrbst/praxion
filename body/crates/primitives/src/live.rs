@@ -163,40 +163,38 @@ impl LiveDriver {
             return;
         };
         let intent_id = self.intent_counter + 1;
-        if let IntentSpec::Dig { pos, .. } | IntentSpec::Place { pos, .. } = &spec {
-            self.summary.target = Some([pos.x, pos.y, pos.z]);
-        }
         let intent = match &spec {
-            IntentSpec::Dig { pos, window } => {
+            IntentSpec::Dig { window, .. } => {
                 let Some(seq) = report.block_seq else {
                     return;
                 };
-                let before = report
-                    .block_before
-                    .and_then(|(hit, state)| (hit == *pos).then_some(state))
-                    .flatten();
+                // The actuator's raycast decides the cell, and it can pick a
+                // nearer block or another face than the primitive aimed at.
+                // The receipt and the referee must watch the cell that was
+                // actually used, not the one that was intended.
+                let Some((target, before)) = report.block_before else {
+                    return;
+                };
+                self.summary.target = Some([target.x, target.y, target.z]);
                 Some(
-                    Intent::dig(intent_id, *pos, seq, report_tick)
+                    Intent::dig(intent_id, target, seq, report_tick)
                         .with_window(*window)
                         .with_initial_block(before),
                 )
             }
-            IntentSpec::Place {
-                pos,
-                block,
-                window,
-            } => {
+            IntentSpec::Place { block, window, .. } => {
                 let Some(seq) = report.block_seq else {
                     return;
                 };
-                let before = report
-                    .block_before
-                    .and_then(|(hit, state)| (hit == *pos).then_some(state))
-                    .flatten();
+                let Some((target, before)) = report.block_before else {
+                    return;
+                };
+                self.summary.target = Some([target.x, target.y, target.z]);
                 Some(
-                    Intent::place(intent_id, *pos, block.clone(), seq, report_tick)
+                    Intent::place(intent_id, target, block.clone(), seq, report_tick)
                         .with_window(*window)
-                        .with_initial_block(before),
+                        .with_initial_block(before)
+                        .with_observed_block(world.block_state(target)),
                 )
             }
             IntentSpec::Inventory {
@@ -363,7 +361,12 @@ impl Driver for LiveDriver {
             );
         }
 
-        if let Some(outcome) = self.runner.outcome().cloned() {
+        // One primitive is the whole run in primitive mode. In skill mode its
+        // outcome belongs to the interpreter: `tick_skill` polls it through
+        // the bridge and decides what the skill does next.
+        if matches!(&self.options.mode, LiveMode::Primitive { .. })
+            && let Some(outcome) = self.runner.outcome().cloned()
+        {
             self.finish(outcome);
         }
         if self.done {
@@ -402,7 +405,11 @@ impl Driver for LiveDriver {
         if let Some(pending) = result.pending {
             self.pending = Some(pending);
         }
-        if let Some(outcome) = result.outcome {
+        // Same rule as above: in skill mode the primitive's outcome is for the
+        // interpreter, which reads it from the runner on the next tick.
+        if matches!(&self.options.mode, LiveMode::Primitive { .. })
+            && let Some(outcome) = result.outcome
+        {
             self.finish(outcome);
         }
         self.summary.ticks = view.tick + 1;
@@ -461,6 +468,34 @@ impl LiveDriver {
                 .expect("skill mode has an interpreter")
                 .tick(&mut facts, &mut self.bridge)
         };
+        if let Decision::Run { action, .. } = &decision {
+            eprintln!(
+                "skill run tick={} skill={:?} primitive={} args={:?}",
+                view.tick,
+                self.interpreter.as_ref().map(|interpreter| interpreter.current_skill()),
+                action.primitive,
+                action.args
+            );
+        }
+        if matches!(&decision, Decision::Done) {
+            let interpreter = self.interpreter.as_ref().expect("skill mode");
+            eprintln!(
+                "skill done tick={} skill={:?} depth={} logs={} planks={} sticks={} pickaxe={} tables={}",
+                view.tick,
+                interpreter.current_skill(),
+                interpreter.frame_depth(),
+                count(world, "#logs"),
+                count(world, "#planks"),
+                count(world, "stick"),
+                count(world, "wooden_pickaxe"),
+                count(world, "crafting_table"),
+            );
+        }
+        // The interpreter timed the flight out and asked the actuator to
+        // cancel; stop the primitive so it cannot run beside its retry.
+        if std::mem::take(&mut self.bridge.cancelled) {
+            self.runner.cancel();
+        }
         if let Some(action) = self.bridge.start.take()
             && !self.runner.is_active()
         {
@@ -663,6 +698,9 @@ struct BridgeActuator {
     start: Option<StartAction>,
     outcome: Option<Outcome>,
     continuous: Option<StartAction>,
+    /// The interpreter asked to cancel the flight (a deadline fired); the
+    /// driver stops the runner before it starts the retry.
+    cancelled: bool,
 }
 
 impl Actuator for BridgeActuator {
@@ -676,6 +714,7 @@ impl Actuator for BridgeActuator {
     }
 
     fn cancel(&mut self) -> Option<Outcome> {
+        self.cancelled = true;
         self.outcome.take()
     }
 

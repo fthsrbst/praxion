@@ -380,6 +380,7 @@ skill d()
     interpreter.start_skill("a", Vec::new()).unwrap();
     assert_eq!(wait_ticks(&started(&mut interpreter, &mut facts, &mut act)), 1);
     assert_eq!(interpreter.frame_depth(), 4);
+    assert_eq!(interpreter.current_skill(), Some("d"));
 }
 
 #[test]

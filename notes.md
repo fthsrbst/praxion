@@ -6,6 +6,29 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-01 - OpenCode DeepSeek V4.1 Flash - s8b live: four driver/timeout bugs behind the skill failures
+
+- `praxion-live` in skill mode finished the whole skill on the first primitive outcome, twice: the
+  `runner.outcome()` precheck and the post-tick `result.outcome` check. The interpreter never advanced.
+  Both finishes are now gated to `LiveMode::Primitive`; the outcome goes to the bridge.
+- The interpreter's flight deadline came from the rules registry and was shorter than the primitives'
+  own waits: place 20 vs a 40-tick receipt, craft 20 vs 140 take, eat 10 vs 32+ ticks, attack 20 vs 114
+  in the live table, equip 5. The interpreter retried and dropped actions. Defaults now cover the
+  internal bounds (mine 180, place 80, craft 300, eat 180, attack 420, equip 80, observe 100), and a
+  timeout cancels the runner (`Runner::cancel`) instead of letting it run beside its retry.
+- `move_to` lost a chosen block goal when a replan happened out of sight (pool: `no_target`) and a cell
+  two blocks below the marker counted as "near" (303 stairs stopped under the plateau). The goal is
+  cached and the radius is 1.5.
+- The planner could not climb out of a flush 2-deep pool: its climb branch required water beside the
+  body instead of the land top one block up (`planner/src/moves.rs`). Fixed with a unit test.
+- Receipts did not understand tag items (`craft(#planks)` never confirmed) and a place whose block
+  update arrived before registration expired `missing_block`. Both fixed with tests; the 10,000-action
+  fault injection still reports 0 false confirmed.
+- Free-spawn skills still fail: `mine(#logs)` searches 5 blocks and no skill explores; the interpreter
+  retries the failed child forever (900 ticks/45 s, 29 no_block, outcome null). In the backlog.
+
+---
+
 ## 2026-11-01 · Claude Opus 5.5 · Free models on Demo-0: good reviewers, weak long coders
 
 - Beam Free: a strong source survey (Azalea headless, every claim with file:line) and a good

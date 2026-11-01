@@ -19,6 +19,24 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### End-to-end skills from a free spawn
+- Source: OpenCode DeepSeek V4.1 Flash, 2026-11-01
+- State: Stocked runs (three logs and three cobblestone given, real spawn, no teleport) pass
+  `get_wooden_pickaxe` and `get_stone_pickaxe` on seeds 101, 202, 303 (177-235 ticks). Free spawn
+  fails: `mine(#logs)` searches only 5 blocks and no skill explores, so every attempt returns
+  `no_block`; the interpreter then retries the failed child indefinitely (202/303: 900 ticks, 29
+  `no_block`, outcome null; 101: 3599 ticks). In 5 of 6 stocked runs one place settlement was
+  `Unconfirmed` (`missing_block`) although the table was placed (the skill's near fact and the later
+  craft prove it): a receipt false negative, not a false confirm.
+- Remaining: (1) a bounded child-failure policy (fail the skill after N child failures, or keep a
+  child rule ineligible until its guard changes); (2) an exploration/approach step before `mine`
+  (`move_to(#logs)` or a search); (3) pickup for drops farther than about one block; (4) understand
+  and remove the place `missing_block` false negative (block update before registration when the
+  observed state is not yet in the store); (5) free-spawn runs on all seeds with the fixed driver.
+- Pointers: `logs/s8b/e2e-freespawn-45s.log`, `logs/s8b/e2e-freespawn-final.log`,
+  `logs/s8b/e2e-stocked-all.log`, `runs/s8b-*-e2e-*/`, `body/crates/interpreter/src/interp.rs`,
+  `body/crates/primitives/src/live.rs`
+
 ### Biome and light in the raw store (F3 facts)
 - Source: OpenCode DeepSeek V4.1 Flash, 2026-11-01
 - State: `Perception::biome` and `Perception::light_level` now take `&World` and answer

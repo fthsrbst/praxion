@@ -70,6 +70,10 @@ pub struct Intent {
     /// snapshot taken at registration: a fast server can send the block update
     /// in the same tick batch that registers the intent.
     pub initial_block: Option<azalea_block::BlockState>,
+    /// The target cell's state the driver saw when it registered the intent.
+    /// With `initial_block` air this recovers a place whose block update
+    /// arrived in the batch before registration; the ack must still arrive.
+    pub observed_block: Option<azalea_block::BlockState>,
 }
 
 impl Intent {
@@ -85,6 +89,7 @@ impl Intent {
             window: DIG_WINDOW,
             expect: Expect::BlockBecomesAir { pos },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -107,6 +112,7 @@ impl Intent {
             window: PLACE_WINDOW,
             expect: Expect::BlockState { pos, block },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -134,6 +140,7 @@ impl Intent {
             window: INVENTORY_WINDOW,
             expect: Expect::Inventory { item, delta },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -179,6 +186,7 @@ impl Intent {
             window: INVENTORY_WINDOW,
             expect: Expect::StorageInventory { item, delta },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -198,6 +206,7 @@ impl Intent {
             window: MOVE_WINDOW,
             expect: Expect::Unrefuted,
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -223,6 +232,7 @@ impl Intent {
             window: SLOT_CLICK_WINDOW,
             expect: Expect::SlotClick { container_id, slot, state_id },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -238,6 +248,7 @@ impl Intent {
             window: 20,
             expect: Expect::EntityHurt { id: entity_id },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -254,6 +265,7 @@ impl Intent {
             window: 20,
             expect: Expect::FactKnown { fact },
             initial_block: None,
+            observed_block: None,
         }
     }
 
@@ -268,6 +280,14 @@ impl Intent {
     /// batch as the registration is still evidence of a real change.
     pub fn with_initial_block(mut self, state: Option<azalea_block::BlockState>) -> Self {
         self.initial_block = state;
+        self
+    }
+
+    /// Supply the target cell's state the driver saw when it registered. With
+    /// an air `initial_block` the engine treats a matching observed state as
+    /// the block update that arrived before registration.
+    pub fn with_observed_block(mut self, state: Option<azalea_block::BlockState>) -> Self {
+        self.observed_block = state;
         self
     }
 

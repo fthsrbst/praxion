@@ -188,13 +188,18 @@ impl Runner {
     }
 
     /// The receipt settled. A confirmed discrete primitive finishes; `attack`
-    /// keeps going until its target is gone, and a `craft` first closes its
-    /// open crafting table.
+    /// keeps going until its target is gone, a `craft` first closes its open
+    /// crafting table, and `move_to` treats "unrefuted" as "not corrected",
+    /// not as "arrived": the follower's own goal check ends it.
     pub fn settle(&mut self, outcome: Outcome) {
         self.receipt = Some(outcome.clone());
-        if let Some(Active::Craft(craft)) = &mut self.active {
-            craft.request_close(outcome);
-            return;
+        match &mut self.active {
+            Some(Active::Craft(craft)) => {
+                craft.request_close(outcome);
+                return;
+            }
+            Some(Active::Move(_)) if outcome == Outcome::Confirmed => return,
+            _ => {}
         }
         let keep_going = matches!(self.active, Some(Active::Attack(_)))
             && outcome == Outcome::Confirmed;
@@ -221,6 +226,17 @@ impl Runner {
         self.active.is_some() && self.outcome.is_none()
     }
 
+    /// Cancel the active primitive as `Preempted` (the interpreter's flight
+    /// deadline fired). Without this the primitive would keep running while
+    /// the interpreter retries, and the retry would be dropped as "busy".
+    pub fn cancel(&mut self) -> Option<Outcome> {
+        if !self.is_active() {
+            return None;
+        }
+        self.finish(Outcome::Preempted);
+        self.outcome.clone()
+    }
+
     pub fn tick(&mut self, ctx: &mut Ctx<'_>) -> TickResult {
         if let Some(outcome) = &self.outcome {
             return TickResult {
@@ -238,7 +254,9 @@ impl Runner {
                 &self.active,
                 Some(Active::Craft(craft)) if craft.close_outcome.is_some()
             );
-            if receipt != Outcome::Confirmed || (!attack && !craft_closing) {
+            let move_unrefuted = matches!(self.active, Some(Active::Move(_)))
+                && receipt == Outcome::Confirmed;
+            if receipt != Outcome::Confirmed || (!attack && !craft_closing && !move_unrefuted) {
                 self.finish(receipt.clone());
                 return TickResult {
                     frame: idle(ctx),
@@ -473,6 +491,16 @@ impl Place {
         started: bool,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let mut frame = idle(ctx);
+        // One use_item_on per placement. After it is sent the stack may be
+        // empty (a one-item stack) while the receipt is still in flight; a
+        // second Use could place a second block against another face.
+        if self.sent {
+            self.waited += 1;
+            if self.waited > 40 {
+                return (frame, None, Some(Outcome::Failed("no_place".into())));
+            }
+            return (frame, None, None);
+        }
         if count_item(ctx.world, &self.block) == 0 {
             return (frame, None, Some(Outcome::Failed("no_item".into())));
         }
@@ -515,7 +543,6 @@ impl Place {
                 window: 40,
             })
         };
-        let _ = self.sent;
         (frame, pending, None)
     }
 }
@@ -918,10 +945,12 @@ impl Eat {
         started: bool,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let mut frame = idle(ctx);
-        if count_item(ctx.world, &self.item) == 0 {
+        // After the first Use the food stack can be empty while the receipt is
+        // still in flight; only a before-use empty stack is `no_item`.
+        if !self.sent && count_item(ctx.world, &self.item) == 0 {
             return (frame, None, Some(Outcome::Failed("no_item".into())));
         }
-        if !held_matches(ctx.world, &self.item) {
+        if !held_matches(ctx.world, &self.item) && !self.sent {
             if !select_item(ctx.world, &self.item, &mut frame) {
                 return (frame, None, Some(Outcome::Failed("no_item".into())));
             }
@@ -1203,6 +1232,12 @@ pub fn fact_known(ctx: &mut Ctx<'_>, fact: &FactCall) -> bool {
 // move_to
 // ----------------------------------------------------------------------
 
+/// How close `move_to` must get to a block or entity. One block of horizontal
+/// or diagonal clearance, or standing on top of it, is 1.0-1.41. A radius of
+/// 2.0 would also accept the cell two blocks directly below a marker, which
+/// let a follower stop under a ledge instead of climbing onto it.
+const MOVE_TO_RADIUS: f32 = 1.5;
+
 #[derive(Debug)]
 struct Move {
     target: String,
@@ -1212,6 +1247,10 @@ struct Move {
     tries: u32,
     waited: u32,
     path_ticks: u64,
+    /// The block the first plan resolved. A replan (after a stall) must not
+    /// re-resolve it: swimming can put the marker behind a ledge, and losing
+    /// sight of a chosen goal is not the same as the goal disappearing.
+    block_goal: Option<BlockPos>,
 }
 
 impl Move {
@@ -1224,6 +1263,7 @@ impl Move {
             tries: 0,
             waited: 0,
             path_ticks: 0,
+            block_goal: None,
         }
     }
 
@@ -1247,6 +1287,15 @@ impl Move {
                 return (frame, None, Some(Outcome::Confirmed));
             }
             if follower.is_stalled() {
+                let progress = follower.progress(ctx.body);
+                eprintln!(
+                    "move_to stalled step={}/{} pos={:?} deviation={:.3} ticks={}",
+                    progress.step,
+                    progress.total,
+                    ctx.body.position(),
+                    progress.deviation,
+                    progress.ticks_on_step
+                );
                 self.follower = None;
                 self.tries += 1;
             } else {
@@ -1287,6 +1336,18 @@ impl Move {
             self.planner.plan(&mut source, &state, start, goal)
         };
         self.path_ticks = plan.cost.ceil().max(0.) as u64;
+        eprintln!(
+            "move_to plan status={:?} cost={} start={:?} goal={:?} tries={} steps={:?}",
+            plan.status,
+            plan.cost,
+            start,
+            goal,
+            self.tries,
+            plan.steps
+                .iter()
+                .map(|step| (step.kind.name(), step.from, step.to))
+                .collect::<Vec<_>>()
+        );
         match plan.status {
             praxion_planner::PlanStatus::Success => {
                 self.follower = Some(Follower::new(plan.steps, ctx.look));
@@ -1311,20 +1372,22 @@ impl Move {
         // tree, a marker) can never be entered. Move *to* the block means the
         // nearest standable cell within reach of it, the same rule entities
         // use.
-        if let Some((_, position)) = entity_target(ctx, &self.target, 32) {
+        if self.target.parse::<EntityKind>().is_ok() {
+            // An entity moves, so its goal is resolved again for each plan.
+            let (_, position) = entity_target(ctx, &self.target, 32)?;
             let cell = position.to_block_pos_floor();
             return Some(Goal::Near {
                 pos: cell,
-                radius: 2.0,
+                radius: MOVE_TO_RADIUS,
             });
         }
-        if let Some(pos) = block_target(ctx, &self.target, 32) {
-            return Some(Goal::Near {
-                pos,
-                radius: 2.0,
-            });
+        if self.block_goal.is_none() {
+            self.block_goal = block_target(ctx, &self.target, 32);
         }
-        None
+        self.block_goal.map(|pos| Goal::Near {
+            pos,
+            radius: MOVE_TO_RADIUS,
+        })
     }
 }
 

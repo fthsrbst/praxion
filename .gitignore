@@ -24,3 +24,6 @@ local/
 .env.*
 !.env.example
 runs/
+
+# Root build scratch (clean-checkout verifies)
+/target/

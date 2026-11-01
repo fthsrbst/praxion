@@ -269,6 +269,11 @@ impl Interpreter {
         self.stack.len()
     }
 
+    /// The skill of the innermost frame, for diagnostics.
+    pub fn current_skill(&self) -> Option<&str> {
+        self.stack.last().map(|frame| frame.skill.as_str())
+    }
+
     fn select(&mut self, facts: &mut dyn Facts, actuator: &mut dyn Actuator) -> Decision {
         let mut steps = 0;
         loop {

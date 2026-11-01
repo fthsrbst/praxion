@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 praxion-decoder = { path = "../decoder" }
 praxion-eventlog = { path = "../eventlog" }
+praxion-gamedata = { path = "../gamedata" }
 praxion-interpreter = { path = "../interpreter" }
 praxion-rules = { path = "../rules" }
 praxion-world = { path = "../world" }
