@@ -1,23 +1,34 @@
-//! The play state: answer what a vanilla client answers, tick 20 times a second,
-//! and stay connected.
+//! The play state: apply one frame, step physics once, answer what the protocol
+//! requires, stay connected.
 //!
-//! Per tick this follows `azalea-client`'s order (`azalea-client/src/plugins/
-//! movement.rs:57-70`, `.../tick_end.rs:18-36`): movement packets first, then
-//! `client_tick_end` last. There is no input and no physics yet, so the input
-//! packet and the sprint command never change and are never sent, exactly like
-//! Azalea when nothing moves. Everything else is event driven: keep alive,
-//! ping, chunk batches, teleports, death.
+//! Per tick, in azalea's order (`azalea-client/src/plugins/movement.rs:57-72`,
+//! `.../tick_end.rs:18-36`):
+//!
+//! ```text
+//! ControlFrame -> body (look, held) -> physics step
+//!   -> player_input (when it changed) -> sprint command (when it changed)
+//!   -> the one move packet vanilla would send -> client_tick_end
+//! ```
+//!
+//! Everything else is event driven: keep alive, ping, chunk batches, teleports,
+//! death. A tick without a usable world steps nothing and sends nothing but
+//! `client_tick_end`: movement is refused rather than guessed.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use azalea_core::position::ChunkPos;
+use azalea_core::entity_id::MinecraftEntityId;
+use azalea_core::position::{ChunkPos, Vec3};
+use azalea_entity::LookDirection;
 use azalea_protocol::connect::WriteConnection;
+use azalea_protocol::packets::Packet;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{
     ClientboundGamePacket, ServerboundAcceptTeleportation, ServerboundChunkBatchReceived,
     ServerboundClientCommand, ServerboundClientTickEnd, ServerboundConfigurationAcknowledged,
-    ServerboundCookieResponse, ServerboundGamePacket, ServerboundKeepAlive, ServerboundPlayerLoaded,
-    ServerboundPong, s_client_command::Action,
+    ServerboundCookieResponse, ServerboundGamePacket, ServerboundKeepAlive, ServerboundPlayerCommand,
+    ServerboundPlayerInput, ServerboundPlayerLoaded, ServerboundPong, s_client_command::Action,
+    s_player_command,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
@@ -26,8 +37,13 @@ use crate::chunks::ChunkBatchInfo;
 use crate::config;
 use crate::error::Error;
 use crate::events::{Command, Event};
+use crate::frame::{Click, ControlFrame, Held};
 use crate::login::{self, GameConn};
 use crate::movement::Movement;
+use crate::physics::Body;
+use crate::script::{Runner, Script};
+use crate::session::SessionStats;
+use crate::worldfeed::WorldFeed;
 
 /// One client tick: 20 per second, as vanilla runs it.
 pub(crate) const TICK: Duration = Duration::from_millis(50);
@@ -38,33 +54,68 @@ pub(crate) struct Context<'a> {
     pub events: &'a std::sync::mpsc::Sender<Event>,
     pub auto_respawn: bool,
     pub trace: bool,
+    pub script: Option<Arc<Script>>,
+    pub stats: &'a Arc<SessionStats>,
 }
 
-/// What the session keeps between ticks: only what answers the server.
+/// What the session keeps between ticks.
 struct PlayState {
     movement: Movement,
+    body: Body,
+    world: Option<WorldFeed>,
+    runner: Option<Runner>,
+    /// The controls the actuator currently holds.
+    held: Held,
+    /// The input packet the server already has.
+    last_sent_input: ServerboundPlayerInput,
+    /// The sprinting flag the server already has.
+    last_sprinting: bool,
     chunks: ChunkBatchInfo,
     /// Our own chunk has arrived, so the server may be told we are loaded.
     client_loaded: bool,
-    /// Our entity id from the play login packet, used to recognise our death.
+    /// Our entity id from the play login packet, used for the sprint command
+    /// and to recognise our death.
     own_entity_id: Option<i32>,
     /// We are dead and have not respawned yet; stops repeated respawn requests.
     dead: bool,
     /// The first play packet arrived, so `Event::Joined` has been sent.
     joined: bool,
     auto_respawn: bool,
+    /// Client ticks the session has run.
+    tick: u64,
+    /// A refusal to move has been logged once already.
+    refusal_logged: bool,
+    /// The end of the script has been logged once.
+    script_done_logged: bool,
 }
 
 impl PlayState {
-    fn new(auto_respawn: bool) -> Self {
+    fn new(
+        auto_respawn: bool,
+        world: Option<WorldFeed>,
+        script: Option<Arc<Script>>,
+        position: Vec3,
+        look: LookDirection,
+    ) -> Self {
+        let mut movement = Movement::default();
+        movement.teleported(position, look);
         Self {
-            movement: Movement::default(),
+            movement,
+            body: Body::new(position),
+            world,
+            runner: script.map(|script| Runner::new((*script).clone())),
+            held: Held::NONE,
+            last_sent_input: ServerboundPlayerInput::default(),
+            last_sprinting: false,
             chunks: ChunkBatchInfo::default(),
             client_loaded: false,
             own_entity_id: None,
             dead: false,
             joined: false,
             auto_respawn,
+            tick: 0,
+            refusal_logged: false,
+            script_done_logged: false,
         }
     }
 
@@ -73,17 +124,188 @@ impl PlayState {
         &mut self,
         writer: &mut WriteConnection<ServerboundGamePacket>,
         trace: bool,
+        stats: &SessionStats,
     ) -> Result<(), Error> {
-        // Azalea only sends positions once the client has loaded (`With<HasClientLoaded>`
-        // on `send_position`); before that the server would reject them.
-        if self.client_loaded
-            && let Some(packet) = self.movement.tick()
-        {
-            login::send(writer, packet, trace).await?;
+        let tick = self.tick;
+        self.tick += 1;
+        stats.ticks_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut stepped = false;
+        if self.client_loaded {
+            self.apply_frame(tick, stats);
+            stepped = self.step_physics(stats);
         }
+
+        // Azalea only sends positions once the client has something to move
+        // (`With<HasClientLoaded>`); before the first step there is nothing to
+        // send.
+        if stepped {
+            self.send_movement(writer, trace, stats).await?;
+        }
+
         // Last packet of every tick, after everything else.
-        login::send(writer, ServerboundClientTickEnd, trace).await
+        login::send(writer, ServerboundClientTickEnd, trace).await?;
+        stats
+            .tick_end_packets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
+
+    fn apply_frame(&mut self, tick: u64, stats: &SessionStats) {
+        let Some(runner) = &mut self.runner else {
+            return;
+        };
+        let frame: ControlFrame = runner.frame(tick, self.body.generation());
+        stats
+            .frames
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match frame.apply(&mut self.body, tick) {
+            Ok(applied) => {
+                self.held = frame.held;
+                for click in &frame.clicks {
+                    match click {
+                        Click::Attack => stats
+                            .attack_clicks
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        Click::Use => stats
+                            .use_clicks
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    };
+                }
+                if applied.clicks > 0 {
+                    eprintln!("clicks: {:?} (accepted, not executed)", frame.clicks);
+                }
+            }
+            Err(error) => {
+                // A dropped frame must not leave a control held.
+                stats
+                    .frames_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("frame dropped: {error}");
+                self.held = Held::NONE;
+            }
+        }
+        if !self.script_done_logged && runner.finished() {
+            self.script_done_logged = true;
+            eprintln!("script finished: everything released");
+        }
+    }
+
+    /// Step physics if the world around us is usable; returns whether we did.
+    fn step_physics(&mut self, stats: &SessionStats) -> bool {
+        let stepped = match &self.world {
+            None => false,
+            Some(feed) => {
+                let world = feed.lock();
+                if !world_ready(&world, self.body.position()) {
+                    false
+                } else {
+                    self.body.step(&self.held, &*world);
+                    true
+                }
+            }
+        };
+
+        if stepped {
+            stats
+                .physics_ticks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            stats.set_position(self.body.position());
+        } else if self.held.moves() {
+            stats
+                .refused_moves
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !self.refusal_logged {
+                self.refusal_logged = true;
+                let reason = match &self.world {
+                    None => "no world (start with --tee 127.0.0.1:PORT)".to_owned(),
+                    Some(feed) => {
+                        let world = feed.lock();
+                        match world.status().reason() {
+                            Some(reason) => format!("the world is invalid: {reason}"),
+                            None => "the chunks around us are not loaded yet".to_owned(),
+                        }
+                    }
+                };
+                eprintln!("movement refused: {reason}");
+            }
+        }
+
+        stepped
+    }
+
+    async fn send_movement(
+        &mut self,
+        writer: &mut WriteConnection<ServerboundGamePacket>,
+        trace: bool,
+        stats: &SessionStats,
+    ) -> Result<(), Error> {
+        let input = self.held.packet();
+        if input != self.last_sent_input {
+            login::send(writer, input.clone().into_variant(), trace).await?;
+            self.last_sent_input = input;
+            stats
+                .input_packets
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        if self.body.sprinting() != self.last_sprinting {
+            let Some(id) = self.own_entity_id else {
+                return Ok(());
+            };
+            let action = if self.body.sprinting() {
+                s_player_command::Action::StartSprinting
+            } else {
+                s_player_command::Action::StopSprinting
+            };
+            login::send(
+                writer,
+                ServerboundPlayerCommand {
+                    id: MinecraftEntityId(id),
+                    action,
+                    data: 0,
+                },
+                trace,
+            )
+            .await?;
+            self.last_sprinting = self.body.sprinting();
+            stats
+                .sprint_commands
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        if let Some(packet) = self.movement.packet(
+            self.body.position(),
+            self.body.look(),
+            self.body.on_ground(),
+            self.body.horizontal_collision(),
+        ) {
+            login::send(writer, packet, trace).await?;
+            stats
+                .position_packets
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+/// Whether physics may run: a valid world with the chunks around the player.
+///
+/// Vanilla clients stop moving into chunks they do not have; reading a missing
+/// chunk as air would drop the body into the void instead.
+fn world_ready(world: &praxion_world::World, position: Vec3) -> bool {
+    if !world.status().is_valid() || world.dimension().is_none() {
+        return false;
+    }
+    let center = ChunkPos::from(&position);
+    for x in -1..=1 {
+        for z in -1..=1 {
+            if !world.has_chunk(ChunkPos::new(center.x + x, center.z + z)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// End of one stretch of play.
@@ -102,20 +324,53 @@ enum Flow {
 }
 
 /// Play, re-enter configuration when asked, and play again.
-pub(crate) async fn run(conn: GameConn, ctx: &mut Context<'_>) -> Result<(), Error> {
-    let mut state = PlayState::new(ctx.auto_respawn);
+pub(crate) async fn run(
+    conn: GameConn,
+    ctx: &mut Context<'_>,
+    world: Option<WorldFeed>,
+) -> Result<(), Error> {
+    let mut state = PlayState::new(
+        ctx.auto_respawn,
+        world,
+        ctx.script.clone(),
+        Vec3::ZERO,
+        LookDirection::default(),
+    );
     let mut conn = conn;
     loop {
         match play_until(conn, ctx, &mut state).await {
             Outcome::Reconfigure(play_conn) => {
                 conn = config::enter(play_conn.config(), ctx.trace).await?;
-                // A new configuration means a new world registration; the server sends
-                // the chunks again and wants a fresh player_loaded.
+                // A new configuration means a new world registration; the server
+                // sends the chunks again and wants a fresh player_loaded.
                 state.client_loaded = false;
+                state.body.respawn();
             }
-            Outcome::Closed(error) => return Err(error),
+            Outcome::Closed(error) => {
+                ctx.stats.set_world_summary(world_summary(&state));
+                return Err(error);
+            }
         }
     }
+}
+
+/// One line about the world feed, for the session's log.
+fn world_summary(state: &PlayState) -> String {
+    let Some(feed) = &state.world else {
+        return "none (no --tee)".to_owned();
+    };
+    let world = feed.lock();
+    let warnings: u64 = world.warning_counts().values().sum();
+    let reason = world
+        .status()
+        .reason()
+        .map(|reason| format!(": {reason}"))
+        .unwrap_or_default();
+    format!(
+        "{:?}{reason}, {} chunks, {warnings} warnings",
+        world.status(),
+        world.chunk_count()
+    )
 }
 
 async fn play_until(
@@ -142,10 +397,12 @@ async fn play_until(
                 }
             },
             packet = conn.reader.read() => match packet {
-                Ok(packet) => match handle(&mut conn.writer, state, packet, ctx).await {
-                    Ok(flow) => flow,
-                    Err(error) => Flow::Closed(error),
-                },
+                Ok(packet) => {
+                    match handle(&mut conn.writer, state, packet, ctx).await {
+                        Ok(flow) => flow,
+                        Err(error) => Flow::Closed(error),
+                    }
+                }
                 Err(error) => Flow::Closed(Error::Protocol(error)),
             },
             _ = tokio::time::sleep_until(next_tick) => {
@@ -154,7 +411,7 @@ async fn play_until(
                 // caught up with a burst of packets; the deadline resynchronises.
                 let now = Instant::now();
                 next_tick = if next_tick + TICK > now { next_tick + TICK } else { now + TICK };
-                match state.tick(&mut conn.writer, ctx.trace).await {
+                match state.tick(&mut conn.writer, ctx.trace, ctx.stats).await {
                     Ok(()) => Flow::Continue,
                     Err(error) => Flow::Closed(error),
                 }
@@ -197,24 +454,32 @@ async fn handle(
             login::send(writer, ServerboundPong { id: p.id }, ctx.trace).await?;
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            state.movement.teleport(&p.change, &p.relative);
+            state.body.teleport(&p.change, &p.relative);
+            state
+                .movement
+                .teleported(state.body.position(), state.body.look());
+            ctx.stats
+                .teleports
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // 26.3 acknowledges with the position and direction it now has
             // (`.../packet/game/mod.rs:422-449`); no separate move packet follows.
             login::send(
                 writer,
                 ServerboundAcceptTeleportation {
                     id: p.id,
-                    position: state.movement.position(),
-                    direction: state.movement.look(),
+                    position: state.body.position(),
+                    direction: state.body.look(),
                 },
                 ctx.trace,
             )
             .await?;
         }
         ClientboundGamePacket::PlayerRotation(p) => {
-            state
-                .movement
-                .rotate(p.y_rot, p.relative_y, p.x_rot, p.relative_x);
+            let (yaw, pitch): (f32, f32) = state.body.look().into();
+            state.body.set_look(LookDirection::new(
+                apply_change(yaw, p.relative_y, p.y_rot),
+                apply_change(pitch, p.relative_x, p.x_rot),
+            ));
         }
         ClientboundGamePacket::ChunkBatchStart(_) => state.chunks.start(),
         ClientboundGamePacket::ChunkBatchFinished(p) => {
@@ -232,7 +497,7 @@ async fn handle(
             // The vanilla client sends `player_loaded` once the chunk it stands in
             // is there (`azalea-client/src/plugins/loading.rs:33-51`). Without it the
             // server keeps us waiting for chunks and never puts us in the world.
-            if !state.client_loaded && state.movement.chunk_pos() == ChunkPos::new(p.x, p.z) {
+            if !state.client_loaded && chunk_of(state.body.position()) == ChunkPos::new(p.x, p.z) {
                 state.client_loaded = true;
                 login::send(writer, ServerboundPlayerLoaded, ctx.trace).await?;
             }
@@ -253,6 +518,7 @@ async fn handle(
             state.dead = false;
             // The new world arrives with new chunks and a new teleport.
             state.client_loaded = false;
+            state.body.respawn();
         }
         ClientboundGamePacket::CookieRequest(p) => {
             login::send(
@@ -299,4 +565,12 @@ async fn die(
         .await?;
     }
     Ok(())
+}
+
+fn chunk_of(position: Vec3) -> ChunkPos {
+    ChunkPos::from(&position)
+}
+
+fn apply_change<T: std::ops::Add<Output = T>>(base: T, relative: bool, change: T) -> T {
+    if relative { base + change } else { change }
 }

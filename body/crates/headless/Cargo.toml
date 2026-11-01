@@ -1,6 +1,6 @@
 [package]
 name = "praxion-headless"
-description = "Headless packet client for Demo-0: log in, answer the protocol, stay connected (no physics yet)"
+description = "Headless packet client for Demo-0: log in, answer the protocol, and play one player with lifted physics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,10 +15,18 @@ name = "praxion-headless"
 path = "src/main.rs"
 
 [dependencies]
+azalea-block = { path = "../../../third_party/azalea/azalea-block" }
 azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+azalea-physics = { path = "../../../third_party/azalea/azalea-physics" }
 azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+praxion-decoder = { path = "../decoder" }
 praxion-manifest = { path = "../manifest" }
+praxion-tee = { path = "../tee" }
+praxion-world = { path = "../world" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1.54", features = ["rt", "net", "time", "sync", "macros"] }
 uuid = "1.29"
 
@@ -29,3 +37,5 @@ windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_S
 # Only for `GameProfile` in the scripted `login_finished` packet. Offline mode, so no
 # `online-mode` feature and no reqwest: the scripted server never encrypts anything.
 azalea-auth = { path = "../../../third_party/azalea/azalea-auth", default-features = false }
+# For the independent physics tests: setting up a followed world with a loaded chunk.
+azalea-world = { path = "../../../third_party/azalea/azalea-world" }

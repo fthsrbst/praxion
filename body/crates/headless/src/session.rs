@@ -5,10 +5,14 @@
 //! that created it, so login, the play loop and every packet stay on one thread.
 //! The owner talks to it over channels only, so the body's threads never touch
 //! the socket.
+//!
+//! With [`ConnectOptions::tee`] the session first subscribes to the forwarder's
+//! tee and starts the world feed (decoder + raw store). With
+//! [`ConnectOptions::script`] it drives the body from a scripted frame source.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -19,10 +23,12 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use crate::error::Error;
 use crate::events::{Command, Event};
+use crate::script::Script;
+use crate::worldfeed::WorldFeed;
 use crate::{login, play};
 
-/// Options for [`connect_with`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Options for [`Session::connect_with`].
+#[derive(Clone, Debug, Default)]
 pub struct ConnectOptions {
     /// Ask to respawn as soon as the server says we died.
     pub auto_respawn: bool,
@@ -32,6 +38,134 @@ pub struct ConnectOptions {
     pub tune_loop: bool,
     /// Print every packet the session reads and writes to stderr. For live tests.
     pub trace_packets: bool,
+    /// A scripted frame source. Without it the body holds no control at all.
+    pub script: Option<Arc<Script>>,
+    /// Subscribe to the forwarder's tee at this address and run the decoder and
+    /// world in-process. Without it there is no world and movement is refused.
+    pub tee: Option<SocketAddr>,
+}
+
+/// Counters for the owner, written by the session thread.
+///
+/// Every value is a monotonic counter; a snapshot is meaningful at any time and
+/// exact once the session has ended.
+#[derive(Debug, Default)]
+pub struct SessionStats {
+    /// Client ticks the tick loop ran.
+    pub ticks_ran: AtomicU64,
+    /// Frames handed to the actuator (script steps included).
+    pub frames: AtomicU64,
+    /// Frames the actuator refused (stale generation, wrong tick, menus).
+    pub frames_dropped: AtomicU64,
+    /// Ticks physics actually stepped.
+    pub physics_ticks: AtomicU64,
+    /// Ticks where a control that moves us was held without a usable world.
+    pub refused_moves: AtomicU64,
+    pub attack_clicks: AtomicU64,
+    pub use_clicks: AtomicU64,
+    pub input_packets: AtomicU64,
+    pub sprint_commands: AtomicU64,
+    pub position_packets: AtomicU64,
+    pub tick_end_packets: AtomicU64,
+    /// `player_position` packets applied, including the spawn teleport.
+    pub teleports: AtomicU64,
+    /// The last position physics produced, as three `f64::to_bits` values.
+    position: [AtomicU64; 3],
+    /// The first position physics produced (the spawn position).
+    origin: [AtomicU64; 3],
+    has_position: AtomicBool,
+    has_origin: AtomicBool,
+    /// One line about the world feed when the session ends.
+    world: std::sync::Mutex<Option<String>>,
+}
+
+impl SessionStats {
+    /// Record a one-line summary of the world feed (status, chunks, warnings).
+    pub(crate) fn set_world_summary(&self, summary: String) {
+        let mut world = self
+            .world
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *world = Some(summary);
+    }
+
+    /// The world feed's final state, if a world feed was running.
+    pub fn world_summary(&self) -> Option<String> {
+        self.world
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+    /// `player_position` packets after the first (spawn) one: server corrections.
+    pub fn corrections(&self) -> u64 {
+        self.teleports
+            .load(Ordering::Relaxed)
+            .saturating_sub(1)
+    }
+
+    /// Record where physics says we are.
+    pub(crate) fn set_position(&self, position: azalea_core::position::Vec3) {
+        for (counter, value) in self.position.iter().zip([position.x, position.y, position.z]) {
+            counter.store(value.to_bits(), Ordering::Relaxed);
+        }
+        self.has_position.store(true, Ordering::Relaxed);
+        if !self.has_origin.swap(true, Ordering::Relaxed) {
+            for (counter, value) in self.origin.iter().zip([position.x, position.y, position.z]) {
+                counter.store(value.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The last position physics produced, if physics has run.
+    pub fn position(&self) -> Option<azalea_core::position::Vec3> {
+        if !self.has_position.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.read(&self.position))
+    }
+
+    /// The first position physics produced, if physics has run.
+    pub fn origin(&self) -> Option<azalea_core::position::Vec3> {
+        if !self.has_origin.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.read(&self.origin))
+    }
+
+    fn read(&self, values: &[AtomicU64; 3]) -> azalea_core::position::Vec3 {
+        azalea_core::position::Vec3::new(
+            f64::from_bits(values[0].load(Ordering::Relaxed)),
+            f64::from_bits(values[1].load(Ordering::Relaxed)),
+            f64::from_bits(values[2].load(Ordering::Relaxed)),
+        )
+    }
+
+    fn get(counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
+    }
+
+    /// A one-block summary for the binary's log.
+    pub fn summary(&self) -> String {
+        format!(
+            "ticks: {}  physics: {}  frames: {}  dropped: {}  refused moves: {}\n\
+             packets: input {}, sprint {}, position {}, tick_end {}\n\
+             teleports: {} (corrections after spawn: {})\n\
+             clicks: attack {}, use {}",
+            Self::get(&self.ticks_ran),
+            Self::get(&self.physics_ticks),
+            Self::get(&self.frames),
+            Self::get(&self.frames_dropped),
+            Self::get(&self.refused_moves),
+            Self::get(&self.input_packets),
+            Self::get(&self.sprint_commands),
+            Self::get(&self.position_packets),
+            Self::get(&self.tick_end_packets),
+            Self::get(&self.teleports),
+            self.corrections(),
+            Self::get(&self.attack_clicks),
+            Self::get(&self.use_clicks),
+        )
+    }
 }
 
 /// A connected, logged-in client.
@@ -40,6 +174,7 @@ pub struct Session {
     events: Receiver<Event>,
     thread: Option<JoinHandle<()>>,
     connected: Arc<AtomicBool>,
+    stats: Arc<SessionStats>,
 }
 
 impl std::fmt::Debug for Session {
@@ -70,8 +205,10 @@ impl Session {
         let (event_tx, event_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let connected = Arc::new(AtomicBool::new(true));
+        let stats = Arc::new(SessionStats::default());
 
         let thread_connected = Arc::clone(&connected);
+        let thread_stats = Arc::clone(&stats);
         let thread_name = format!("praxion-headless {username}");
         let thread = thread::Builder::new()
             .name(thread_name)
@@ -93,6 +230,7 @@ impl Session {
                     event_tx,
                     ready_tx,
                     thread_connected,
+                    thread_stats,
                 ));
             })?;
 
@@ -102,6 +240,7 @@ impl Session {
                 events: event_rx,
                 thread: Some(thread),
                 connected,
+                stats,
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
@@ -149,6 +288,11 @@ impl Session {
         self.connected.load(Ordering::Relaxed)
     }
 
+    /// The counters of this session.
+    pub fn stats(&self) -> &SessionStats {
+        &self.stats
+    }
+
     /// Disconnect and wait for the session thread to end.
     pub fn close(mut self) {
         self.disconnect();
@@ -175,10 +319,24 @@ async fn run_session(
     events: Sender<Event>,
     ready: Sender<Result<(), Error>>,
     connected: Arc<AtomicBool>,
+    stats: Arc<SessionStats>,
 ) {
     if options.tune_loop {
         crate::win::tune_current_thread();
     }
+
+    // Subscribe to the tee before the game connection so no record is missed.
+    let world = match options.tee {
+        None => None,
+        Some(tee) => match WorldFeed::connect(tee) {
+            Ok(feed) => Some(feed),
+            Err(message) => {
+                let _ = ready.send(Err(Error::Setup(message)));
+                connected.store(false, Ordering::Relaxed);
+                return;
+            }
+        },
+    };
 
     let conn = match login::connect(addr, &username, options.trace_packets).await {
         Ok(conn) => conn,
@@ -199,8 +357,10 @@ async fn run_session(
         events: &events,
         auto_respawn: options.auto_respawn,
         trace: options.trace_packets,
+        script: options.script,
+        stats: &stats,
     };
-    if let Err(error) = play::run(conn, &mut context).await {
+    if let Err(error) = play::run(conn, &mut context, world).await {
         let _ = events.send(Event::Disconnected(error.to_string()));
     }
     connected.store(false, Ordering::Relaxed);

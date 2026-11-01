@@ -483,8 +483,10 @@ fn logs_in_and_answers_everything_the_protocol_asks() {
         // The chunk we stand in (10.5, -3.5 is chunk 0, -1) unlocks player_loaded.
         Step::Send(Packet::Chunk { x: 0, z: -1 }),
         Step::Expect("player_loaded"),
-        // Position updates resume once loaded: vanilla sends one every 20 ticks.
-        Step::Expect("move_player_pos(10.5, 64, -3.5)"),
+        // No `--tee`, so there is no world: the body refuses to move and the only
+        // packet per tick is `client_tick_end`. Position packets need a world
+        // (`movement.rs` unit-tests their timing).
+        Step::Expect("client_tick_end"),
         Step::Close,
     ]);
     let (addr, server) = start_server(steps);

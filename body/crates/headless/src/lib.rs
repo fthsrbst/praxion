@@ -1,36 +1,44 @@
-//! Praxion's headless Minecraft body, step 5a: log in, answer what the protocol
-//! requires, stay connected and idle.
+//! Praxion's headless Minecraft body: log in, answer the protocol, and play one
+//! local player with physics lifted from `azalea-physics`.
 //!
 //! ```text
 //! Session::connect_with
 //!   -> std thread + single-threaded Tokio runtime
 //!        TCP -> handshake -> login -> configuration -> play
-//!        play loop: keep alive, ping, chunk batches, teleports, tick end, respawn
+//!        play loop: apply a ControlFrame, step physics, send the tick's packets
 //!   -> Event::Joined / Died / Disconnected
 //! Session::send(ServerboundGamePacket) / disconnect()  ->  command channel
 //! ```
 //!
-//! The session keeps nothing about the world except what it needs to answer the
-//! server (last teleport, last position sent, whether our chunk arrived). The
-//! world model is the decoder's, fed by the forwarder's tee
-//! (docs/decisions.md 2026-11-01, "Demo-0 data path").
+//! The session keeps the player's physics state and the last movement packet it
+//! sent. The world it collides with comes from the raw store: in live play the
+//! body runs the tee subscriber -> decoder -> world pipeline, and here
+//! [`WorldFeed`] does that in-process for the `--tee` mode.
 //!
-//! Physics, digging, inventory and the `ControlFrame` are later steps. What this
-//! step implements and skips from a vanilla client's play behaviour is listed in
-//! the step report (`logs/briefs/demo0/s5a-headless-login.md`).
+//! Digging, inventory and menus are later steps. What this step implements and
+//! skips from a vanilla client's play behaviour is listed in the step report
+//! (`logs/s5b/report.md` in the repository's scratch area).
 
 mod chunks;
 mod config;
 mod error;
 mod events;
+mod frame;
 mod login;
 mod movement;
+mod physics;
 mod play;
+mod script;
 mod session;
 mod win;
+mod worldfeed;
 
 pub use azalea_protocol::packets::game::ServerboundGamePacket;
 pub use error::Error;
 pub use events::Event;
+pub use frame::{Click, ControlFrame, FrameError, Held, Look, MenuAction};
 pub use login::protocol_version;
-pub use session::{ConnectOptions, Session};
+pub use physics::Body;
+pub use script::{Script, ScriptLook, Step};
+pub use session::{ConnectOptions, Session, SessionStats};
+pub use worldfeed::WorldFeed;

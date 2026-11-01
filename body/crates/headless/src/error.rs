@@ -21,6 +21,8 @@ pub enum Error {
     LocalDisconnect,
     /// The session thread ended before the login finished.
     ThreadEnded,
+    /// The session could not be set up (for example, the tee is unreachable).
+    Setup(String),
 }
 
 impl fmt::Display for Error {
@@ -34,6 +36,7 @@ impl fmt::Display for Error {
             Error::Disconnected(reason) => write!(f, "disconnected by the server: {reason}"),
             Error::LocalDisconnect => write!(f, "disconnected locally"),
             Error::ThreadEnded => write!(f, "the session thread ended before login finished"),
+            Error::Setup(message) => write!(f, "{message}"),
         }
     }
 }
@@ -46,7 +49,8 @@ impl StdError for Error {
             Error::OnlineMode
             | Error::Disconnected(_)
             | Error::LocalDisconnect
-            | Error::ThreadEnded => None,
+            | Error::ThreadEnded
+            | Error::Setup(_) => None,
         }
     }
 }
