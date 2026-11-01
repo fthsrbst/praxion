@@ -854,6 +854,31 @@ impl Perception {
         }
     }
 
+    /// Own air supply in ticks, from the player's own entity data: an F3 fact,
+    /// allowed without a ray. `Unknown(never_seen)` until the server sends it,
+    /// which is not the same as full air.
+    pub fn air(&self, world: &World) -> Answer<u32> {
+        if !self.world_valid {
+            return Answer::Unknown(Reason::NeverSeen);
+        }
+        match world.own_air() {
+            Some(air) => Answer::known(air, Provenance::Sight, 0),
+            None => Answer::Unknown(Reason::NeverSeen),
+        }
+    }
+
+    /// Whether the server has the player on fire, from its shared flags byte:
+    /// an F3 fact, allowed without a ray. `Unknown` until the server sends it.
+    pub fn burning(&self, world: &World) -> Answer<bool> {
+        if !self.world_valid {
+            return Answer::Unknown(Reason::NeverSeen);
+        }
+        match world.own_burning() {
+            Some(burning) => Answer::known(burning, Provenance::Sight, 0),
+            None => Answer::Unknown(Reason::NeverSeen),
+        }
+    }
+
     /// Own inventory: an F3 fact.
     pub fn inventory(&self, world: &World) -> Answer<Vec<ItemStack>> {
         if !self.world_valid {

@@ -18,8 +18,9 @@ use azalea_protocol::packets::{
     common::CommonPlayerSpawnInfo,
     game::{
         ClientboundAddEntity, ClientboundForgetLevelChunk, ClientboundGamePacket,
-        ClientboundLevelChunkWithLight, ClientboundLogin, ClientboundSetHealth, ClientboundSetTime,
-        ClientboundSound, ClientboundSoundEntity, ServerboundGamePacket, ServerboundMovePlayerPos,
+        ClientboundLevelChunkWithLight, ClientboundLogin, ClientboundSetEntityData,
+        ClientboundSetHealth, ClientboundSetTime, ClientboundSound, ClientboundSoundEntity,
+        ServerboundGamePacket, ServerboundMovePlayerPos,
         c_level_chunk_with_light::ClientboundLevelChunkPacketData,
         c_set_time::ClockState,
         c_sound::SoundSource,
@@ -628,8 +629,44 @@ fn a_sound_entity_uses_the_entity_position() {
 }
 
 #[test]
-fn f3_facts_are_allowed_without_a_ray() {
+fn own_air_and_burning_are_hud_facts() {
     let mut world = world_with(&[]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    // Nothing sent yet: unknown, and no ray was spent.
+    assert_eq!(p.air(&world).reason(), Some(Reason::NeverSeen));
+    assert_eq!(p.burning(&world).reason(), Some(Reason::NeverSeen));
+    assert_eq!(p.rays_used_this_tick(), 0);
+
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(7),
+            packed_items: azalea_entity::EntityMetadataItems(vec![
+                azalea_entity::EntityDataItem {
+                    index: 0,
+                    value: azalea_entity::EntityDataValue::Byte(0b1),
+                },
+                azalea_entity::EntityDataItem {
+                    index: 1,
+                    value: azalea_entity::EntityDataValue::Int(80),
+                },
+            ]),
+        }),
+    );
+    p.begin_tick(&world);
+    let air = p.air(&world);
+    assert_eq!(air.value().copied(), Some(80));
+    assert_eq!(air.provenance(), Some(Provenance::Sight));
+    assert_eq!(air.age_ticks(), Some(0));
+    let burning = p.burning(&world);
+    assert_eq!(burning.value().copied(), Some(true));
+    assert_eq!(burning.provenance(), Some(Provenance::Sight));
+    assert_eq!(p.rays_used_this_tick(), 0, "a HUD fact costs no ray");
+}
+
+#[test]
+fn f3_facts_are_allowed_without_a_ray() {    let mut world = world_with(&[]);
     world.apply_clientbound_play(
         0,
         &ClientboundGamePacket::SetHealth(ClientboundSetHealth {

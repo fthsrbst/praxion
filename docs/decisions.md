@@ -53,6 +53,24 @@ All on Claude's recommendation.
   logic (unknown propagates); actions are a primitive call, `do skill(...)`, `done` or `fail(kind)`.
   The loader rejects unknown names, type errors, more than 30 rules, cycles, composition depth over 2
   and unreachable rules. Reference: `docs/rule-lists.md`. (Claude.)
+- **Reflexes and arbiter for Demo-0:** a reflex is a pure, priority-ordered function over perception; a
+  `human_floor` reflex acts only after its trigger has been visible for 3 ticks (150 ms), a `lethal_fast` one
+  (creeper within 3, arrows, lava, drowning) on the first tick. Ten typed settings live in
+  `body/config/reflexes.toml`. The arbiter bumps the generation and preempts the interpreter on a reflex,
+  eats at a safe point on the soft hunger threshold and preempts on the hard one, and switches within a tier
+  only when gain > k x loss (k = 2) with no `until` active. An Enderman look guard applies to every look.
+  (Claude.)
+- **Perception keeps a known map; the planner plans on it without rays.** Each tick perception spends its
+  leftover ray budget (never the reflex reserve) sweeping nearby unknown or stale cells and records what it
+  sees, with the tick, in a bounded per-section map; a hidden cell is never updated. The planner reads that
+  map (`Known(state, age)` or `Unknown`), so a plan costs no rays and unknown cells form a real frontier.
+  Reason: planning through per-node ray queries spent the whole budget and ended 79 of 100 test plans early.
+  Plans also track placeable blocks left, and water is swimmable (lava stays impassable). (Claude.)
+- **Item tags in skills, all recipes from data.** Facts and primitive arguments accept item and block tags
+  (`count(#logs) >= 1`, `mine(#logs)`), resolved from the 26.3 data pack's tag files; `praxion-gamedata`
+  generates every crafting recipe (shaped and shapeless, with tags) from the server jar instead of a
+  hand-copied oak-only table. Reason: a fresh seed may have only birch, spruce or other woods.
+  `ControlFrame` gains `select_slot: Option<u8>` (the hotbar number keys). (Claude.)
 - **Interpreter readings where §6.1 is silent:** a failed primitive blocks its rule for the tick and is
   retried, but three consecutive failures of the same rule return `failed(kind)` from the skill; a child's
   `done` lets the parent re-select on the next tick; `until` on a skill call is bounded by 1200 ticks;

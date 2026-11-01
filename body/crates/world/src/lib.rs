@@ -280,6 +280,26 @@ impl World {
         self.player.selected_slot()
     }
 
+    /// Whether the player's own shared flags say it is on fire, from its own
+    /// entity data. `None` until the server sends the flags byte, and after a
+    /// new login: an unanswered fact is unknown, never "not burning".
+    pub fn own_burning(&self) -> Option<bool> {
+        if !self.status.is_valid() {
+            return None;
+        }
+        self.player.burning()
+    }
+
+    /// The player's own air supply in ticks (300 at the surface, Respiration
+    /// can raise the maximum). `None` until the server says, so a caller can
+    /// tell an absent fact from full air.
+    pub fn own_air(&self) -> Option<u32> {
+        if !self.status.is_valid() {
+            return None;
+        }
+        self.player.air()
+    }
+
     pub fn inventory(&self) -> &[ItemStack] {
         self.player.inventory()
     }
@@ -456,6 +476,7 @@ impl World {
                 self.entities.clear();
                 self.sounds.clear();
                 self.player.clear_position();
+                self.player.clear_own_facts();
                 self.open_container = None;
                 self.set_dimension_and_mode(&packet.common);
             }
@@ -728,7 +749,11 @@ impl World {
                 }
             }
             ClientboundGamePacket::SetEntityData(packet) => {
-                if let Some(entity) = self.entities.get_mut(&packet.id.0) {
+                // The player's own entity never arrives as an `AddEntity`, so
+                // its data is kept on the player instead of in `entities`.
+                if Some(packet.id.0) == self.own_entity_id {
+                    self.player.merge_metadata(&packet.packed_items);
+                } else if let Some(entity) = self.entities.get_mut(&packet.id.0) {
                     entity.merge_metadata(&packet.packed_items);
                 }
             }

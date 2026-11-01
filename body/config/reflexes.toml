@@ -1,0 +1,56 @@
+# Praxion reflex settings (Demo-0)
+#
+# The user owns this file. Every value is typed and checked on load: a missing
+# field, a wrong type, an unknown key or an out-of-range value refuses to start
+# the body with an error naming the field. Reflexes never wait for the network,
+# so these numbers, not the brain, are the whole survival policy.
+#
+# Units: health and food are vanilla points (0 to 20), distances are blocks,
+# times are client ticks (20 ticks = 1 s). See `docs/sessions/07-reflexes-arbiter.md`.
+
+# Health at or below which the arbiter wakes the brain and the flee reflex
+# outranks fighting.
+critical_health = 6.0
+
+# The melee reflex fights while health is above this, and flees at or below it.
+fight_min_health = 8.0
+
+# A zombie, skeleton or spider this close triggers the melee reflex, in blocks.
+melee_range = 4
+
+# A creeper this close triggers the creeper flee reflex, in blocks. Inside 3
+# blocks the creeper reflex is `lethal_fast` (no human-floor wait).
+creeper_flee_range = 8
+
+# Air ticks left at which the drowning reflex swims up. Vanilla air is 300
+# ticks (15 s); 120 ticks is six seconds of warning.
+air_surface_threshold = 120
+
+# Food at or below which maintenance eats at the command's next safe point.
+eat_soft_threshold = 16
+
+# Food at or below which the starvation reflex preempts immediately (it is the
+# survival tier). Must not exceed `eat_soft_threshold`.
+eat_hard_threshold = 6
+
+# How far from a threat the flee routine tries to get, in blocks.
+flee_distance = 8.0
+
+# Health at or below which sheltering outranks a project (Demo-1 skill).
+shelter_health = 10.0
+
+# A reflex gives the body back after this many ticks even if its end condition
+# never became true.
+max_reflex_ticks = 200
+
+# `k` in "switch only when gain > k x loss" for a same-tier owner change; gain
+# and loss are in expected ticks.
+switch_gain_factor = 2.0
+
+# A reflex that ran longer than this wakes the brain. Demo-0 has no brain yet,
+# so the arbiter writes a `wake_brain` event and nothing else.
+wake_after_ticks = 40
+
+# A same-tier owner may not switch again before this many ticks. 100 ticks is
+# five seconds: no A-B-A switch inside that window.
+min_switch_ticks = 100

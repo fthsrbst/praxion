@@ -1,8 +1,23 @@
 //! The followed player's own state and inventory.
 
 use azalea_core::position::Vec3;
+use azalea_entity::{EntityDataItem, EntityDataValue};
 use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{ItemKind, MenuKind};
+
+/// The metadata index of the shared flags byte, which every entity has.
+///
+/// The layout is azalea's `AbstractEntity::apply_metadata`: index 0 is the
+/// flags byte (bit 0 on fire), index 1 the air supply in ticks. The player is a
+/// living entity, so its own `set_entity_data` uses the same indices.
+const SHARED_FLAGS_INDEX: u8 = 0;
+
+/// Bit 0 of the shared flags byte: the entity is on fire.
+const ON_FIRE_BIT: u8 = 0x1;
+
+/// The metadata index of the air supply, in ticks. Respiration raises the
+/// maximum above vanilla's 300, so only the floor is clamped.
+const AIR_SUPPLY_INDEX: u8 = 1;
 
 /// Health, food and saturation from `set_health`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -155,6 +170,11 @@ pub(crate) struct Player {
     inventory: Vec<ItemStack>,
     carried: ItemStack,
     last_click: Option<ContainerClick>,
+    /// The shared flags byte says the player is on fire. `None` until the
+    /// server sends it.
+    burning: Option<bool>,
+    /// Air supply in ticks. `None` until the server sends it.
+    air: Option<u32>,
 }
 
 impl Player {
@@ -237,6 +257,39 @@ impl Player {
 
     pub(crate) fn set_last_click(&mut self, click: ContainerClick) {
         self.last_click = Some(click);
+    }
+
+    pub(crate) fn burning(&self) -> Option<bool> {
+        self.burning
+    }
+
+    pub(crate) fn air(&self) -> Option<u32> {
+        self.air
+    }
+
+    /// Forget the own-entity facts. A respawn hands the player a new entity, so
+    /// the old flags and air would be a stale fact.
+    pub(crate) fn clear_own_facts(&mut self) {
+        self.burning = None;
+        self.air = None;
+    }
+
+    /// Fold the player's own `set_entity_data` items in. Only the two indices
+    /// the body reads as HUD facts are interpreted; everything else stays in
+    /// the packet, because the store keeps no untyped metadata for the player.
+    pub(crate) fn merge_metadata(&mut self, items: &[EntityDataItem]) {
+        for item in items {
+            match (item.index, &item.value) {
+                (SHARED_FLAGS_INDEX, EntityDataValue::Byte(flags)) => {
+                    self.burning = Some(flags & ON_FIRE_BIT != 0);
+                }
+                (AIR_SUPPLY_INDEX, EntityDataValue::Int(ticks)) => {
+                    // Vanilla lets air go negative while drowning.
+                    self.air = Some(u32::try_from(*ticks).unwrap_or(0));
+                }
+                _ => {}
+            }
+        }
     }
 }
 

@@ -2,8 +2,8 @@
 
 use azalea_core::position::Vec3;
 
-/// Sounds kept in [`World::sounds`]. A hostile or noisy stream cannot grow the
-/// ring; the oldest sound is dropped first.
+/// Sounds kept in [`crate::World::sounds`]. A hostile or noisy stream cannot
+/// grow the ring; the oldest sound is dropped first.
 pub const MAX_SOUNDS: usize = 256;
 
 /// One sound the server sent the client, placed in the world.

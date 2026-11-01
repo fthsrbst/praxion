@@ -20,9 +20,10 @@ use azalea_protocol::{
             ClientboundContainerSetContent, ClientboundContainerSetSlot, ClientboundGameEvent,
             ClientboundGamePacket, ClientboundLevelChunkWithLight, ClientboundLogin,
             ClientboundMoveEntityPos, ClientboundPlayerPosition, ClientboundRemoveEntities,
-            ClientboundSectionBlocksUpdate, ClientboundSetEntityData, ClientboundSetHealth,
-            ClientboundSetPlayerInventory, ClientboundSetTime, ClientboundTeleportEntity,
-            ServerboundClientTickEnd, ServerboundGamePacket, ServerboundMovePlayerPos,
+            ClientboundRespawn, ClientboundSectionBlocksUpdate, ClientboundSetEntityData,
+            ClientboundSetHealth, ClientboundSetPlayerInventory, ClientboundSetTime,
+            ClientboundTeleportEntity, ServerboundClientTickEnd, ServerboundGamePacket,
+            ServerboundMovePlayerPos,
             c_game_event::EventType,
             c_level_chunk_with_light::ClientboundLevelChunkPacketData,
             c_move_entity_pos_rot::{Properties, VecDelta},
@@ -642,4 +643,89 @@ fn a_section_view_reads_states_and_answers_the_palette_question() {
     world.invalidate(0, "test");
     assert!(world.section(section_pos).is_none());
     assert_eq!(world.chunk_revision(ChunkPos::new(0, 0)), None);
+}
+
+// --- The player's own entity data: burning and air (step 9, finding 2) -----
+
+/// One `set_entity_data` for `entity` with exactly these items.
+fn set_entity_data(world: &mut World, entity: i32, items: Vec<EntityDataItem>) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(entity),
+            packed_items: azalea_entity::EntityMetadataItems(items),
+        }),
+    );
+}
+
+fn shared_flags(flags: u8) -> EntityDataItem {
+    EntityDataItem {
+        index: 0,
+        value: EntityDataValue::Byte(flags),
+    }
+}
+
+fn air_supply(ticks: i32) -> EntityDataItem {
+    EntityDataItem {
+        index: 1,
+        value: EntityDataValue::Int(ticks),
+    }
+}
+
+#[test]
+fn own_entity_data_carries_burning_and_air() {
+    let mut world = active_world();
+    // No packet yet: unknown, not "safe".
+    assert_eq!(world.own_burning(), None);
+    assert_eq!(world.own_air(), None);
+
+    // Bit 0 is "on fire"; bit 1 is shift-down and must not set it.
+    set_entity_data(&mut world, 7, vec![shared_flags(0b0000_0010)]);
+    assert_eq!(world.own_burning(), Some(false));
+    assert_eq!(world.own_air(), None, "no air packet yet");
+
+    set_entity_data(&mut world, 7, vec![shared_flags(0b0000_0011), air_supply(120)]);
+    assert_eq!(world.own_burning(), Some(true));
+    assert_eq!(world.own_air(), Some(120));
+
+    // A later packet replaces only the index it names.
+    set_entity_data(&mut world, 7, vec![air_supply(300)]);
+    assert_eq!(world.own_air(), Some(300));
+    assert_eq!(world.own_burning(), Some(true), "the flags byte was not resent");
+}
+
+#[test]
+fn own_entity_data_ignores_other_entities() {
+    let mut world = active_world();
+    set_entity_data(&mut world, 21, vec![shared_flags(0b1), air_supply(10)]);
+    assert_eq!(world.own_burning(), None);
+    assert_eq!(world.own_air(), None);
+}
+
+#[test]
+fn own_air_is_clamped_at_zero_and_unknown_after_respawn() {
+    let mut world = active_world();
+    // Vanilla drives the air supply to -20 while drowning.
+    set_entity_data(&mut world, 7, vec![air_supply(-20)]);
+    assert_eq!(world.own_air(), Some(0));
+
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::Respawn(ClientboundRespawn {
+            common: spawn_info(),
+            data_to_keep: 0,
+        }),
+    );
+    assert_eq!(world.own_air(), None, "a new entity has no facts yet");
+    assert_eq!(world.own_burning(), None);
+}
+
+#[test]
+fn a_desynchronised_world_answers_no_own_fact() {
+    let mut world = active_world();
+    set_entity_data(&mut world, 7, vec![shared_flags(0b1), air_supply(5)]);
+    assert_eq!(world.own_air(), Some(5));
+    world.invalidate(0, "test");
+    assert_eq!(world.own_air(), None);
+    assert_eq!(world.own_burning(), None);
 }

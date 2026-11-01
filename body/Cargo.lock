@@ -1931,6 +1931,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-arbiter"
+version = "0.0.0"
+dependencies = [
+ "azalea-block",
+ "azalea-buf",
+ "azalea-core",
+ "azalea-entity",
+ "azalea-protocol",
+ "azalea-registry",
+ "azalea-world",
+ "praxion-decoder",
+ "praxion-eventlog",
+ "praxion-headless",
+ "praxion-interpreter",
+ "praxion-perception",
+ "praxion-planner",
+ "praxion-reflexes",
+ "praxion-rules",
+ "praxion-tee",
+ "praxion-world",
+ "uuid",
+]
+
+[[package]]
 name = "praxion-decoder"
 version = "0.0.0"
 dependencies = [
@@ -1990,9 +2014,12 @@ dependencies = [
  "azalea-block",
  "azalea-core",
  "azalea-entity",
+ "azalea-inventory",
  "azalea-physics",
  "azalea-protocol",
  "azalea-registry",
+ "azalea-world",
+ "indexmap",
  "praxion-decoder",
  "praxion-manifest",
  "praxion-tee",
@@ -2038,6 +2065,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-planner"
+version = "0.0.0"
+dependencies = [
+ "azalea-block",
+ "azalea-buf",
+ "azalea-core",
+ "azalea-entity",
+ "azalea-physics",
+ "azalea-protocol",
+ "azalea-registry",
+ "azalea-world",
+ "indexmap",
+ "praxion-decoder",
+ "praxion-gamedata",
+ "praxion-headless",
+ "praxion-perception",
+ "praxion-rules",
+ "praxion-tee",
+ "praxion-world",
+ "rustc-hash",
+ "uuid",
+]
+
+[[package]]
+name = "praxion-primitives"
+version = "0.0.0"
+dependencies = [
+ "azalea-block",
+ "azalea-core",
+ "azalea-entity",
+ "azalea-inventory",
+ "azalea-registry",
+ "praxion-eventlog",
+ "praxion-gamedata",
+ "praxion-headless",
+ "praxion-interpreter",
+ "praxion-perception",
+ "praxion-planner",
+ "praxion-receipts",
+ "praxion-rules",
+ "praxion-world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "praxion-receipts"
 version = "0.0.0"
 dependencies = [
@@ -2052,6 +2125,29 @@ dependencies = [
  "praxion-rules",
  "praxion-tee",
  "praxion-world",
+]
+
+[[package]]
+name = "praxion-reflexes"
+version = "0.0.0"
+dependencies = [
+ "azalea-block",
+ "azalea-buf",
+ "azalea-core",
+ "azalea-entity",
+ "azalea-inventory",
+ "azalea-protocol",
+ "azalea-registry",
+ "azalea-world",
+ "praxion-decoder",
+ "praxion-headless",
+ "praxion-perception",
+ "praxion-planner",
+ "praxion-tee",
+ "praxion-world",
+ "serde",
+ "toml",
+ "uuid",
 ]
 
 [[package]]

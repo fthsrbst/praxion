@@ -1,0 +1,29 @@
+[package]
+name = "praxion-arbiter"
+description = "The owner of the body: tiers, soft and hard thresholds, the intent stack and reflex preemption"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+praxion-eventlog = { path = "../eventlog" }
+praxion-headless = { path = "../headless" }
+praxion-interpreter = { path = "../interpreter" }
+praxion-perception = { path = "../perception" }
+praxion-planner = { path = "../planner" }
+praxion-reflexes = { path = "../reflexes" }
+praxion-rules = { path = "../rules" }
+praxion-world = { path = "../world" }
+azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+
+[dev-dependencies]
+praxion-decoder = { path = "../decoder" }
+praxion-tee = { path = "../tee" }
+azalea-block = { path = "../../../third_party/azalea/azalea-block" }
+azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+azalea-world = { path = "../../../third_party/azalea/azalea-world" }
+uuid = "1.23.4"
