@@ -1,0 +1,17 @@
+diff --git a/azalea-protocol/src/packets/game/c_swing_animation.rs b/azalea-protocol/src/packets/game/c_swing_animation.rs
+index 5e2c790c..6feaaf6a 100644
+--- a/azalea-protocol/src/packets/game/c_swing_animation.rs
++++ b/azalea-protocol/src/packets/game/c_swing_animation.rs
+@@ -5,8 +5,12 @@ use azalea_protocol_macros::ClientboundGamePacket;
+ 
+ use crate::packets::game::s_interact::InteractionHand;
+ 
++// Praxion local patch (26.3 layout, read from the 26.3 server's
++// ClientboundSwingAnimationPacket STREAM_CODEC): the entity id is a VarInt, not
++// a fixed i32. Seen in corpus3 as `7b c4 1c 00 01 06` for entity 3652.
+ #[derive(Clone, Debug, AzBuf, PartialEq, ClientboundGamePacket)]
+ pub struct ClientboundSwingAnimation {
++    #[var]
+     pub entity_id: MinecraftEntityId,
+     pub hand: InteractionHand,
+     pub animation: SwingAnimation,
