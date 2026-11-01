@@ -10,6 +10,7 @@ spikes/round0/client-natives/
 spikes/round0/blocks-truth*.txt
 spikes/azalea/
 spikes/.toolchain/
+spikes/.cargo/config.toml
 spikes/round0/server/
 spikes/round0/*.jar
 spikes/**/*.prxcap

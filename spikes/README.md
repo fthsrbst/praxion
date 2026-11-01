@@ -16,6 +16,9 @@ Results go to that file, not here.
 
 Toolchain: `nightly-2026-08-20`, host `x86_64-pc-windows-gnu` (no MSVC on this PC).
 
+Setup (idempotent, one command): `python spikes/setup.py`; `python spikes/setup.py --check` only
+reports. Details: `SETUP.md`.
+
 ## Shared contracts
 
 ### Clock
