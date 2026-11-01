@@ -152,6 +152,28 @@ fn world_across_chunks(chunks: i32, blocks: &[(BlockPos, BlockState)]) -> World 
     world
 }
 
+/// The 3 x 3 chunks around the origin, so a radius-8 sweep at (0.5, ., 0.5)
+/// never runs past a loaded chunk.
+fn world_around(blocks: &[(BlockPos, BlockState)]) -> World {
+    let mut world = base_world();
+    for x in -1..=1 {
+        for z in -1..=1 {
+            if x == 0 && z == 0 {
+                continue;
+            }
+            world.apply_clientbound_play(
+                0,
+                &ClientboundGamePacket::LevelChunkWithLight(chunk_packet(x, z)),
+            );
+        }
+    }
+    set_player(&mut world, Vec3::new(0.5, FEET_Y, 0.5));
+    for (pos, state) in blocks {
+        set_block(&mut world, *pos, *state);
+    }
+    world
+}
+
 fn find_block(name: &str, props: &[(&str, &str)]) -> BlockState {
     for id in 0..=u32::from(u16::MAX) {
         let Ok(state) = BlockState::try_from(id) else {
@@ -983,6 +1005,147 @@ fn cell_probes(cell: BlockPos) -> Vec<(Vec3, Vec3)> {
         local((0.0, 0.0, -1.0), (0.0, 0.0, 2.0)),
         local((2.0, 0.5, 0.5), (-2.0, 0.0, 0.0)),
     ]
+}
+
+// --- The known map and the per-tick sweep ------------------------------------
+
+fn flat_floor(y: i32, radius: i32) -> Vec<(BlockPos, BlockState)> {
+    let mut blocks = Vec::new();
+    for x in -radius..=radius {
+        for z in -radius..=radius {
+            blocks.push((BlockPos::new(x, y, z), stone()));
+        }
+    }
+    blocks
+}
+
+#[test]
+fn the_sweep_fills_the_known_map_and_every_cell_was_reachable() {
+    let world = world_around(&flat_floor(62, 8));
+    let config = Config {
+        sweep_radius: 8,
+        ray_budget: 4_000,
+        reflex_reserve: 1_000,
+        ..Config::default()
+    };
+    let mut p = Perception::new(config);
+    let mut rays = 0;
+    let mut probes = 0;
+    for _ in 0..10 {
+        p.begin_tick(&world);
+        let sweep = p.sweep(&world);
+        rays += sweep.rays;
+        probes += sweep.probes;
+    }
+    assert!(rays > 0, "the sweep must spend the leftover rays");
+    assert!(
+        p.memory_len() > 1_000,
+        "only {} cells became known after {rays} rays and {probes} probes",
+        p.memory_len()
+    );
+    assert!(
+        p.known(BlockPos::new(4, 64, 0)).is_some(),
+        "open air near the player must be known"
+    );
+
+    // Brute check: every cell the map claims was reached by a ray from the
+    // eye it was seen at (the eye never moved in this test).
+    let eye = p.eye(&world).expect("eye");
+    let mut table = SightTable::new();
+    let mut reader = CellReader::new();
+    for (pos, _) in p.known.seen_entries() {
+        reader.prime(&world, pos);
+        let mut points = [Vec3::ZERO; 7];
+        let count = crate::sight::target_points(&world, pos, &mut table, &mut points, &mut reader);
+        let reached = points[..count].iter().any(|point| {
+            let mut crossed = CrossedChunks::default();
+            crate::sight::line_of_sight(&world, eye, *point, pos, &mut table, &mut crossed)
+        });
+        assert!(
+            reached,
+            "{pos:?} is in the known map but no ray reaches it"
+        );
+    }
+}
+
+#[test]
+fn the_sweep_never_spends_the_reflex_reserve() {
+    let world = world_with(&flat_floor(62, 8));
+    let config = Config {
+        sweep_radius: 8,
+        ray_budget: 10,
+        reflex_reserve: 4,
+        ..Config::default()
+    };
+    let mut p = Perception::new(config);
+    p.begin_tick(&world);
+    assert_eq!(
+        p.block(Caller::Other, &world, BlockPos::new(4, 65, 0))
+            .provenance(),
+        Some(Provenance::Sight),
+        "a caller spends one ray first"
+    );
+    let sweep = p.sweep(&world);
+    assert!(sweep.rays > 0);
+    assert_eq!(p.rays_used_this_tick(), 6, "only the unreserved share is spendable");
+    assert_eq!(
+        p.rays_remaining(Caller::Reflex),
+        4,
+        "the reflex reserve is untouched"
+    );
+    assert!(p.rays_remaining(Caller::Other) == 0);
+}
+
+#[test]
+fn a_hidden_cell_changing_keeps_its_old_state_and_age() {
+    let target = BlockPos::new(4, 65, 0);
+    let world = world_with(&[(target, stone())]);
+    let config = Config { sweep_radius: 8, ..Config::default() };
+    let mut p = Perception::new(config);
+    p.begin_tick(&world);
+    p.sweep(&world);
+    assert_eq!(p.known(target).map(|seen| seen.state), Some(stone()));
+
+    // A wall appears between the eye and the target, and the hidden target
+    // changes. The sweep may test it again, but no ray reaches it.
+    let mut world = world;
+    set_block(&mut world, BlockPos::new(2, 65, 0), stone());
+    set_block(&mut world, target, find_block("dirt", &[]));
+    p.begin_tick(&world);
+    p.sweep(&world);
+    let (remembered, age) = p.remembered(target).expect("the old sighting stays");
+    assert_eq!(remembered.state, stone(), "an unseen change is never known");
+    assert!(age >= 1, "the fact keeps its age");
+}
+
+#[test]
+fn the_known_map_keeps_the_sections_within_its_bound() {
+    // Radius 16 keeps 3 * 3 * 3 = 27 sections. Sweeping a much larger radius
+    // must still respect the bound (the sweep's own radius is the config's
+    // sweep_radius, so move the player between sweeps).
+    let config = Config {
+        known_radius: 16,
+        sweep_radius: 8,
+        ray_budget: 4_000,
+        reflex_reserve: 1_000,
+        ..Config::default()
+    };
+    let mut world = world_across_chunks(10, &flat_floor(62, 8));
+    let mut p = Perception::new(config);
+    for x in [0, 16, 32, 48, 64] {
+        set_player(&mut world, Vec3::new(f64::from(x) + 0.5, FEET_Y, 0.5));
+        for _ in 0..5 {
+            p.begin_tick(&world);
+            p.sweep(&world);
+        }
+    }
+    assert!(
+        p.known_sections() <= p.known_section_capacity(),
+        "{} sections exceed the bound {}",
+        p.known_sections(),
+        p.known_section_capacity()
+    );
+    assert_eq!(p.known_section_capacity(), 27);
 }
 
 #[test]

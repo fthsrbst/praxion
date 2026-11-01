@@ -17,8 +17,8 @@
 mod answer;
 mod config;
 mod hash;
+mod known;
 mod ledger;
-mod memory;
 mod see_through;
 mod sight;
 
@@ -36,12 +36,13 @@ use praxion_world::{BlockPos, BlockState, Entity, Health, ItemStack, Vec3, World
 
 pub use answer::{Answer, Caller, Provenance, Reason};
 pub use config::{
-    Config, DEFAULT_ENTITY_CAP, DEFAULT_EYE_HEIGHT, DEFAULT_HEARING_RADIUS, DEFAULT_MEMORY_CAPACITY,
-    DEFAULT_MAX_LIST_RESULTS, DEFAULT_MAX_REGION_BLOCKS, DEFAULT_RANGE, DEFAULT_RAY_BUDGET,
-    DEFAULT_REFLEX_RESERVE, DEFAULT_SNEAK_EYE_HEIGHT,
+    Config, DEFAULT_ENTITY_CAP, DEFAULT_EYE_HEIGHT, DEFAULT_HEARING_RADIUS, DEFAULT_KNOWN_RADIUS,
+    DEFAULT_MAX_LIST_RESULTS, DEFAULT_MAX_REGION_BLOCKS, DEFAULT_MEMORY_CAPACITY, DEFAULT_RANGE,
+    DEFAULT_RAY_BUDGET, DEFAULT_REFLEX_RESERVE, DEFAULT_SNEAK_EYE_HEIGHT, DEFAULT_SWEEP_RADIUS,
+    DEFAULT_SWEEP_RETRY_TICKS, DEFAULT_SWEEP_STALE_TICKS,
 };
+pub use known::Remembered;
 pub use ledger::{FactKind, Ledger, LedgerEntry, QueryKind};
-pub use memory::Remembered;
 
 use hash::FxBuildHasher;
 use sight::{CellReader, CrossedChunks, SightTable};
@@ -53,6 +54,17 @@ pub struct BlockFact {
     pub state: BlockState,
     pub kind: BlockKind,
     pub distance: f64,
+}
+
+/// What one sweep spent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Sweep {
+    /// Rays cast by the sweep, all of them from `Caller::Other`'s share.
+    pub rays: u32,
+    /// Cells whose visibility was tested.
+    pub probes: usize,
+    /// Cells a ray reached and the sweep wrote to the known map.
+    pub seen: usize,
 }
 
 /// An entity fact returned by a query.
@@ -197,14 +209,19 @@ pub struct Perception {
     block_cache: HashMap<BlockCacheKey, BlockCacheEntry, FxBuildHasher>,
     entity_cache: HashMap<EntityCacheKey, EntityCacheEntry, FxBuildHasher>,
     last_eye_cell: Option<BlockPos>,
-    memory: memory::Memory,
+    known: known::KnownMap,
     ledger: Ledger,
 }
 
 impl Perception {
     pub fn new(config: Config) -> Self {
         Self {
-            memory: memory::Memory::new(config.memory_capacity),
+            known: known::KnownMap::new(
+                config.known_radius,
+                config.memory_capacity,
+                config.sweep_stale_ticks,
+                config.sweep_retry_ticks,
+            ),
             config,
             world_valid: false,
             last_followed: None,
@@ -255,7 +272,7 @@ impl Perception {
             || self.last_followed.is_some_and(|last| Some(last) != followed)
             || self.last_dimension.as_deref().is_some_and(|last| Some(last) != dimension.as_deref())
         {
-            self.memory.clear();
+            self.known.clear();
             self.block_cache.clear();
             self.entity_cache.clear();
             self.last_eye_cell = None;
@@ -307,6 +324,17 @@ impl Perception {
         self.config.remaining(caller, self.rays_other, self.rays_reflex)
     }
 
+    /// Write a cell a ray reached to the known map, with the chunk revision it
+    /// was checked against.
+    fn record_seen(&mut self, world: &World, pos: BlockPos, state: BlockState, eye: Vec3) {
+        let focus = section_key_of(eye.to_block_pos_floor());
+        let revision = world
+            .chunk_revision(praxion_world::ChunkPos::from(pos))
+            .unwrap_or(0);
+        self.known
+            .record_seen(pos, state, self.tick, revision, focus);
+    }
+
     /// Account one cast ray to `caller`.
     fn spend_ray(&mut self, caller: Caller) {
         match caller {
@@ -329,8 +357,26 @@ impl Perception {
         &self.ledger
     }
 
+    /// Cells a ray has reached and the known map keeps.
     pub fn memory_len(&self) -> usize {
-        self.memory.len()
+        self.known.seen_len()
+    }
+
+    /// Sections the known map currently holds (its bound is the number of
+    /// sections within [`Config::known_radius`]).
+    pub fn known_sections(&self) -> usize {
+        self.known.sections_len()
+    }
+
+    /// The known map's section bound, derived from [`Config::known_radius`].
+    pub fn known_section_capacity(&self) -> usize {
+        known::section_capacity(self.config.known_radius)
+    }
+
+    /// A block state from the known map, with the tick it was last seen. Spends
+    /// no ray: this is what the planner reads.
+    pub fn known(&self, pos: BlockPos) -> Option<Remembered> {
+        self.known.get(pos)
     }
 
     /// The world's eye position: player position plus the current eye height.
@@ -366,7 +412,7 @@ impl Perception {
         let mut reader = CellReader::new();
         match self.visible_block(world, caller, eye, pos, state, &mut reader) {
             Ok(()) => {
-                self.memory.record(pos, state, self.tick);
+                self.record_seen(world, pos, state, eye);
                 let kind = sight::kind(state);
                 Answer::known(
                     BlockFact { pos, state, kind, distance: eye.distance_to(pos.center()) },
@@ -379,7 +425,7 @@ impl Perception {
                 if reason == Reason::OutOfSight {
                     self.ledger.record(QueryKind::Block, FactKind::BlockState, self.tick);
                 }
-                match self.memory.get(pos) {
+                match self.known.get(pos) {
                     Some(remembered) => {
                         let kind = sight::kind(remembered.state);
                         Answer::known(
@@ -458,8 +504,9 @@ impl Perception {
                         match self.visible_block(world, caller, eye, pos, state, &mut reader) {
                             Ok(()) => {
                                 // A block a region query sees by sight is seen
-                                // like one `block` answers, so memory keeps it.
-                                self.memory.record(pos, state, self.tick);
+                                // like one `block` answers, so the known map
+                                // keeps it.
+                                self.record_seen(world, pos, state, eye);
                                 found.push(BlockFact { pos, state, kind, distance });
                                 if found.len() >= self.config.max_list_results {
                                     self.ledger.record(
@@ -574,7 +621,7 @@ impl Perception {
             };
             match self.visible_block(world, caller, eye, pos, state, &mut reader) {
                 Ok(()) => {
-                    self.memory.record(pos, state, self.tick);
+                    self.record_seen(world, pos, state, eye);
                     return Answer::known(
                         BlockFact {
                             pos,
@@ -854,10 +901,82 @@ impl Perception {
     /// A remembered block by position, without a ray and without a ledger
     /// entry. `None` when nothing was ever seen there.
     pub fn remembered(&self, pos: BlockPos) -> Option<(Remembered, u64)> {
-        self.memory.get(pos).map(|remembered| {
+        self.known.get(pos).map(|remembered| {
             let age = self.tick.saturating_sub(remembered.seen_tick);
             (remembered, age)
         })
+    }
+
+    /// Spend the ray budget the callers left (never the reflex reserve) on the
+    /// space around the player: nearest sections first, rotating inside each
+    /// distance shell, and write every cell a ray reaches to the known map.
+    ///
+    /// Call this once per tick, after the callers have made their queries. A
+    /// cell that is known and fresh is skipped; a cell whose chunk changed or
+    /// whose sighting is stale is probed again. A cell no ray reaches is only
+    /// remembered as a miss, never as a block fact.
+    pub fn sweep(&mut self, world: &World) -> Sweep {
+        let mut stats = Sweep::default();
+        if !self.world_valid {
+            return stats;
+        }
+        let Some(eye) = self.eye(world) else {
+            return stats;
+        };
+        let eye_cell = eye.to_block_pos_floor();
+        let focus = section_key_of(eye_cell);
+        let radius = self.config.sweep_radius.min(self.config.range);
+        let rays_before = self.rays_other;
+        let mut reader = CellReader::new();
+        let shells = swept_sections(eye, radius, self.tick);
+
+        'outer: for shell in shells {
+            for key in shell {
+                let base = BlockPos::new(key.0 * 16, key.1 * 16, key.2 * 16);
+                let cells = 16 * 16 * 16;
+                let start = (self.tick as usize).wrapping_add(section_seed(key)) % cells;
+                for offset in 0..cells {
+                    if self.remaining_rays(Caller::Other) == 0 {
+                        break 'outer;
+                    }
+                    let index = (start + offset) % cells;
+                    let pos = BlockPos::new(
+                        base.x + (index & 15) as i32,
+                        base.y + ((index >> 8) & 15) as i32,
+                        base.z + ((index >> 4) & 15) as i32,
+                    );
+                    if eye.distance_to(pos.center()) > f64::from(radius) {
+                        continue;
+                    }
+                    let Some(revision) = world
+                        .chunk_revision(praxion_world::ChunkPos::from(pos))
+                    else {
+                        continue;
+                    };
+                    if !self.known.needs_probe(pos, self.tick, revision) {
+                        continue;
+                    }
+                    let Some(state) = world.block_state(pos) else {
+                        continue;
+                    };
+                    stats.probes += 1;
+                    match self.visible_block(world, Caller::Other, eye, pos, state, &mut reader) {
+                        Ok(()) => {
+                            self.known
+                                .record_seen(pos, state, self.tick, revision, focus);
+                            stats.seen += 1;
+                        }
+                        Err(Reason::OutOfSight) => {
+                            self.known.record_miss(pos, self.tick, revision, focus);
+                        }
+                        Err(Reason::Budget) => break 'outer,
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        stats.rays = self.rays_other.saturating_sub(rays_before);
+        stats
     }
 
     /// `Ok(())` when the block is visible now; otherwise the reason it is not.
@@ -1176,6 +1295,95 @@ fn sections_near(eye: Vec3, region: BlockRegion) -> Vec<(f64, ChunkSectionPos)> 
     }
     sections.sort_by(|a, b| a.0.total_cmp(&b.0));
     sections
+}
+
+/// The section key `(x, y, z)` of a block position.
+fn section_key_of(pos: BlockPos) -> (i32, i32, i32) {
+    (pos.x >> 4, pos.y >> 4, pos.z >> 4)
+}
+
+/// A per-section rotation seed, so two sections do not scan their cells in the
+/// same order.
+fn section_seed(key: (i32, i32, i32)) -> usize {
+    let mut hash = 0x9E37_79B9_7F4A_7C15_u64;
+    for word in [key.0, key.1, key.2] {
+        hash = (hash ^ u64::from(word as u32)).wrapping_mul(0x1000_0000_01B3);
+        hash ^= hash >> 29;
+    }
+    (hash >> 32) as usize
+}
+
+/// The sections the sweep walks, grouped into distance shells: nearest shell
+/// first, and inside a shell a per-tick rotation so one direction cannot take
+/// the whole budget every tick.
+fn swept_sections(eye: Vec3, radius: u32, tick: u64) -> Vec<Vec<(i32, i32, i32)>> {
+    let r = i32::try_from(radius).unwrap_or(i32::MAX);
+    let eye_cell = eye.to_block_pos_floor();
+    let first = (
+        eye_cell.x.saturating_sub(r) >> 4,
+        eye_cell.y.saturating_sub(r) >> 4,
+        eye_cell.z.saturating_sub(r) >> 4,
+    );
+    let last = (
+        eye_cell.x.saturating_add(r) >> 4,
+        eye_cell.y.saturating_add(r) >> 4,
+        eye_cell.z.saturating_add(r) >> 4,
+    );
+    let radius_sq = f64::from(radius) * f64::from(radius);
+    let mut sections = Vec::new();
+    for x in first.0..=last.0 {
+        for y in first.1..=last.1 {
+            for z in first.2..=last.2 {
+                let base = BlockPos::new(
+                    x.saturating_mul(16),
+                    y.saturating_mul(16),
+                    z.saturating_mul(16),
+                );
+                let cells = SectionCells {
+                    base,
+                    min: BlockPos::new(
+                        base.x.max(eye_cell.x.saturating_sub(r)),
+                        base.y.max(eye_cell.y.saturating_sub(r)),
+                        base.z.max(eye_cell.z.saturating_sub(r)),
+                    ),
+                    max: BlockPos::new(
+                        base.x.saturating_add(15).min(eye_cell.x.saturating_add(r)),
+                        base.y.saturating_add(15).min(eye_cell.y.saturating_add(r)),
+                        base.z.saturating_add(15).min(eye_cell.z.saturating_add(r)),
+                    ),
+                };
+                let distance_sq = lower_bound_sq(eye, cells);
+                if distance_sq <= radius_sq {
+                    sections.push((distance_sq, (x, y, z)));
+                }
+            }
+        }
+    }
+    sections.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut shells: Vec<Vec<(i32, i32, i32)>> = Vec::new();
+    let mut current = Vec::new();
+    let mut current_shell = -1_i32;
+    for (distance_sq, key) in sections {
+        let shell = distance_sq.sqrt().floor() as i32;
+        if shell != current_shell {
+            if !current.is_empty() {
+                shells.push(std::mem::take(&mut current));
+            }
+            current_shell = shell;
+        }
+        current.push(key);
+    }
+    if !current.is_empty() {
+        shells.push(current);
+    }
+    for shell in &mut shells {
+        if !shell.is_empty() {
+            let start = (tick as usize) % shell.len();
+            shell.rotate_left(start);
+        }
+    }
+    shells
 }
 
 /// The squared distance from `eye` to the nearest cell center in `cells`.

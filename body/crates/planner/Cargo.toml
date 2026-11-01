@@ -1,0 +1,30 @@
+[package]
+name = "praxion-planner"
+description = "A* over block cells: Azalea's lifted core, our own moves, and the path follower"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+praxion-gamedata = { path = "../gamedata" }
+praxion-headless = { path = "../headless" }
+praxion-perception = { path = "../perception" }
+praxion-rules = { path = "../rules" }
+praxion-world = { path = "../world" }
+azalea-block = { path = "../../../third_party/azalea/azalea-block" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
+azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+azalea-physics = { path = "../../../third_party/azalea/azalea-physics" }
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+# Two crates of Azalea's lifted A* core (`astar/nodemap.rs`).
+indexmap = "2.14"
+rustc-hash = "2.1"
+
+[dev-dependencies]
+praxion-decoder = { path = "../decoder" }
+praxion-tee = { path = "../tee" }
+azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-world = { path = "../../../third_party/azalea/azalea-world" }
+uuid = "1.23.4"

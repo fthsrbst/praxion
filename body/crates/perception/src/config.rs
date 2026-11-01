@@ -26,8 +26,24 @@ pub const DEFAULT_REFLEX_RESERVE: u32 = 1_000;
 /// Distinct tracked entities whose visibility may be computed per tick.
 pub const DEFAULT_ENTITY_CAP: u32 = 64;
 
-/// Remembered block positions kept, least recently used dropped first.
-pub const DEFAULT_MEMORY_CAPACITY: usize = 16_384;
+/// Cells the known map may hold at once; `0` keeps no memory at all. This is a
+/// safety cap beside the section radius, sized well above a 32-block sweep.
+pub const DEFAULT_MEMORY_CAPACITY: usize = 1_000_000;
+
+/// Blocks around the player whose seen sections the known map keeps. Sections
+/// are evicted farthest first when the bound is exceeded.
+pub const DEFAULT_KNOWN_RADIUS: u32 = 96;
+
+/// Blocks around the player the sweep probes. Near enough that a few seconds
+/// of leftover ray budget cover the space the planner is likely to use.
+pub const DEFAULT_SWEEP_RADIUS: u32 = 32;
+
+/// A known cell older than this is probed again.
+pub const DEFAULT_SWEEP_STALE_TICKS: u64 = 100;
+
+/// A cell the rays did not reach is not probed again for this many ticks, so
+/// hidden cells cannot starve the sweep.
+pub const DEFAULT_SWEEP_RETRY_TICKS: u64 = 40;
 
 /// Largest block volume a `blocks_in` request may name.
 pub const DEFAULT_MAX_REGION_BLOCKS: u64 = 1_000_000;
@@ -45,7 +61,17 @@ pub struct Config {
     pub ray_budget: u32,
     pub reflex_reserve: u32,
     pub entity_cap: u32,
+    /// Cells the known map may hold at once; `0` disables memory. The section
+    /// radius is the main bound; this is a second, exact cap.
     pub memory_capacity: usize,
+    /// Radius whose chunk sections the known map keeps.
+    pub known_radius: u32,
+    /// Radius the per-tick sweep probes.
+    pub sweep_radius: u32,
+    /// Age after which a known cell is probed again.
+    pub sweep_stale_ticks: u64,
+    /// Delay before a cell no ray reached is probed again.
+    pub sweep_retry_ticks: u64,
     pub max_region_blocks: u64,
     pub max_list_results: usize,
 }
@@ -61,6 +87,10 @@ impl Default for Config {
             reflex_reserve: DEFAULT_REFLEX_RESERVE,
             entity_cap: DEFAULT_ENTITY_CAP,
             memory_capacity: DEFAULT_MEMORY_CAPACITY,
+            known_radius: DEFAULT_KNOWN_RADIUS,
+            sweep_radius: DEFAULT_SWEEP_RADIUS,
+            sweep_stale_ticks: DEFAULT_SWEEP_STALE_TICKS,
+            sweep_retry_ticks: DEFAULT_SWEEP_RETRY_TICKS,
             max_region_blocks: DEFAULT_MAX_REGION_BLOCKS,
             max_list_results: DEFAULT_MAX_LIST_RESULTS,
         }
