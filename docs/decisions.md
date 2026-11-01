@@ -7,6 +7,17 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 All on Claude's recommendation.
 
+- **Child-skill failures count toward the parent rule's failure streak, and skills explore with a
+  frontier `explore` primitive.** Live runs from a free spawn livelocked: a child's `failed(kind)` only
+  made the calling rule ineligible for one tick, so the parent re-called the same child forever.
+  Now a child's `failed(kind)` counts as one failure of the calling rule; three in a row fail the
+  parent with that kind (same rule as primitives). Exploration: a new discrete-goal primitive
+  `explore(target)` (block or `#tag`) walks toward the nearest frontier of the perception known map
+  (known walkable cell next to unknown cells), preferring frontiers away from where it already
+  searched, until perception reports the target or its tick budget runs out (`failed(not_found)`).
+  Gathering skills get a rule `not near(T, R) -> explore(T)` below the mining rule. Reason: the
+  architecture's "exploration follows from perception" needs a mover that makes unknown cells known;
+  `observe` only looks. Rules out: a larger blind search radius in `mine`, and world-seed knowledge. (Claude.)
 - **Demo-0 data path: the headless body connects through the forwarder, and the world model is fed
   only by the forwarder's tee.** The headless client writes packets (plus the minimal protocol replies
   it must send itself); it never feeds perception. Reason: decoder, world model and perception stay
