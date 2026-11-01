@@ -9,6 +9,13 @@ Observed 26.3 output formats (captured in ``tests/fixtures/observed-26.3.txt``):
   ``time query daytime``  -> invalid in 26.3 (there is no ``minecraft:daytime`` timeline)
   ``execute if block``    -> ``Test passed`` / ``Test failed``
   ``scoreboard players get Steve praxion_deaths`` -> ``Steve has 5 [praxion_deaths]``
+  ``data get entity`` inventory ->
+  ``[{count: 5, Slot: 0b, id: "minecraft:oak_log"}]``: ``count`` before ``id``,
+  and item components may nest braces, commas and quoted strings.
+
+The inventory reply is SNBT, so :meth:`Referee.player_inventory` splits the list
+into entries at top-level commas only, letting each entry carry its own ``id``
+and ``count`` in any order.
 """
 
 from __future__ import annotations
@@ -87,20 +94,133 @@ class Referee:
             raise ValueError(f"could not parse pos from: {out!r}")
         return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
+    # ------------------------------------------------------------------ #
+    # SNBT helpers (inventory replies)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _snbt_parts(text: str, separator: str = ",") -> list:
+        """Split ``text`` at ``separator`` characters outside quotes and brackets.
+
+        SNBT item components can contain their own braces, brackets, commas and
+        quoted strings, so a plain ``text.split(",")`` would tear entries apart.
+        """
+        parts = []
+        start = 0
+        depth = 0
+        quote = None
+        escaped = False
+        for index, ch in enumerate(text):
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in "\"'":
+                quote = ch
+            elif ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+            elif ch == separator and depth == 0:
+                parts.append(text[start:index])
+                start = index + 1
+        parts.append(text[start:])
+        return parts
+
+    @staticmethod
+    def _snbt_list_body(text: str) -> Optional[str]:
+        """The body of the first SNBT list in ``text`` (``[]`` -> ``""``)."""
+        start = text.find("[")
+        if start < 0:
+            return None
+        depth = 0
+        quote = None
+        escaped = False
+        for index in range(start, len(text)):
+            ch = text[index]
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in "\"'":
+                quote = ch
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start + 1:index]
+        # Unbalanced reply: no trustworthy entries.
+        return None
+
+    @staticmethod
+    def _snbt_unquote(value: str) -> Optional[str]:
+        """A string value without its SNBT quotes; ``None`` when empty."""
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+            out = []
+            index = 0
+            while index < len(value):
+                if value[index] == "\\" and index + 1 < len(value):
+                    out.append(value[index + 1])
+                    index += 2
+                else:
+                    out.append(value[index])
+                    index += 1
+            value = "".join(out)
+        elif not value:
+            return None
+        return value or None
+
+    @staticmethod
+    def _snbt_int(value: str) -> Optional[int]:
+        """A numeric value, ignoring an SNBT suffix such as the ``b`` in ``0b``."""
+        m = re.match(r"-?\d+", value.strip())
+        return int(m.group(0)) if m else None
+
+    @classmethod
+    def _snbt_fields(cls, entry: str) -> Dict[str, str]:
+        """The top-level ``key: value`` pairs of one ``{...}`` entry."""
+        body = entry.strip()
+        if body.startswith("{") and body.endswith("}"):
+            body = body[1:-1]
+        fields: Dict[str, str] = {}
+        for part in cls._snbt_parts(body):
+            key, sep, value = part.partition(":")
+            if not sep:
+                continue
+            key = key.strip()
+            if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+                key = key[1:-1]
+            fields[key] = value.strip()
+        return fields
+
     def player_inventory(self, player: Optional[str] = None) -> Dict[str, int]:
         p = player or self.player
         if p is None:
             raise ValueError("player name required")
         out = self._cmd(f"data get entity {p} Inventory")
         result: Dict[str, int] = {}
-        # Each inventory entry: {... id:"minecraft:stone", count:5 ...}.
-        # Find all id/count pairs by scanning for id:"..." then the nearest count.
-        for m in re.finditer(r'id:\s*"([^"]+)"', out):
-            start = m.start()
-            window = out[start:start + 200]
-            cm = re.search(r'count:\s*(\d+)', window)
-            count = int(cm.group(1)) if cm else 1
-            item = m.group(1)
+        body = self._snbt_list_body(out)
+        if body is None:
+            return result
+        for entry in self._snbt_parts(body):
+            fields = self._snbt_fields(entry)
+            item = self._snbt_unquote(fields["id"]) if "id" in fields else None
+            if item is None:
+                continue
+            # 26.3 always sends ``count``; a missing one means a single item.
+            count = self._snbt_int(fields["count"]) if "count" in fields else 1
+            if count is None:
+                count = 1
             result[item] = result.get(item, 0) + count
         return result
 

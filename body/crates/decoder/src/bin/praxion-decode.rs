@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use praxion_decoder::{Decoder, Dir, Event, Packet, State};
 use praxion_tee::Reader;
-use praxion_world::{BlockPos, World};
+use praxion_world::{BlockPos, ItemStack, World};
 
 const USAGE: &str = "usage: praxion-decode <file.prxcap> [--follow-conn N] \
                      [--block X Y Z]... [--summary-json out.json]";
@@ -144,6 +144,40 @@ fn json_string(value: &str) -> String {
 
 fn json_option(value: Option<String>) -> String {
     value.unwrap_or_else(|| "null".to_owned())
+}
+
+/// Item counts over the populated inventory slots, keyed by `minecraft:` id.
+///
+/// Empty slots are skipped; every stack of the same item adds its count, so
+/// the result is what an oracle compares with `data get entity ... Inventory`.
+fn inventory_counts(inventory: &[ItemStack]) -> BTreeMap<String, i64> {
+    let mut counts = BTreeMap::new();
+    for stack in inventory {
+        if stack.is_present() {
+            *counts.entry(stack.kind().to_str().to_owned()).or_insert(0) +=
+                i64::from(stack.count());
+        }
+    }
+    counts
+}
+
+/// Entity counts by `minecraft:` type id, over the entities the followed
+/// connection still tracks.
+fn entity_type_counts(world: &World) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for entity in world.entities() {
+        *counts.entry(entity.kind().to_str().to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// A JSON object of string keys to numeric counts, sorted by key.
+fn json_counts<T: std::fmt::Display>(counts: &BTreeMap<String, T>) -> String {
+    let entries: Vec<String> = counts
+        .iter()
+        .map(|(key, count)| format!("{}:{count}", json_string(key)))
+        .collect();
+    format!("{{{}}}", entries.join(","))
 }
 
 fn main() -> ExitCode {
@@ -402,9 +436,12 @@ fn main() -> ExitCode {
             None => "{\"valid\":true}".to_owned(),
             Some(reason) => format!("{{\"valid\":false,\"reason\":{}}}", json_string(reason)),
         };
+        let inventory = inventory_counts(world.inventory());
+        let entity_types = entity_type_counts(&world);
         let summary = format!(
             "{{\"capture\":{},\"tee_version\":{},\"records\":{},\"packets\":{},\"groups\":[{}],\
              \"desyncs\":[{}],\"decode_failures\":{},\
+             \"inventory\":{},\"entity_types\":{},\
              \"world\":{{\"status\":{status},\"dimension\":{dimension},\"followed_connection\":{},\
              \"chunks\":{},\"entities\":{},\"game_time\":{},\"day_time\":{},\"tick\":{}}},\
              \"player\":{{\"entity_id\":{},\"position\":{position},\"yaw\":{},\"pitch\":{},\
@@ -419,6 +456,8 @@ fn main() -> ExitCode {
             groups.join(","),
             desyncs.join(","),
             run.failures,
+            json_counts(&inventory),
+            json_counts(&entity_types),
             json_option(world.followed().map(|id| id.to_string())),
             world.chunk_count(),
             world.entities().count(),
@@ -447,5 +486,45 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azalea_inventory::ItemStack;
+    use azalea_registry::builtin::ItemKind;
+
+    #[test]
+    fn inventory_counts_sum_populated_slots_by_item() {
+        let inventory = [
+            ItemStack::new(ItemKind::OakLog, 5),
+            ItemStack::Empty,
+            ItemStack::new(ItemKind::OakLog, 3),
+            ItemStack::new(ItemKind::StonePickaxe, 1),
+            ItemStack::new(ItemKind::Air, 7), // air is an empty stack
+        ];
+        let counts = inventory_counts(&inventory);
+        assert_eq!(counts.get("minecraft:oak_log"), Some(&8));
+        assert_eq!(counts.get("minecraft:stone_pickaxe"), Some(&1));
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn json_counts_is_empty_for_no_counts() {
+        let counts: BTreeMap<String, i64> = BTreeMap::new();
+        assert_eq!(json_counts(&counts), "{}");
+    }
+
+    #[test]
+    fn json_counts_sorts_keys_and_escapes_them() {
+        let counts = BTreeMap::from([
+            ("minecraft:stone".to_owned(), 2u64),
+            ("custom:\"quoted\"".to_owned(), 1u64),
+        ]);
+        assert_eq!(
+            json_counts(&counts),
+            "{\"custom:\\\"quoted\\\"\":1,\"minecraft:stone\":2}"
+        );
     }
 }

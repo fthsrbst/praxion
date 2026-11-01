@@ -98,3 +98,13 @@ OUT: 'There are 0 of a max of 4 players online: '
 
 CMD: data get entity Steve Health
 OUT: 'No entity was found'
+
+# Inventory, captured 2026-11-01 from a bot holding oak_log x5 and a pickaxe.
+# 26.3 prints `count` before `Slot` and `id`; each stack is one `{...}` entry.
+CMD: data get entity Bot1 Inventory
+OUT: "Bot1 has the following entity data: [{count: 5, Slot: 0b, id: \"minecraft:oak_log\"}, {count: 1, Slot: 1b, id: \"minecraft:stone_pickaxe\"}]"
+
+# An enchanted, renamed item: components nest braces, commas and a quoted
+# string that itself contains a comma and a brace.
+CMD: data get entity Bot1 Inventory
+OUT: "Bot1 has the following entity data: [{components: {\"minecraft:enchantments\": {\"minecraft:sharpness\": 3}, \"minecraft:custom_name\": '\"Sword, of {Doom}\"'}, count: 1, Slot: 0b, id: \"minecraft:diamond_sword\"}]"
