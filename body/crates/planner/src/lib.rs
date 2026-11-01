@@ -56,10 +56,10 @@ pub use follow::{Follower, Progress};
 pub use goal::Goal;
 pub use look::{LookStyle, aim, look_towards, wrap_degrees};
 pub use moves::{MoveData, MoveKind, PLACE_BLOCK_COST, PrimitiveCall};
-pub use state::{HotbarItem, Inventory, PlanningState, place_block_kind};
+pub use state::{HotbarItem, Inventory, Placements, PlanningState, place_block_kind};
 pub use stuck::{BlacklistEntry, ResetCondition, StuckGuard, Unreachable};
 pub use world::{
-    Block, DirectBlocks, KnownBlocks, PerceptionBlocks, TestWorld, center,
+    Block, DirectBlocks, KnownBlocks, Limits, PerceptionBlocks, TestWorld, center,
 };
 
 use crate::astar::a_star;
@@ -222,13 +222,26 @@ impl Planner {
             other => other,
         };
 
+        // Refuse a start or a goal the world cannot contain before any goal
+        // arithmetic or move offset runs on it (FINDING 1). The cell is the
+        // typed reason the caller sees.
+        let limits = Limits::of(source);
+        if let Some(pos) = first_outside(limits, start, &goal) {
+            return empty_plan(
+                PlanStatus::NoPath {
+                    reason: Unreachable::OutsideWorld { pos },
+                },
+                started,
+            );
+        }
+
         let mut frontier: HashMap<BlockPos, Node> = HashMap::new();
         let mut view = WorldView::new(source, &state.protected, &state.blacklist);
 
         let start_node = Node {
             pos: start,
             standing_on_placed: false,
-            places_left: state.inventory.placements(),
+            placements: state.inventory.place_stacks(),
         };
         // Leave a fifth of the segment budget for the frontier search, so a
         // `partial` result still fits inside the caller's budget.
@@ -318,6 +331,21 @@ impl Planner {
         };
         build_plan(first, status, start, started)
     }
+}
+
+/// The first cell of the start and the goal that the world cannot contain:
+/// outside the world's height, or beyond the vanilla world border.
+fn first_outside(limits: Limits, start: BlockPos, goal: &Goal) -> Option<BlockPos> {
+    let (low, high) = match *goal {
+        Goal::Block(pos) => (pos, pos),
+        Goal::Region { min, max } => (min, max),
+        Goal::Near { pos, .. } => (pos, pos),
+        // An `Entity` goal is already resolved to a `Block` above.
+        Goal::Entity(_) => (start, start),
+    };
+    [start, low, high]
+        .into_iter()
+        .find(|pos| !limits.contains(*pos))
 }
 
 fn build_plan(

@@ -37,6 +37,57 @@ pub trait KnownBlocks {
         let _ = id;
         None
     }
+
+    /// The lowest y of the world. The default is the overworld's `-64`; a
+    /// source that knows its dimension (`PerceptionBlocks`, `DirectBlocks`)
+    /// overrides it from the world.
+    fn min_y(&self) -> i32 {
+        DEFAULT_MIN_Y
+    }
+
+    /// The world's height in blocks. The default is the overworld's 384.
+    fn height(&self) -> u32 {
+        DEFAULT_HEIGHT
+    }
+}
+
+/// The overworld's vertical extent, used when the source does not know its
+/// dimension yet.
+pub const DEFAULT_MIN_Y: i32 = -64;
+pub const DEFAULT_HEIGHT: u32 = 384;
+
+/// The vanilla world border: no position beyond ±30,000,000 on x or z exists.
+/// The planner refuses those before it does any arithmetic on them.
+pub const WORLD_BORDER: i32 = 30_000_000;
+
+/// The box one plan may search inside: the world's vertical extent and the
+/// world border. Built once per plan from the source, so `plan` can refuse a
+/// start or goal that cannot exist before any move arithmetic runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    min_y: i64,
+    max_y: i64,
+}
+
+impl Limits {
+    pub fn of(source: &dyn KnownBlocks) -> Self {
+        let min_y = i64::from(source.min_y());
+        Self {
+            min_y,
+            max_y: min_y + i64::from(source.height()) - 1,
+        }
+    }
+
+    /// Whether a cell is inside the world. Every comparison is widened to
+    /// `i64` first: `i32::abs` of `i32::MIN` and `min_y + height` would
+    /// otherwise overflow.
+    pub fn contains(&self, pos: BlockPos) -> bool {
+        let border = i64::from(WORLD_BORDER);
+        i64::from(pos.x).abs() <= border
+            && i64::from(pos.z).abs() <= border
+            && i64::from(pos.y) >= self.min_y
+            && i64::from(pos.y) <= self.max_y
+    }
 }
 
 /// Whether the player can occupy a cell, given the planning constraints.
@@ -99,7 +150,7 @@ impl<'a> WorldView<'a> {
     /// Standing on a protected floor is allowed; it is only protected from
     /// being broken or built on.
     pub fn floor(&mut self, pos: BlockPos) -> Cell {
-        let below = pos.down(1);
+        let below = BlockPos::new(pos.x, pos.y.saturating_sub(1), pos.z);
         match self.state(below) {
             Some(state) if blocks::is_solid(state) => Cell::Free,
             Some(_) => Cell::Blocked,
@@ -150,13 +201,22 @@ impl<'a> WorldView<'a> {
 }
 
 pub(crate) fn neighbors6(pos: BlockPos) -> [BlockPos; 6] {
+    // Saturating, like the moves' own `offset`: a cell at the edge of the
+    // coordinate range must never wrap into a different one.
+    let step = |dx: i32, dy: i32, dz: i32| {
+        BlockPos::new(
+            pos.x.saturating_add(dx),
+            pos.y.saturating_add(dy),
+            pos.z.saturating_add(dz),
+        )
+    };
     [
-        pos.up(1),
-        pos.down(1),
-        pos.north(1),
-        pos.south(1),
-        pos.east(1),
-        pos.west(1),
+        step(0, 1, 0),
+        step(0, -1, 0),
+        step(0, 0, -1),
+        step(0, 0, 1),
+        step(1, 0, 0),
+        step(-1, 0, 0),
     ]
 }
 
@@ -184,6 +244,14 @@ impl KnownBlocks for PerceptionBlocks<'_> {
             .entity(Caller::Other, self.world, id)
             .value()
             .map(|fact| fact.position.to_block_pos_floor())
+    }
+
+    fn min_y(&self) -> i32 {
+        self.world.min_y().unwrap_or(DEFAULT_MIN_Y)
+    }
+
+    fn height(&self) -> u32 {
+        self.world.height().unwrap_or(DEFAULT_HEIGHT)
     }
 }
 
@@ -284,6 +352,14 @@ impl KnownBlocks for DirectBlocks<'_> {
             },
             None => Block::Unknown,
         }
+    }
+
+    fn min_y(&self) -> i32 {
+        self.world.min_y().unwrap_or(DEFAULT_MIN_Y)
+    }
+
+    fn height(&self) -> u32 {
+        self.world.height().unwrap_or(DEFAULT_HEIGHT)
     }
 }
 

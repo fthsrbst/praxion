@@ -40,11 +40,12 @@ impl Goal {
                 xz_heuristic(dx, dz) + y_heuristic(dy)
             }
             Goal::Near { pos, radius } => {
-                let dx = (pos.x - n.x) as f32;
-                let dz = (pos.z - n.z) as f32;
-                let dy = (pos.y - n.y) as f32;
-                let horizontal = (dx * dx + dz * dz).sqrt() - radius.max(0.);
-                let vertical = dy.abs() - radius.max(0.);
+                let dx = delta(pos.x, n.x) as f32;
+                let dz = delta(pos.z, n.z) as f32;
+                let dy = delta(pos.y, n.y) as f32;
+                let gap = radius.max(0.);
+                let horizontal = (dx * dx + dz * dz).sqrt() - gap;
+                let vertical = dy.abs() - gap;
                 xz_heuristic(horizontal.max(0.), 0.)
                     + y_heuristic(if vertical > 0. { dy.signum() * vertical } else { 0. })
             }
@@ -63,9 +64,9 @@ impl Goal {
                     && (min.z..=max.z).contains(&n.z)
             }
             Goal::Near { pos, radius } => {
-                let dx = (pos.x - n.x) as f64;
-                let dy = (pos.y - n.y) as f64;
-                let dz = (pos.z - n.z) as f64;
+                let dx = delta(pos.x, n.x) as f64;
+                let dy = delta(pos.y, n.y) as f64;
+                let dz = delta(pos.z, n.z) as f64;
                 (dx * dx + dy * dy + dz * dz).sqrt() <= f64::from(radius)
             }
             Goal::Entity(_) => false,
@@ -73,7 +74,17 @@ impl Goal {
     }
 }
 
-fn outside(value: i32, min: i32, max: i32) -> i32 {
+/// `a - b` widened to `i64`: `i32::MIN - i32::MAX` fits, while the same
+/// subtraction in `i32` panics in debug builds and wraps in release. Every
+/// difference in a goal or a heuristic goes through here or [`outside`].
+fn delta(a: i32, b: i32) -> i64 {
+    i64::from(a) - i64::from(b)
+}
+
+fn outside(value: i32, min: i32, max: i32) -> i64 {
+    let value = i64::from(value);
+    let min = i64::from(min);
+    let max = i64::from(max);
     if value < min {
         min - value
     } else if value > max {
@@ -84,9 +95,9 @@ fn outside(value: i32, min: i32, max: i32) -> i32 {
 }
 
 fn block_heuristic(target: BlockPos, n: BlockPos) -> f32 {
-    let dx = (target.x - n.x) as f32;
-    let dy = (target.y - n.y) as f32;
-    let dz = (target.z - n.z) as f32;
+    let dx = delta(target.x, n.x) as f32;
+    let dy = delta(target.y, n.y) as f32;
+    let dz = delta(target.z, n.z) as f32;
     xz_heuristic(dx, dz) + y_heuristic(dy)
 }
 
@@ -170,5 +181,42 @@ mod tests {
         let goal = Goal::Entity(7);
         assert!(!goal.success(pos(0, 64, 0)));
         assert!(goal.heuristic(pos(0, 64, 0)).is_infinite());
+    }
+
+    /// FINDING 1: `i32::MAX - i32::MIN` overflows. Every goal must stay a
+    /// finite estimate at the ends of the coordinate range, in debug and in
+    /// release.
+    #[test]
+    fn the_heuristic_survives_the_coordinate_extremes() {
+        let far = pos(i32::MAX, i32::MAX, i32::MIN);
+        let near = pos(i32::MIN, i32::MIN, i32::MAX);
+        let goals = [
+            Goal::Block(far),
+            Goal::Region {
+                min: far,
+                max: near,
+            },
+            Goal::Near {
+                pos: far,
+                radius: 2.,
+            },
+        ];
+        for goal in goals {
+            for at in [far, near, pos(0, 64, 0)] {
+                let h = goal.heuristic(at);
+                assert!(!h.is_nan(), "{goal:?} at {at:?}");
+                assert!(h.is_finite(), "{goal:?} at {at:?} gave {h}");
+                // The success predicate is called for the same cells; it must
+                // not overflow either.
+                let _ = goal.success(at);
+            }
+        }
+        assert!(Goal::Block(pos(0, 64, 0)).heuristic(far).is_finite());
+        assert!(Goal::Near {
+            pos: far,
+            radius: f32::MAX,
+        }
+        .heuristic(near)
+        .is_finite());
     }
 }

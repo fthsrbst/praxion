@@ -30,6 +30,10 @@ fn lava() -> BlockState {
     state(BlockKind::Lava)
 }
 
+fn water() -> BlockState {
+    state(BlockKind::Water)
+}
+
 fn dirt() -> BlockState {
     state(BlockKind::Dirt)
 }
@@ -71,9 +75,22 @@ fn assert_valid_steps(plan: &Plan) {
                 assert_eq!(horizontal, 0, "{step:?}");
                 assert_eq!(dy, 1, "{step:?}");
             }
-            MoveKind::EnterWater | MoveKind::Swim => {
-                assert_eq!(horizontal, 1, "{step:?}");
-                assert_eq!(dy, 0, "{step:?}");
+            MoveKind::EnterWater => {
+                // Level entry (horizontal 1) or a drop into the water.
+                assert!(horizontal <= 1, "{step:?}");
+                assert!((-3..=0).contains(&dy), "{step:?}");
+                if horizontal == 0 {
+                    assert!(dy < 0, "a vertical entry is a drop: {step:?}");
+                }
+            }
+            MoveKind::Swim => {
+                // One cell sideways, or one cell down in the water column.
+                assert!(horizontal <= 1, "{step:?}");
+                if horizontal == 0 {
+                    assert_eq!(dy, -1, "a vertical swim is one cell down: {step:?}");
+                } else {
+                    assert_eq!(dy, 0, "{step:?}");
+                }
             }
             MoveKind::SwimUp => {
                 assert_eq!(horizontal, 0, "{step:?}");
@@ -700,4 +717,453 @@ fn the_default_budget_is_a_time_limit() {
     assert_eq!(Planner::new().max_drop(), 3);
     assert!(Planner::new().budget().time <= Duration::from_secs(1));
     assert!(Planner::new().budget().nodes >= 1_000);
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 1: the coordinate limits of a plan
+// ---------------------------------------------------------------------------
+
+/// Azalea's `costs.rs` values, restated so a cost assertion names the number it
+/// expects rather than importing the private table.
+const SPRINT: f32 = 20. / 5.612;
+const WALK: f32 = 20. / 4.317;
+const WALK_IN_WATER: f32 = 20. / 1.960;
+const WALK_OFF: f32 = WALK * 0.8;
+const CENTER_AFTER_FALL: f32 = WALK - WALK_OFF;
+const FALL_2: f32 = 7.7881;
+const ENTER_WATER_PENALTY: f32 = 3.;
+
+#[test]
+fn the_plan_limits_are_the_world_height_and_the_world_border() {
+    let source = TestWorld::default();
+    let limits = Limits::of(&source);
+    assert!(limits.contains(pos(0, -64, 0)), "the lowest y is inside");
+    assert!(limits.contains(pos(0, 319, 0)), "the highest y is inside");
+    assert!(limits.contains(pos(30_000_000, 64, -30_000_000)), "the border is inside");
+    assert!(!limits.contains(pos(0, -65, 0)));
+    assert!(!limits.contains(pos(0, 320, 0)));
+    assert!(!limits.contains(pos(30_000_001, 64, 0)));
+    assert!(!limits.contains(pos(0, 64, -30_000_001)));
+    assert!(!limits.contains(pos(i32::MIN, 0, i32::MIN)));
+    assert!(!limits.contains(pos(i32::MAX, i32::MAX, i32::MAX)));
+}
+
+#[test]
+fn plan_refuses_a_start_or_goal_outside_the_world() {
+    let mut world = TestWorld::flat(63, 4);
+    let state = state_with(&[]);
+    let start = pos(0, 64, 0);
+
+    for goal in [
+        pos(0, 320, 0),
+        pos(0, -65, 0),
+        pos(30_000_001, 64, 0),
+        pos(0, 64, -30_000_001),
+        pos(i32::MAX, 64, i32::MIN),
+    ] {
+        let plan = plan_once(&mut world, &state, start, Goal::Block(goal));
+        assert_eq!(
+            plan.status,
+            PlanStatus::NoPath {
+                reason: Unreachable::OutsideWorld { pos: goal }
+            },
+            "{goal:?} must be refused"
+        );
+        assert!(plan.steps.is_empty());
+    }
+
+    // The start is checked the same way, so no move ever offsets from it.
+    let plan = plan_once(&mut world, &state, pos(0, 320, 0), Goal::Block(start));
+    assert_eq!(
+        plan.status,
+        PlanStatus::NoPath {
+            reason: Unreachable::OutsideWorld {
+                pos: pos(0, 320, 0)
+            }
+        }
+    );
+
+    // A region or a near goal whose far corner is outside is refused too.
+    for goal in [
+        Goal::Region {
+            min: pos(0, 64, 0),
+            max: pos(0, 400, 0),
+        },
+        Goal::Near {
+            pos: pos(40_000_000, 64, 0),
+            radius: 2.,
+        },
+    ] {
+        let plan = plan_once(&mut world, &state, start, goal);
+        assert!(
+            matches!(
+                plan.status,
+                PlanStatus::NoPath {
+                    reason: Unreachable::OutsideWorld { .. }
+                }
+            ),
+            "{goal:?} must be refused: {:?}",
+            plan.status
+        );
+    }
+}
+
+#[test]
+fn the_limits_themselves_are_searchable() {
+    // Exactly on the limits the planner still searches: the answer is a normal
+    // `NoRoute`, not `OutsideWorld`.
+    let mut world = TestWorld::flat(63, 4);
+    let state = state_with(&[]);
+    for goal in [
+        pos(30_000_000, -64, 0),
+        pos(-30_000_000, 319, 30_000_000),
+        pos(0, 64, 30_000_000),
+    ] {
+        let plan = plan_once(&mut world, &state, pos(0, 64, 0), Goal::Block(goal));
+        assert!(
+            !matches!(
+                plan.status,
+                PlanStatus::NoPath {
+                    reason: Unreachable::OutsideWorld { .. }
+                }
+            ),
+            "{goal:?} is inside the world: {:?}",
+            plan.status
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 2: Azalea's walk/sprint selection and the wall-hugging diagonal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_dry_walk_costs_the_sprint_cost_and_a_water_step_the_water_cost() {
+    let mut world = TestWorld::flat(63, 8);
+    let state = state_with(&[]);
+    let plan = plan_once(&mut world, &state, pos(0, 64, 0), Goal::Block(pos(0, 64, 3)));
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    for step in &plan.steps {
+        assert!(
+            (step.cost - SPRINT).abs() < 1e-5,
+            "a dry walk is Azalea's sprint cost: {step:?}"
+        );
+    }
+
+    // In water Azalea charges the in-water walk cost instead
+    // (`basic.rs:24-34`, the non-`BARITONE_COMPAT` branch `costs.rs` carries).
+    let mut pond = TestWorld::flat(62, 8);
+    for x in 1..=3 {
+        for z in -8..=8 {
+            pond.set(x, 63, z, water());
+        }
+    }
+    let plan = plan_once(&mut pond, &state, pos(0, 63, 0), Goal::Block(pos(3, 63, 0)));
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    let swims: Vec<&Step> = plan
+        .steps
+        .iter()
+        .filter(|step| step.kind == MoveKind::Swim)
+        .collect();
+    assert!(!swims.is_empty(), "{:?}", kinds(&plan));
+    for step in swims {
+        assert!(
+            (step.cost - WALK_IN_WATER).abs() < 1e-5,
+            "a water step costs the in-water walk cost: {step:?}"
+        );
+    }
+}
+
+#[test]
+fn a_diagonal_hugs_a_wall_for_half_a_walk_block() {
+    let state = state_with(&[]);
+    let plain = SPRINT.mul_add(std::f32::consts::SQRT_2, 0.001);
+
+    // Open ground: both side cells are open, so the plain diagonal cost.
+    let mut open = TestWorld::flat(63, 4);
+    let plan = plan_once(&mut open, &state, pos(0, 64, 0), Goal::Block(pos(1, 64, 1)));
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    assert_eq!(plan.steps.len(), 1, "{:?}", kinds(&plan));
+    assert_eq!(plan.steps[0].kind, MoveKind::Diagonal);
+    assert!(
+        (plan.steps[0].cost - plain).abs() < 1e-5,
+        "{:?}",
+        plan.steps[0]
+    );
+
+    // One side is a wall and the other side has no floor, so the diagonal is
+    // the only route and it hugs the wall (Azalea `basic.rs:453-460`).
+    let mut ledge = TestWorld::new();
+    ledge.set(0, 63, 0, stone());
+    ledge.set(1, 63, 1, stone());
+    ledge.set(1, 64, 0, stone());
+    ledge.set(1, 65, 0, stone());
+    let plan = plan_once(&mut ledge, &state, pos(0, 64, 0), Goal::Block(pos(1, 64, 1)));
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    assert_eq!(plan.steps.len(), 1, "{:?}", kinds(&plan));
+    assert_eq!(plan.steps[0].kind, MoveKind::Diagonal);
+    let hugging = plain + WALK / 2.;
+    assert!(
+        (plan.steps[0].cost - hugging).abs() < 1e-5,
+        "a hugging diagonal costs half a walk block more: {:?}",
+        plan.steps[0]
+    );
+
+    // With both sides walled the diagonal does not exist at all (Azalea
+    // `basic.rs:437-439`): the body walks around the corner instead.
+    let mut corner = TestWorld::flat(63, 4);
+    corner.set(1, 64, 0, stone());
+    corner.set(1, 65, 0, stone());
+    corner.set(0, 64, 1, stone());
+    corner.set(0, 65, 1, stone());
+    let plan = plan_once(&mut corner, &state, pos(0, 64, 0), Goal::Block(pos(2, 64, 2)));
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    assert_eq!(
+        plan.steps.first().map(|step| &step.kind),
+        Some(&MoveKind::Walk),
+        "a walled diagonal is walked around: {:?}",
+        kinds(&plan)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 4: the placement budget per placeable item kind
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_bridge_switches_to_the_next_stack_when_one_runs_out() {
+    // The five-gap corridor of the refusal test, with the blocks spread over
+    // two placeable stacks: two cobblestone, then three dirt.
+    let mut world = TestWorld::flat(63, 20);
+    for z in -20..=20 {
+        for x in [2, 5, 8, 11, 14] {
+            world.remove(x, 63, z);
+        }
+    }
+    let state = state_with(&[("cobblestone", 2), ("dirt", 3), ("stone_pickaxe", 1)]);
+    assert_eq!(state.inventory.placements(), 5, "both stacks count");
+
+    let mut planner = Planner::with_budget(Budget::new(Duration::from_secs(5), 200_000));
+    planner.set_max_drop(3);
+    let plan = planner.plan(
+        &mut world,
+        &state,
+        pos(0, 64, 0),
+        Goal::Block(pos(16, 64, 0)),
+    );
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    let placed: Vec<&str> = plan
+        .steps
+        .iter()
+        .flat_map(|step| step.primitives.iter())
+        .filter(|call| call.name == "place")
+        .map(|call| call.args.first().and_then(|arg| arg.name()).unwrap_or(""))
+        .collect();
+    assert_eq!(
+        placed,
+        ["cobblestone", "cobblestone", "dirt", "dirt", "dirt"],
+        "the plan draws on the first stack, then the next"
+    );
+    assert_valid_steps(&plan);
+}
+
+#[test]
+fn the_placement_budget_never_exceeds_the_stacks() {
+    // Two gaps but one block: the plan may use one bridge, never two.
+    let mut world = TestWorld::flat(63, 20);
+    for z in -20..=20 {
+        for x in [2, 5] {
+            world.remove(x, 63, z);
+        }
+    }
+    let state = state_with(&[("cobblestone", 1), ("dirt", 0)]);
+    let mut planner = Planner::with_budget(Budget::new(Duration::from_secs(5), 200_000));
+    planner.set_max_drop(3);
+    let plan = planner.plan(
+        &mut world,
+        &state,
+        pos(0, 64, 0),
+        Goal::Block(pos(7, 64, 0)),
+    );
+    let bridges = plan
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, MoveKind::Bridge { .. }))
+        .count();
+    assert_ne!(plan.status, PlanStatus::Success, "{plan:?}");
+    assert!(bridges <= 1, "one block cannot bridge two gaps: {bridges}");
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 5: entering water by a drop, and swimming down
+// ---------------------------------------------------------------------------
+
+/// A ledge at y = 64 with a pond one cell east: floor `62 - depth`, `depth`
+/// water blocks up to the surface at y = 62. The only route off the ledge is
+/// the drop into the water.
+fn pond_below_a_ledge(depth: i32) -> TestWorld {
+    let mut world = TestWorld::new();
+    for x in -4..=0 {
+        for z in -4..=4 {
+            world.set(x, 63, z, stone());
+        }
+    }
+    for x in 1..=6 {
+        for z in -4..=4 {
+            world.set(x, 62 - depth, z, stone());
+            for y in (63 - depth)..=62 {
+                world.set(x, y, z, state(BlockKind::Water));
+            }
+        }
+    }
+    world
+}
+
+#[test]
+fn a_pond_below_a_ledge_is_entered_by_a_drop() {
+    let mut world = pond_below_a_ledge(1);
+    let state = state_with(&[]);
+    let plan = plan_once(&mut world, &state, pos(0, 64, 0), Goal::Block(pos(3, 62, 0)));
+
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    let entry = plan.steps.first().expect("a first step");
+    assert_eq!(entry.kind, MoveKind::EnterWater, "{:?}", kinds(&plan));
+    assert_eq!(entry.from.y - entry.to.y, 2, "a two-block drop into water");
+    // Azalea's water entry (`basic.rs:259-311`): walk off, fall, and the
+    // enter-water penalty. A landing cell that is water removes fall damage,
+    // so the drop is bounded by `max_drop` and not by a damage limit.
+    let expected = WALK_OFF + FALL_2.max(CENTER_AFTER_FALL) + ENTER_WATER_PENALTY;
+    assert!(
+        (entry.cost - expected).abs() < 1e-2,
+        "the drop costs the fall plus the water penalty: {entry:?}"
+    );
+
+    // The rest of the path stays in the water and reaches the goal.
+    assert!(plan
+        .steps
+        .iter()
+        .skip(1)
+        .all(|step| step.kind == MoveKind::Swim));
+    assert_eq!(plan.steps.last().map(|step| step.to), Some(pos(3, 62, 0)));
+    assert_valid_steps(&plan);
+}
+
+#[test]
+fn a_water_drop_respects_the_configured_max_drop() {
+    let mut world = pond_below_a_ledge(1);
+    let state = state_with(&[]);
+    let mut tight = planner();
+    tight.set_max_drop(1);
+    let plan = tight.plan(
+        &mut world,
+        &state,
+        pos(0, 64, 0),
+        Goal::Block(pos(3, 62, 0)),
+    );
+    assert!(
+        matches!(plan.status, PlanStatus::NoPath { .. }),
+        "a two-block drop needs max_drop >= 2: {:?}",
+        plan.status
+    );
+}
+
+#[test]
+fn a_deep_drop_into_shallow_water_is_still_allowed() {
+    // Ledge at y = 66, water only at y = 62 (one block deep) over stone at 61:
+    // a four-block drop that lands in water is a water entry, not a fall.
+    let mut world = TestWorld::new();
+    for x in -4..=0 {
+        for z in -4..=4 {
+            world.set(x, 65, z, stone());
+        }
+    }
+    for x in 1..=6 {
+        for z in -4..=4 {
+            world.set(x, 61, z, stone());
+            world.set(x, 62, z, state(BlockKind::Water));
+        }
+    }
+    let state = state_with(&[]);
+    let mut planner = planner();
+    planner.set_max_drop(4);
+    let plan = planner.plan(
+        &mut world,
+        &state,
+        pos(0, 66, 0),
+        Goal::Block(pos(2, 62, 0)),
+    );
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    let entry = plan.steps.first().expect("a first step");
+    assert_eq!(entry.kind, MoveKind::EnterWater, "{:?}", kinds(&plan));
+    assert_eq!(entry.from.y - entry.to.y, 4, "the drop is the whole fall");
+}
+
+#[test]
+fn a_water_column_is_swum_down_to_the_bottom() {
+    let mut world = TestWorld::flat(60, 8);
+    for x in -3..=3 {
+        for z in -3..=3 {
+            for y in 61..=63 {
+                world.set(x, y, z, state(BlockKind::Water));
+            }
+        }
+    }
+    let state = state_with(&[]);
+    let plan = plan_once(&mut world, &state, pos(0, 63, 0), Goal::Block(pos(0, 61, 0)));
+
+    assert_eq!(plan.status, PlanStatus::Success, "{plan:?}");
+    let downs: Vec<&Step> = plan
+        .steps
+        .iter()
+        .filter(|step| step.kind == MoveKind::Swim && step.to.y < step.from.y)
+        .collect();
+    assert!(!downs.is_empty(), "{:?}", kinds(&plan));
+    for step in &downs {
+        assert_eq!(step.from.y - step.to.y, 1, "{step:?}");
+        assert!(
+            (step.cost - WALK_IN_WATER).abs() < 1e-5,
+            "swimming down costs one in-water block: {step:?}"
+        );
+    }
+    assert!(
+        plan.steps
+            .iter()
+            .all(|step| step.kind == MoveKind::Swim),
+        "the whole route is through water: {:?}",
+        kinds(&plan)
+    );
+    assert_valid_steps(&plan);
+}
+
+#[test]
+fn a_waterlogged_stair_is_not_a_route_through_water() {
+    // A full-width channel of waterlogged stairs: it carries water, but the
+    // body does not fit in the collision boxes, so it is not a water route.
+    let mut world = TestWorld::flat(62, 8);
+    let stairs = (0..=u32::MAX)
+        .map_while(|id| BlockState::try_from(id).ok())
+        .find(|state| {
+            BlockKind::from(*state) == BlockKind::OakStairs
+                && azalea_block::fluid_state::FluidState::from(*state).kind
+                    == azalea_block::fluid_state::FluidKind::Water
+        })
+        .expect("a waterlogged stair state");
+    for x in 1..=3 {
+        for z in -8..=8 {
+            world.set(x, 63, z, stairs);
+        }
+    }
+    let state = state_with(&[]);
+    let plan = plan_once(&mut world, &state, pos(0, 63, 0), Goal::Block(pos(5, 63, 0)));
+    assert!(
+        matches!(plan.status, PlanStatus::NoPath { .. }),
+        "waterlogged stairs cannot be swum or walked: {:?}",
+        plan.status
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|step| !step.primitives.iter().any(|call| call.name == "mine")),
+        "a waterlogged block cannot be dug either"
+    );
 }

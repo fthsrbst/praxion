@@ -33,18 +33,19 @@ use crate::costs::{
     FALL_N_BLOCKS_COST, JUMP_ONE_BLOCK_COST, JUMP_PENALTY, SPRINT_ONE_BLOCK_COST,
     WALK_OFF_BLOCK_COST, WALK_ONE_BLOCK_COST, WALK_ONE_IN_WATER_COST,
 };
-use crate::state::Inventory;
+use crate::state::{Inventory, Placements};
 use crate::world::{Cell, WorldView, neighbors6};
 
 /// A node: the feet cell, whether the player is standing on a block this path
 /// just placed (so a second pillar step has support), and how many blocks the
-/// plan may still place. The count is part of the key, so a route that used
-/// more blocks is a different state and can never exceed the hotbar.
+/// plan may still place from each placeable hotbar slot. The budget is part of
+/// the key, so a route that used more blocks is a different state and can never
+/// place more than the hotbar holds.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Node {
     pub pos: BlockPos,
     pub standing_on_placed: bool,
-    pub places_left: u16,
+    pub placements: Placements,
 }
 
 pub type PlanEdge = Edge<Node, MoveData>;
@@ -98,6 +99,13 @@ impl PrimitiveCall {
 /// What kind of movement an edge is. The follower switches on this; the
 /// primitive layer runs `primitives` before the movement for the world-changing
 /// kinds.
+///
+/// Two kinds carry a distance in their geometry rather than a field, because
+/// the independent reviewer oracle reads `from`/`to` and classifies every
+/// water step by kind: `Swim` is one cell in water, sideways when
+/// `to.y == from.y` and down one when `to.y == from.y - 1`, and `EnterWater`
+/// is a step into water, level when `to.y == from.y` and a fall of
+/// `from.y - to.y` blocks otherwise.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MoveKind {
     Walk,
@@ -110,9 +118,9 @@ pub enum MoveKind {
     Bridge { placed: BlockPos, over: BlockPos },
     /// Jump, place a block under the feet, and stand on it.
     Pillar { placed: BlockPos },
-    /// Step from land into a water cell.
+    /// Step or drop from land into a water cell; the drop is in the geometry.
     EnterWater,
-    /// Swim one cell horizontally under water (or at the surface).
+    /// Swim one cell under water: sideways, or down one from the surface.
     Swim,
     /// Rise one cell in a water column (hold jump).
     SwimUp,
@@ -170,6 +178,11 @@ pub(crate) struct MoveCtx<'w, 'a> {
 
 const DIRS: [(i32, i32); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 
+/// The four diagonal offsets. A diagonal step needs two open side cells, so it
+/// cannot reuse [`DIRS`]: Azalea builds it from a direction plus its right
+/// neighbour (`basic.rs:411-415`), which is the same set.
+const DIAGONALS: [(i32, i32); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+
 /// A block placement's fixed cost, in ticks (the `place` record's
 /// `default_max_ticks` is 20; the action itself is a few ticks).
 pub const PLACE_BLOCK_COST: f32 = 4.;
@@ -194,7 +207,28 @@ pub(crate) fn successors(ctx: &mut MoveCtx, node: Node) -> Vec<PlanEdge> {
 }
 
 fn offset(pos: BlockPos, dx: i32, dy: i32, dz: i32) -> BlockPos {
-    BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
+    // Saturating, so a cell at the edge of the coordinate range can never wrap
+    // around (FINDING 1). `plan` already refuses starts and goals outside the
+    // world, so this is defence in depth.
+    BlockPos::new(
+        pos.x.saturating_add(dx),
+        pos.y.saturating_add(dy),
+        pos.z.saturating_add(dz),
+    )
+}
+
+/// Azalea's base cost of one block moved from a cell (`basic.rs:24-34`,
+/// `:397-409`): the sprint cost on open ground, the in-water walk cost when the
+/// feet cell is water. Praxion does not use Azalea's `BARITONE_COMPAT` branch
+/// (that one uses `WALK_ONE_BLOCK_COST` in water); `costs.rs` carries the
+/// non-Baritone `WALK_ONE_IN_WATER_COST`, which is what [`MoveKind::Swim`]
+/// charges too.
+fn step_cost(ctx: &mut MoveCtx, pos: BlockPos) -> f32 {
+    if ctx.world.water(pos) == Cell::Free {
+        WALK_ONE_IN_WATER_COST
+    } else {
+        SPRINT_ONE_BLOCK_COST
+    }
 }
 
 fn note_unknown(ctx: &mut MoveCtx, cell: BlockPos, parent: Node) {
@@ -204,11 +238,12 @@ fn note_unknown(ctx: &mut MoveCtx, cell: BlockPos, parent: Node) {
 /// Whether both body cells at `pos` are free. `Err(cell)` names an unknown
 /// cell that stopped the check.
 fn body_free(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
+    let head = offset(pos, 0, 1, 0);
     match ctx.world.cell(pos) {
         Cell::Unknown => Err(pos),
         Cell::Blocked => Ok(false),
-        Cell::Free => match ctx.world.cell(pos.up(1)) {
-            Cell::Unknown => Err(pos.up(1)),
+        Cell::Free => match ctx.world.cell(head) {
+            Cell::Unknown => Err(head),
             Cell::Blocked => Ok(false),
             Cell::Free => Ok(true),
         },
@@ -218,7 +253,7 @@ fn body_free(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
 /// Whether `pos` has a solid floor. `Err(cell)` names an unknown cell.
 fn floor_free(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
     match ctx.world.floor(pos) {
-        Cell::Unknown => Err(pos.down(1)),
+        Cell::Unknown => Err(offset(pos, 0, -1, 0)),
         Cell::Blocked => Ok(false),
         Cell::Free => Ok(true),
     }
@@ -228,7 +263,7 @@ fn push(
     edges: &mut Vec<PlanEdge>,
     target: BlockPos,
     standing_on_placed: bool,
-    places_left: u16,
+    placements: Placements,
     kind: MoveKind,
     cost: f32,
     primitives: Vec<PrimitiveCall>,
@@ -238,7 +273,7 @@ fn push(
             target: Node {
                 pos: target,
                 standing_on_placed,
-                places_left,
+                placements,
             },
             data: MoveData {
                 kind,
@@ -251,6 +286,12 @@ fn push(
 }
 
 fn walk(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEdge>) {
+    // Azalea `basic.rs:24-34`: the sprint cost on open ground, the in-water
+    // walk cost when the feet cell is water. `successors` sends a water node to
+    // `water_moves`, so in practice this is the sprint branch; keeping the
+    // water branch here puts Azalea's selection in the one place that costs a
+    // step.
+    let base_cost = step_cost(ctx, pos);
     for (dx, dz) in DIRS {
         let target = offset(pos, dx, 0, dz);
         match body_free(ctx, target) {
@@ -261,9 +302,9 @@ fn walk(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEd
                     edges,
                     target,
                     false,
-                    node.places_left,
+                    node.placements,
                     MoveKind::Walk,
-                    SPRINT_ONE_BLOCK_COST,
+                    base_cost,
                     Vec::new(),
                 ),
                 Ok(false) => {}
@@ -274,28 +315,42 @@ fn walk(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEd
 }
 
 fn diagonal(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEdge>) {
-    let cost = SPRINT_ONE_BLOCK_COST.mul_add(std::f32::consts::SQRT_2, 0.001);
-    for (dx, dz) in DIRS {
+    let base_cost = step_cost(ctx, pos);
+    // Azalea `basic.rs:408-409`: +0.001 as a tie-breaker so a straight step is
+    // preferred when the two cost the same.
+    let straight_diagonal = base_cost.mul_add(std::f32::consts::SQRT_2, 0.001);
+    // Azalea `basic.rs:453-460`: a diagonal that has only one open side hugs
+    // the wall and pays half a walk block for it.
+    let wall_hug = straight_diagonal + WALK_ONE_BLOCK_COST / 2.;
+    for (dx, dz) in DIAGONALS {
         let side_x = offset(pos, dx, 0, 0);
         let side_z = offset(pos, 0, 0, dz);
         let target = offset(pos, dx, 0, dz);
 
-        match body_free(ctx, side_x) {
+        let side_x_free = match body_free(ctx, side_x) {
             Err(unknown) => {
                 note_unknown(ctx, unknown, node);
                 continue;
             }
-            Ok(false) => continue,
-            Ok(true) => {}
-        }
-        match body_free(ctx, side_z) {
+            Ok(free) => free,
+        };
+        let side_z_free = match body_free(ctx, side_z) {
             Err(unknown) => {
                 note_unknown(ctx, unknown, node);
                 continue;
             }
-            Ok(false) => continue,
-            Ok(true) => {}
+            Ok(free) => free,
+        };
+        // Azalea `basic.rs:437-439`: both sides closed means the diagonal is
+        // taken by a normal walk around a corner, never here.
+        if !side_x_free && !side_z_free {
+            continue;
         }
+        let cost = if side_x_free && side_z_free {
+            straight_diagonal
+        } else {
+            wall_hug
+        };
         match body_free(ctx, target) {
             Err(unknown) => {
                 note_unknown(ctx, unknown, node);
@@ -309,7 +364,7 @@ fn diagonal(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Pl
                 edges,
                 target,
                 false,
-                node.places_left,
+                node.placements,
                 MoveKind::Diagonal,
                 cost,
                 Vec::new(),
@@ -322,7 +377,7 @@ fn diagonal(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Pl
 
 fn step_up(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEdge>) {
     // The jump needs the current head cell and the cell above it.
-    for cell in [pos.up(1), pos.up(2)] {
+    for cell in [offset(pos, 0, 1, 0), offset(pos, 0, 2, 0)] {
         match ctx.world.cell(cell) {
             Cell::Unknown => {
                 note_unknown(ctx, cell, node);
@@ -349,7 +404,7 @@ fn step_up(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Pla
                 edges,
                 target,
                 false,
-                node.places_left,
+                node.placements,
                 MoveKind::StepUp,
                 cost,
                 Vec::new(),
@@ -373,12 +428,12 @@ fn descend(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Pla
         }
 
         for drop in 1..=ctx.max_drop {
-            let target = horizontal.down(drop);
+            let target = offset(horizontal, 0, -drop, 0);
 
             let mut clear = true;
             // The cells the body falls through, above the landing cell.
             for k in 0..drop {
-                match body_free(ctx, horizontal.down(k)) {
+                match body_free(ctx, offset(horizontal, 0, -k, 0)) {
                     Err(unknown) => {
                         note_unknown(ctx, unknown, node);
                         clear = false;
@@ -414,7 +469,7 @@ fn descend(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Pla
                         edges,
                         target,
                         false,
-                        node.places_left,
+                        node.placements,
                         MoveKind::Descend { drop },
                         cost,
                         Vec::new(),
@@ -436,7 +491,7 @@ fn dig_ahead(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<P
         let mut broken = Vec::new();
         let mut refused = false;
 
-        for cell in [target, target.up(1)] {
+        for cell in [target, offset(target, 0, 1, 0)] {
             let Some(state) = ctx.world.state(cell) else {
                 note_unknown(ctx, cell, node);
                 refused = true;
@@ -486,7 +541,7 @@ fn dig_ahead(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<P
             edges,
             target,
             false,
-            node.places_left,
+            node.placements,
             MoveKind::Dig {
                 broken: broken.iter().map(|(cell, _)| *cell).collect(),
             },
@@ -520,10 +575,19 @@ fn safe_to_dig(ctx: &mut MoveCtx, cell: BlockPos, state: azalea_block::BlockStat
 }
 
 fn bridge(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEdge>) {
-    if !ctx.allow_world_changes || node.places_left == 0 {
+    if !ctx.allow_world_changes {
         return;
     }
-    let Some(item) = ctx.inventory.place_item().map(str::to_owned) else {
+    // The next stack that still has blocks; when it runs out the next node's
+    // budget names the following stack, so a long bridge of two item kinds
+    // switches stacks instead of stopping.
+    let Some(slot) = node.placements.next_slot() else {
+        return;
+    };
+    let Some(item) = ctx.inventory.slot_item(slot).map(str::to_owned) else {
+        return;
+    };
+    let Some(remaining) = node.placements.take(slot) else {
         return;
     };
     for (dx, dz) in DIRS {
@@ -563,7 +627,7 @@ fn bridge(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Plan
             }
         }
 
-        let placed = gap.down(1);
+        let placed = offset(gap, 0, -1, 0);
         match ctx.world.placeable(placed) {
             Cell::Unknown => {
                 note_unknown(ctx, placed, node);
@@ -588,7 +652,7 @@ fn bridge(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Plan
             edges,
             far,
             false,
-            node.places_left - 1,
+            remaining,
             MoveKind::Bridge { placed, over: gap },
             cost,
             primitives,
@@ -597,10 +661,16 @@ fn bridge(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<Plan
 }
 
 fn pillar_up(ctx: &mut MoveCtx, node @ Node { pos, standing_on_placed, .. }: Node, edges: &mut Vec<PlanEdge>) {
-    if !ctx.allow_world_changes || node.places_left == 0 {
+    if !ctx.allow_world_changes {
         return;
     }
-    let Some(item) = ctx.inventory.place_item().map(str::to_owned) else {
+    let Some(slot) = node.placements.next_slot() else {
+        return;
+    };
+    let Some(item) = ctx.inventory.slot_item(slot).map(str::to_owned) else {
+        return;
+    };
+    let Some(remaining) = node.placements.take(slot) else {
         return;
     };
 
@@ -618,7 +688,7 @@ fn pillar_up(ctx: &mut MoveCtx, node @ Node { pos, standing_on_placed, .. }: Nod
     if !standing_on_placed {
         match ctx.world.floor(pos) {
             Cell::Unknown => {
-                note_unknown(ctx, pos.down(1), node);
+                note_unknown(ctx, offset(pos, 0, -1, 0), node);
                 return;
             }
             Cell::Blocked => return,
@@ -626,7 +696,7 @@ fn pillar_up(ctx: &mut MoveCtx, node @ Node { pos, standing_on_placed, .. }: Nod
         }
     }
 
-    let target = pos.up(1);
+    let target = offset(pos, 0, 1, 0);
     match body_free(ctx, target) {
         Err(unknown) => {
             note_unknown(ctx, unknown, node);
@@ -642,7 +712,7 @@ fn pillar_up(ctx: &mut MoveCtx, node @ Node { pos, standing_on_placed, .. }: Nod
         edges,
         target,
         true,
-        node.places_left - 1,
+        remaining,
         MoveKind::Pillar { placed: pos },
         cost,
         primitives,
@@ -652,14 +722,30 @@ fn pillar_up(ctx: &mut MoveCtx, node @ Node { pos, standing_on_placed, .. }: Nod
 /// Whether both body cells of `pos` are water or the air above the surface.
 /// `Err(cell)` names an unknown cell; `Ok(false)` means the body does not fit.
 fn water_body(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
+    let head = offset(pos, 0, 1, 0);
     match ctx.world.state(pos) {
         None => Err(pos),
-        Some(state) if blocks::is_water(state) => match ctx.world.state(pos.up(1)) {
-            None => Err(pos.up(1)),
+        Some(state) if blocks::is_water(state) => match ctx.world.state(head) {
+            None => Err(head),
             Some(head) if blocks::is_water(head) || blocks::is_passable(head) => Ok(true),
             Some(_) => Ok(false),
         },
         Some(_) => Ok(false),
+    }
+}
+
+/// `Ok(true)` when `pos` is a cell a body falling into water passes through:
+/// water with room for the head, or open air. A protected or blacklisted cell
+/// stops it. `Err(cell)` names an unknown cell.
+fn fall_through(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
+    let head = offset(pos, 0, 1, 0);
+    if ctx.world.protected_cell(pos) || ctx.world.protected_cell(head) {
+        return Ok(false);
+    }
+    match water_body(ctx, pos) {
+        Ok(true) => Ok(true),
+        Err(unknown) => Err(unknown),
+        Ok(false) => body_free(ctx, pos),
     }
 }
 
@@ -675,23 +761,61 @@ fn standable_land(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
 
 fn enter_water(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec<PlanEdge>) {
     for (dx, dz) in DIRS {
-        let target = offset(pos, dx, 0, dz);
-        match water_body(ctx, target) {
-            Err(unknown) => note_unknown(ctx, unknown, node),
-            Ok(false) => {}
-            Ok(true) => {
-                if ctx.world.protected_cell(target) || ctx.world.protected_cell(target.up(1)) {
-                    continue;
+        let horizontal = offset(pos, dx, 0, dz);
+        // Drop 0 steps in at the same level; 1..=`max_drop` falls in. Azalea
+        // reaches the second case through `descend_move` (`basic.rs:259-311`):
+        // a zero fall distance that ends on water becomes a one-block fall and
+        // pays `ENTER_WATER_PENALTY`. A landing cell that is water removes the
+        // fall damage, so the drop is bounded by the planner's `max_drop`, not
+        // by a damage limit.
+        for drop in 0..=ctx.max_drop {
+            let target = offset(horizontal, 0, -drop, 0);
+            // The cells the body passes before the landing cell.
+            let mut clear = true;
+            for k in 0..drop {
+                match fall_through(ctx, offset(horizontal, 0, -k, 0)) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        clear = false;
+                        break;
+                    }
+                    Err(unknown) => {
+                        note_unknown(ctx, unknown, node);
+                        clear = false;
+                        break;
+                    }
                 }
-                push(
-                    edges,
-                    target,
-                    false,
-                    node.places_left,
-                    MoveKind::EnterWater,
-                    WALK_ONE_BLOCK_COST + ENTER_WATER_PENALTY,
-                    Vec::new(),
-                );
+            }
+            if !clear {
+                continue;
+            }
+            match water_body(ctx, target) {
+                Err(unknown) => note_unknown(ctx, unknown, node),
+                Ok(false) => {}
+                Ok(true) => {
+                    let head = offset(target, 0, 1, 0);
+                    if ctx.world.protected_cell(target) || ctx.world.protected_cell(head) {
+                        continue;
+                    }
+                    let cost = if drop == 0 {
+                        WALK_ONE_BLOCK_COST + ENTER_WATER_PENALTY
+                    } else {
+                        let fall = FALL_N_BLOCKS_COST
+                            .get(drop as usize)
+                            .copied()
+                            .unwrap_or(f32::INFINITY);
+                        WALK_OFF_BLOCK_COST + fall.max(CENTER_AFTER_FALL_COST) + ENTER_WATER_PENALTY
+                    };
+                    push(
+                        edges,
+                        target,
+                        false,
+                        node.placements,
+                        MoveKind::EnterWater,
+                        cost,
+                        Vec::new(),
+                    );
+                }
             }
         }
     }
@@ -703,14 +827,15 @@ fn water_moves(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec
         match water_body(ctx, target) {
             Err(unknown) => note_unknown(ctx, unknown, node),
             Ok(true) => {
-                if ctx.world.protected_cell(target) || ctx.world.protected_cell(target.up(1)) {
+                let head = offset(target, 0, 1, 0);
+                if ctx.world.protected_cell(target) || ctx.world.protected_cell(head) {
                     continue;
                 }
                 push(
                     edges,
                     target,
                     false,
-                    node.places_left,
+                    node.placements,
                     MoveKind::Swim,
                     WALK_ONE_IN_WATER_COST,
                     Vec::new(),
@@ -718,13 +843,14 @@ fn water_moves(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec
             }
             Ok(false) => {
                 // Step out at the same level.
-                if !ctx.world.protected_cell(target) && !ctx.world.protected_cell(target.up(1)) {
+                let head = offset(target, 0, 1, 0);
+                if !ctx.world.protected_cell(target) && !ctx.world.protected_cell(head) {
                     match standable_land(ctx, target) {
                         Ok(true) => push(
                             edges,
                             target,
                             false,
-                            node.places_left,
+                            node.placements,
                             MoveKind::ExitWater { rise: false },
                             WALK_ONE_IN_WATER_COST,
                             Vec::new(),
@@ -736,10 +862,9 @@ fn water_moves(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec
                 // Climb out one block up: the water must continue beside us
                 // and the cell above it must be standable land.
                 if ctx.world.water(target) == Cell::Free {
-                    let raised = target.up(1);
-                    if !ctx.world.protected_cell(raised)
-                        && !ctx.world.protected_cell(raised.up(1))
-                    {
+                    let raised = offset(target, 0, 1, 0);
+                    let raised_head = offset(raised, 0, 1, 0);
+                    if !ctx.world.protected_cell(raised) && !ctx.world.protected_cell(raised_head) {
                         match standable_land(ctx, raised) {
                             Ok(true) => {
                                 let cost = WALK_ONE_IN_WATER_COST + *JUMP_ONE_BLOCK_COST;
@@ -747,7 +872,7 @@ fn water_moves(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec
                                     edges,
                                     raised,
                                     false,
-                                    node.places_left,
+                                    node.placements,
                                     MoveKind::ExitWater { rise: true },
                                     cost,
                                     Vec::new(),
@@ -762,18 +887,42 @@ fn water_moves(ctx: &mut MoveCtx, node @ Node { pos, .. }: Node, edges: &mut Vec
         }
     }
 
+    // Swim down one cell inside the water column. The geometry says `Swim` is
+    // vertical, so the follower needs no new input: in water the body sinks
+    // unless jump is held.
+    let below = offset(pos, 0, -1, 0);
+    match water_body(ctx, below) {
+        Err(unknown) => note_unknown(ctx, unknown, node),
+        Ok(true) => {
+            let head = offset(below, 0, 1, 0);
+            if !ctx.world.protected_cell(below) && !ctx.world.protected_cell(head) {
+                push(
+                    edges,
+                    below,
+                    false,
+                    node.placements,
+                    MoveKind::Swim,
+                    WALK_ONE_IN_WATER_COST,
+                    Vec::new(),
+                );
+            }
+        }
+        Ok(false) => {}
+    }
+
     // Rise one cell inside the water column.
-    let above = pos.up(1);
+    let above = offset(pos, 0, 1, 0);
     match water_body(ctx, above) {
         Err(unknown) => note_unknown(ctx, unknown, node),
         Ok(true) => {
-            if !ctx.world.protected_cell(above) && !ctx.world.protected_cell(above.up(1)) {
+            let head = offset(above, 0, 1, 0);
+            if !ctx.world.protected_cell(above) && !ctx.world.protected_cell(head) {
                 let cost = WALK_ONE_IN_WATER_COST.max(*JUMP_ONE_BLOCK_COST) + JUMP_PENALTY;
                 push(
                     edges,
                     above,
                     false,
-                    node.places_left,
+                    node.placements,
                     MoveKind::SwimUp,
                     cost,
                     Vec::new(),

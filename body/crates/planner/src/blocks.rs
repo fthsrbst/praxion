@@ -60,9 +60,14 @@ pub fn is_passable(state: BlockState) -> bool {
     state.is_collision_shape_empty() && fluid(state).is_none() && !is_hazard(state)
 }
 
-/// A swimmable water cell: water, or a waterlogged plant with no collision
-/// shape. A waterlogged solid (a stair, a slab) is not water a body can enter,
-/// and lava is never water.
+/// A swimmable water cell: a water fluid in a cell the body fits in, meaning
+/// the block's collision boxes leave the cell empty (the same collision table
+/// perception reads). A plain water block, kelp, seagrass and a waterlogged
+/// plant all qualify. A waterlogged stair, slab or fence carries water but
+/// keeps its own collision boxes, so a body cannot be in that cell and it is
+/// not water for the planner — Azalea's own pathfinder likewise keeps its
+/// water set to source water blocks (`pathfinder/world.rs:717`) and treats
+/// waterlogged blocks as impassable (`:625-633`). Lava is never water.
 pub fn is_water(state: BlockState) -> bool {
     fluid(state) == Some(FluidKind::Water) && state.is_collision_shape_empty()
 }
@@ -241,6 +246,42 @@ mod tests {
         assert!(is_hazard(state(BlockKind::Lava)));
         assert!(!is_breakable(state(BlockKind::Bedrock)));
         assert!(is_breakable(state(BlockKind::Stone)));
+    }
+
+    /// Every state of the registry that carries `waterlogged = true`.
+    fn waterlogged_states() -> Vec<BlockState> {
+        (0..=u32::MAX)
+            .map_while(|id| BlockState::try_from(id).ok())
+            .filter(|state| {
+                Box::<dyn BlockTrait>::from(*state).get_property("waterlogged") == Some("true")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn waterlogged_blocks_are_water_only_when_the_body_fits() {
+        assert!(is_water(state(BlockKind::Water)));
+        assert!(is_water(state(BlockKind::Kelp)), "a water plant is water");
+
+        let states = waterlogged_states();
+        assert!(!states.is_empty(), "the registry has waterlogged blocks");
+        let (open, solid): (Vec<_>, Vec<_>) = states
+            .into_iter()
+            .partition(|state| state.is_collision_shape_empty());
+        assert!(!open.is_empty(), "some waterlogged blocks have no collision");
+        assert!(!solid.is_empty(), "some waterlogged blocks are solids");
+
+        // No collision boxes: the cell is water a body can swim in.
+        for state in open {
+            assert_eq!(fluid(state), Some(FluidKind::Water), "{state:?}");
+            assert!(is_water(state), "{state:?} has no collision shape");
+        }
+        // A waterlogged stair, slab or fence keeps its boxes, so the body does
+        // not fit: it is an obstacle, not water, and it is not walkable either.
+        for state in solid {
+            assert!(!is_water(state), "{state:?} has a collision shape");
+            assert!(!is_passable(state), "{state:?}");
+        }
     }
 
     #[test]

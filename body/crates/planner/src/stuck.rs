@@ -24,6 +24,10 @@ pub enum Unreachable {
     Timeout,
     /// The best route ends at an unknown cell (a `partial` result).
     Frontier { cell: BlockPos },
+    /// The start or the goal is outside the world the planner can search: not
+    /// between the world's lowest y and its top, or beyond the vanilla world
+    /// border of ±30,000,000 on x or z.
+    OutsideWorld { pos: BlockPos },
     /// The same cells came back in `replans` replans; the cell is blacklisted.
     Loop { cell: BlockPos, replans: u32 },
 }
@@ -71,11 +75,19 @@ impl StuckGuard {
         self
     }
 
-    /// Record one replan's path. Returns the first cell that crossed the
-    /// threshold in this call, with its count.
+    /// Record one replan's path. Returns `Loop` for the first cell that crossed
+    /// the threshold in this call, for callers that only need one; use
+    /// [`Self::record_replan_all`] for the complete list.
     pub fn record_replan(&mut self, plan: &Plan) -> Option<Unreachable> {
+        self.record_replan_all(plan).into_iter().next()
+    }
+
+    /// Record one replan's path and return every cell this call blacklisted,
+    /// one `Loop` per cell, in path order. A caller that keeps the planner's
+    /// state in step with the guard applies all of them.
+    pub fn record_replan_all(&mut self, plan: &Plan) -> Vec<Unreachable> {
         let mut seen = HashSet::new();
-        let mut first = None;
+        let mut tripped = Vec::new();
         // The start cell is revisited by every replan by definition; counting
         // it would blacklist the start after N attempts and stop all movement.
         for cell in plan.path_cells().into_iter().skip(1) {
@@ -92,13 +104,13 @@ impl StuckGuard {
                         reset: self.reset,
                     },
                 );
-                first.get_or_insert(Unreachable::Loop {
+                tripped.push(Unreachable::Loop {
                     cell,
                     replans: *count,
                 });
             }
         }
-        first
+        tripped
     }
 
     pub fn is_blacklisted(&self, pos: BlockPos) -> bool {
@@ -109,14 +121,27 @@ impl StuckGuard {
         self.blacklist.keys().copied().collect()
     }
 
-    /// Clear entries whose reset condition the current state satisfies.
+    /// Clear entries whose reset condition the current state satisfies, and
+    /// drop the replan count of every cleared cell with them. Without that a
+    /// cell that a reset forgave would be blacklisted again by its next
+    /// replan, because its old count is still at the threshold (FINDING 6).
     pub fn reset(&mut self, player: BlockPos, tool_tier: u8) {
-        self.blacklist.retain(|cell, entry| match entry.reset {
-            ResetCondition::CloserThan(distance) => {
-                distance_squared(player, *cell) > distance
+        let mut cleared = Vec::new();
+        self.blacklist.retain(|cell, entry| {
+            let keep = match entry.reset {
+                ResetCondition::CloserThan(distance) => {
+                    distance_squared(player, *cell) > distance
+                }
+                ResetCondition::BetterTool(tier) => tool_tier <= tier,
+            };
+            if !keep {
+                cleared.push(*cell);
             }
-            ResetCondition::BetterTool(tier) => tool_tier <= tier,
+            keep
         });
+        for cell in cleared {
+            self.replans.remove(&cell);
+        }
     }
 
     /// For tests and reports.
@@ -126,9 +151,11 @@ impl StuckGuard {
 }
 
 fn distance_squared(a: BlockPos, b: BlockPos) -> f64 {
-    let dx = f64::from(a.x - b.x);
-    let dy = f64::from(a.y - b.y);
-    let dz = f64::from(a.z - b.z);
+    // Widened to `f64` before subtracting: an extreme coordinate would overflow
+    // an `i32` difference (FINDING 1).
+    let dx = f64::from(a.x) - f64::from(b.x);
+    let dy = f64::from(a.y) - f64::from(b.y);
+    let dz = f64::from(a.z) - f64::from(b.z);
     dx * dx + dy * dy + dz * dz
 }
 
@@ -201,5 +228,59 @@ mod tests {
         assert!(guard.is_blacklisted(BlockPos::new(0, 64, 1)));
         guard.reset(BlockPos::new(0, 64, 0), 3);
         assert!(!guard.is_blacklisted(BlockPos::new(0, 64, 1)));
+    }
+
+    /// FINDING 6: a reset must also forget the replan count, or the same cell
+    /// is blacklisted again by its very next replan.
+    #[test]
+    fn a_reset_forgets_the_replan_count_of_a_cleared_cell() {
+        let mut guard = StuckGuard::new(2).with_reset(ResetCondition::CloserThan(1.));
+        let plan = plan(&[(0, 64, 0), (0, 64, 1), (0, 64, 2)]);
+        assert_eq!(guard.record_replan(&plan), None);
+        let tripped = guard.record_replan(&plan).expect("the second replan trips");
+        assert!(matches!(tripped, Unreachable::Loop { .. }));
+        assert_eq!(guard.blacklist().len(), 2);
+
+        // Standing next to the cells forgives them.
+        guard.reset(BlockPos::new(0, 64, 1), 0);
+        assert!(!guard.is_blacklisted(BlockPos::new(0, 64, 1)));
+        assert!(!guard.is_blacklisted(BlockPos::new(0, 64, 2)));
+
+        // A forgiven cell needs the full threshold again: one replan is not a
+        // loop, and the two cells do not trip on their old counts.
+        assert_eq!(guard.record_replan(&plan), None);
+        assert!(guard.blacklist().is_empty(), "{:?}", guard.blacklist());
+        let tripped = guard.record_replan(&plan).expect("a new loop trips");
+        assert!(matches!(tripped, Unreachable::Loop { .. }));
+    }
+
+    /// FINDING 7: every cell a replan blacklists is reported, not just the
+    /// first one.
+    #[test]
+    fn a_replan_reports_every_cell_it_blacklists() {
+        let mut guard = StuckGuard::new(1);
+        let plan = plan(&[(0, 64, 0), (0, 64, 1), (0, 64, 2), (0, 64, 3)]);
+        let all = guard.record_replan_all(&plan);
+        assert_eq!(
+            all,
+            vec![
+                Unreachable::Loop {
+                    cell: BlockPos::new(0, 64, 1),
+                    replans: 1
+                },
+                Unreachable::Loop {
+                    cell: BlockPos::new(0, 64, 2),
+                    replans: 1
+                },
+                Unreachable::Loop {
+                    cell: BlockPos::new(0, 64, 3),
+                    replans: 1
+                },
+            ]
+        );
+        assert_eq!(guard.blacklist().len(), 3);
+        // The single-result convenience returns the first of the same list.
+        let mut other = StuckGuard::new(1);
+        assert_eq!(other.record_replan(&plan), Some(all[0]));
     }
 }
