@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::{
-    Attribution, Event, EventKind, EvidenceRef, Outcome, Reader, Replay, Versions, Writer, read,
-    replay,
+    Attribution, Event, EventKind, EvidenceRef, Outcome, Reader, ReadError, Replay, Versions,
+    Writer, read, replay,
 };
 fn test_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -228,4 +228,27 @@ fn one_hundred_thousand_events_write_and_replay_under_a_second() {
         best < std::time::Duration::from_secs(1),
         "best of {samples:?} was still over one second"
     );
+}
+
+#[test]
+fn reader_reports_expected_overflow() {
+    let event = Event {
+        seq: u64::MAX,
+        tick: 0,
+        ts_ns: 0,
+        event: EventKind::Note {
+            text: "max".to_owned(),
+        },
+    };
+    let text = format!("{}\n", serde_json::to_string(&event).unwrap());
+    let mut reader = Reader::new(text.as_bytes());
+    // A file that reaches this expected value has no next valid sequence
+    // number. The reader must report that instead of saturating and accepting
+    // another u64::MAX line.
+    reader.skip_to(u64::MAX);
+    match reader.next() {
+        Some(Err(ReadError::SeqOverflow { line })) => assert_eq!(line, 1),
+        other => panic!("expected a sequence overflow, got {other:?}"),
+    }
+    assert!(reader.next().is_none());
 }

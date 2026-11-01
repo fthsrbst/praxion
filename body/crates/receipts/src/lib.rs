@@ -11,10 +11,20 @@
 //!
 //! - a tick at or after the start is necessary but not sufficient: the causal
 //!   key (block-change seq, or the click's state id and slot) must match too;
+//! - a dig counts only while its block is still air at settlement; a revert
+//!   inside the window clears the hit, and one after it is logged as
+//!   `late_evidence`;
+//! - a craft delta counts only when it arrives in a container packet at or
+//!   after the state id of the click that took the result; a pickup carries
+//!   `Attribution::None` because its delta is the whole causal story;
 //! - evidence before the start tick is ignored; it may only adjust the
 //!   baseline so it cannot become evidence later;
 //! - late evidence never reopens a receipt and is logged as `late_evidence`;
 //! - no match gives `unconfirmed`; a preempted intent gives `preempted`.
+//!
+//! Settled receipts are kept for [`LATE_RETENTION_TICKS`] only. Outcome
+//! lookups are O(1) maps; an outcome older than the retention answers
+//! [`Outcome::Expired`] instead of scanning the run's history.
 //!
 //! The crate never reads a clock: the caller passes the body tick and the
 //! arrival timestamp for every observation.
@@ -33,12 +43,14 @@ pub use praxion_rules::EvidenceKind;
 /// Map a receipt outcome onto the interpreter's primitive outcome.
 ///
 /// `confirmed` stays `confirmed`; `unconfirmed` is a typed failure
-/// (`failed(unconfirmed)`); `timeout` and `preempted` pass through.
+/// (`failed(unconfirmed)`); `timeout`, `preempted` and an expired lookup pass
+/// through as `timeout`, because an expired settlement is no longer evidence
+/// of failure.
 pub fn interpreter_outcome(outcome: Outcome) -> praxion_interpreter::Outcome {
     match outcome {
         Outcome::Confirmed => praxion_interpreter::Outcome::Confirmed,
         Outcome::Unconfirmed => praxion_interpreter::Outcome::Failed("unconfirmed".to_owned()),
-        Outcome::Timeout => praxion_interpreter::Outcome::Timeout,
+        Outcome::Timeout | Outcome::Expired => praxion_interpreter::Outcome::Timeout,
         Outcome::Preempted => praxion_interpreter::Outcome::Preempted,
     }
 }

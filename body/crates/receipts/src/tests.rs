@@ -640,3 +640,179 @@ fn fault_injection_never_reports_a_false_confirmed() {
 fn late_retention_is_positive() {
     assert!(LATE_RETENTION_TICKS > 0);
 }
+
+#[test]
+fn dig_revert_inside_the_window_clears_the_air_hit() {
+    let mut h = Harness::new("revert-inside");
+    let pos = BlockPos::new(10, 64, 0);
+    h.tick = 0;
+    let receipt = h.register(Intent::dig(1, pos, 5, 0).with_window(10));
+    h.observe_at(1, block_update(pos, BlockState::AIR));
+    h.observe_at(2, block_update(pos, stone()));
+    h.observe_at(3, block_ack(5));
+    h.advance_at(10);
+    assert_eq!(h.outcome(receipt), Some(Outcome::Unconfirmed));
+    let note = h
+        .events()
+        .into_iter()
+        .find_map(|event| match event.event {
+            EventKind::ReceiptSettled { receipt_id, note, .. } if receipt_id == receipt => note,
+            _ => None,
+        });
+    assert_eq!(note.as_deref(), Some("missing_block"));
+}
+
+#[test]
+fn dig_revert_after_settlement_is_late_evidence() {
+    let mut h = Harness::new("revert-late");
+    let pos = BlockPos::new(11, 64, 0);
+    h.tick = 0;
+    let receipt = h.register(Intent::dig(1, pos, 5, 0).with_window(5));
+    h.observe_at(1, block_update(pos, BlockState::AIR));
+    h.observe_at(2, block_ack(5));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+    h.advance_at(5);
+    h.observe_at(6, block_update(pos, stone()));
+    // The settled outcome never reopens, but the log records the refutation.
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+    let late = h
+        .events()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.event,
+                EventKind::LateEvidence { receipt_id, evidence_kind }
+                    if *receipt_id == receipt && evidence_kind == "block_reverted"
+            )
+        })
+        .count();
+    assert_eq!(late, 1);
+}
+
+#[test]
+fn craft_is_attributed_to_the_click_that_took_the_result() {
+    let mut h = Harness::new("craft-attribution");
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]),
+    );
+    h.tick = 0;
+    let receipt = h.register(Intent::craft(1, "stone", 1, 0, 10, 0).with_window(10));
+    assert_eq!(
+        h.events()
+            .into_iter()
+            .find_map(|event| match event.event {
+                EventKind::IntentStarted { intent_id, attribution, .. } if intent_id == 1 => {
+                    Some(attribution)
+                }
+                _ => None,
+            }),
+        Some(praxion_eventlog::Attribution::SlotClick { state_id: 10, slot: 0 })
+    );
+    // A pickup of the same item before the click's state id is unrelated; it
+    // must not confirm the craft and must not count toward its delta.
+    h.observe_at(1, content(0, 9, vec![ItemStack::new(ItemKind::Stone, 6)]));
+    assert_eq!(h.outcome(receipt), None);
+    // The result arrives in a packet at the click's state id: this is the
+    // crafted delta.
+    h.observe_at(2, content(0, 10, vec![ItemStack::new(ItemKind::Stone, 7)]));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+#[test]
+fn craft_before_the_click_state_id_does_not_confirm() {
+    let mut h = Harness::new("craft-before-click");
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]),
+    );
+    h.tick = 0;
+    let receipt = h.register(Intent::craft(1, "stone", 1, 0, 10, 0).with_window(10));
+    h.observe_at(1, content(0, 9, vec![ItemStack::new(ItemKind::Stone, 6)]));
+    h.advance_at(10);
+    assert_eq!(h.outcome(receipt), Some(Outcome::Unconfirmed));
+}
+
+#[test]
+fn container_packet_without_a_pre_click_slot_is_not_a_correction() {
+    let mut h = Harness::new("missing-slot");
+    h.tick = 0;
+    // Container 7 is not open, so no pre-click slot can be captured.
+    let receipt = h.register(Intent::slot_click(1, 7, 0, 1, 0).with_window(5));
+    h.observe_at(1, click(7, 1, 0));
+    // A newer full-content packet must be ignored rather than read as a
+    // revert of a slot we never saw.
+    h.observe_at(2, content(7, 2, vec![ItemStack::new(ItemKind::Stone, 1)]));
+    assert_eq!(h.outcome(receipt), None);
+    h.advance_at(5);
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+}
+
+fn settle_movement_batch(h: &mut Harness, count: u64) {
+    for index in 0..count {
+        h.register(Intent::movement(index, "move_to", 0).with_window(0));
+    }
+    h.advance_at(0);
+}
+
+fn ns_per_observe(h: &mut Harness, iterations: u64) -> f64 {
+    let packet = block_ack(u32::MAX);
+    let started = std::time::Instant::now();
+    for _ in 0..iterations {
+        h.engine
+            .observe(&mut h.writer, 7_001, h.ts_ns, &packet, &h.world)
+            .unwrap();
+        h.ts_ns += 1;
+    }
+    started.elapsed().as_nanos() as f64 / iterations as f64
+}
+
+#[test]
+fn one_hundred_thousand_settled_receipts_do_not_slow_the_packet_scan() {
+    let iterations = 100_000u64;
+
+    let mut small = Harness::new("retention-1k");
+    settle_movement_batch(&mut small, 1_000);
+    small.advance_at(7_000);
+    assert_eq!(small.engine.settled_count(), 0);
+    assert_eq!(small.outcome(0), Some(Outcome::Expired));
+    assert_eq!(small.engine.outcome_for_intent(0), Some(Outcome::Expired));
+    let small_ns = ns_per_observe(&mut small, iterations);
+
+    let mut large = Harness::new("retention-100k");
+    settle_movement_batch(&mut large, 100_000);
+    large.advance_at(7_000);
+    assert_eq!(large.engine.settled_count(), 0);
+    assert_eq!(large.outcome(0), Some(Outcome::Expired));
+    assert_eq!(large.outcome(99_999), Some(Outcome::Expired));
+    assert_eq!(large.engine.outcome_for_intent(99_999), Some(Outcome::Expired));
+    let large_ns = ns_per_observe(&mut large, iterations);
+
+    eprintln!(
+        "retention perf: 1k settled {small_ns:.1} ns/observe, 100k settled {large_ns:.1} ns/observe ({iterations} observations each)"
+    );
+    assert!(
+        large_ns <= small_ns * 4.0 + 100.0,
+        "per-packet cost grew with total settled receipts: 1k={small_ns:.1} ns, 100k={large_ns:.1} ns"
+    );
+}
+
+#[test]
+fn outcome_lookups_expire_at_the_retention_boundary() {
+    let mut h = Harness::new("retention-boundary");
+    h.tick = 0;
+    let receipt = h.register(Intent::movement(7, "move_to", 0).with_window(0));
+    h.advance_at(0);
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+    assert_eq!(h.engine.outcome_for_intent(7), Some(Outcome::Confirmed));
+
+    // The retention window includes its final tick.
+    h.advance_at(LATE_RETENTION_TICKS);
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+    assert_eq!(h.engine.outcome_for_intent(7), Some(Outcome::Confirmed));
+
+    h.advance_at(LATE_RETENTION_TICKS + 1);
+    assert_eq!(h.outcome(receipt), Some(Outcome::Expired));
+    assert_eq!(h.engine.outcome_for_intent(7), Some(Outcome::Expired));
+    assert_eq!(h.engine.settled_count(), 0);
+}

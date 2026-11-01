@@ -24,13 +24,21 @@ pub enum Expect {
     BlockBecomesAir { pos: BlockPos },
     /// `place`: the target block changes to `block`.
     BlockState { pos: BlockPos, block: String },
-    /// `pickup`, `craft`, `eat`: the inventory count of `item` changes by
+    /// `pickup`, `craft` or `eat`: the inventory count of `item` changes by
     /// `delta` (negative for a consumed item).
+    ///
+    /// A pickup carries [`Attribution::None`], because the delta itself is the
+    /// whole causal story. A craft carries the container state id and slot of
+    /// the click that took the result; use [`Intent::craft`] for it.
     Inventory { item: String, delta: i64 },
     /// `move_to`, `look`, `wait`: no server correction within the window.
     Unrefuted,
     /// A menu action: this click was sent and the server did not revert it.
     SlotClick { container_id: i32, slot: i16, state_id: u32 },
+    /// `attack`: the entity's hurt animation, hurt event or removal.
+    EntityHurt { id: i32 },
+    /// `observe`: the driver saw the fact become known.
+    FactKnown { fact: String },
 }
 
 /// One registered evidence contract (§5.3).
@@ -90,7 +98,12 @@ impl Intent {
         }
     }
 
-    /// `pickup`, `craft` or `eat`: the inventory delta of one item.
+    /// `pickup` or `eat`: the inventory delta of one item.
+    ///
+    /// This constructor uses [`Attribution::None`], which is only correct for
+    /// actions whose inventory delta is itself the evidence. A craft must use
+    /// [`Intent::craft`] so the delta is tied to the click that took the
+    /// result. `primitive` is free-form and is recorded in the log only.
     pub fn inventory(
         intent_id: IntentId,
         primitive: impl Into<String>,
@@ -109,6 +122,28 @@ impl Intent {
             window: INVENTORY_WINDOW,
             expect: Expect::Inventory { item, delta },
         }
+    }
+
+    /// `craft`: the inventory delta of the crafted item, attributed to the
+    /// container state id and slot of the click that takes the result.
+    ///
+    /// The receipt confirms only when the delta arrives in a container packet
+    /// whose state id is at or after `state_id`. A pickup or another delta
+    /// without that causal link stays unrelated and cannot confirm the craft.
+    pub fn craft(
+        intent_id: IntentId,
+        item: impl Into<String>,
+        delta: i64,
+        start_tick: u64,
+        state_id: u32,
+        slot: i16,
+    ) -> Self {
+        let mut intent =
+            Self::inventory(intent_id, "craft", item, delta, start_tick)
+                .with_attribution(Attribution::SlotClick { state_id, slot });
+        intent.args.push(format!("state {state_id}"));
+        intent.args.push(format!("slot {slot}"));
+        intent
     }
 
     /// `move_to`, `look` or another action verified by absence of a correction.
@@ -153,9 +188,47 @@ impl Intent {
         }
     }
 
+    /// `attack`: the attacked entity is hurt or gone.
+    pub fn attack(intent_id: IntentId, entity_id: i32, start_tick: u64) -> Self {
+        Self {
+            intent_id,
+            primitive: "attack".to_owned(),
+            args: vec![format!("entity {entity_id}")],
+            start_tick,
+            attribution: Attribution::None,
+            evidence: EvidenceKind::EntityHurt,
+            window: 20,
+            expect: Expect::EntityHurt { id: entity_id },
+        }
+    }
+
+    /// `observe`: the fact became known.
+    pub fn fact(intent_id: IntentId, fact: impl Into<String>, start_tick: u64) -> Self {
+        let fact = fact.into();
+        Self {
+            intent_id,
+            primitive: "observe".to_owned(),
+            args: vec![fact.clone()],
+            start_tick,
+            attribution: Attribution::None,
+            evidence: EvidenceKind::FactKnown,
+            window: 20,
+            expect: Expect::FactKnown { fact },
+        }
+    }
+
     /// Override the settle window (measurement, tests, corpus replay).
     pub fn with_window(mut self, window: u64) -> Self {
         self.window = window;
+        self
+    }
+
+    /// Override the causal attribution key.
+    ///
+    /// Constructors set this already; it exists for callers that build an
+    /// intent from measured packet details (for example a craft click).
+    pub fn with_attribution(mut self, attribution: Attribution) -> Self {
+        self.attribution = attribution;
         self
     }
 

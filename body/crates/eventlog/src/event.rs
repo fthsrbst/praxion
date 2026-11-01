@@ -50,6 +50,9 @@ pub enum Outcome {
     Timeout,
     /// A reflex, take-over or new command abandoned the action.
     Preempted,
+    /// The settlement is no longer retained by the engine's late-evidence
+    /// window. This is an answer to a late lookup; the writer never logs it.
+    Expired,
 }
 
 /// One piece of evidence that took part in a settlement.
@@ -103,6 +106,27 @@ pub enum EventKind {
         first_tick: u64,
         last_tick: u64,
     },
+    /// The brain (or the body on its behalf) pushed an intent onto the stack.
+    ///
+    /// `tier` is one of `survival`, `command`, `maintenance`, `projects`.
+    IntentPushed {
+        intent_id: u64,
+        tier: String,
+        skill: String,
+        args: Vec<String>,
+    },
+    /// An intent's state changed: `running`, `suspended`,
+    /// `frozen_for_carry_on` or `done`. The body alone writes `done`.
+    IntentState { intent_id: u64, state: String },
+    /// The owner of the body changed; `generation` is the body's counter after
+    /// the change. `owner` is `idle`, `skill:<id>`, `reflex:<kind>` or
+    /// `maintenance:<need>`.
+    OwnerChanged { generation: u32, owner: String },
+    /// A preempted or suspended intent must be replanned before it resumes
+    /// (architecture §5.4).
+    ReplanNeeded { intent_id: u64 },
+    /// The brain should wake. Demo-0 has no brain yet, so this is only logged.
+    WakeBrain { cause: String, detail: String },
     /// Free-form operator or test note.
     Note { text: String },
 }
@@ -119,3 +143,63 @@ pub struct Event {
     #[serde(flatten)]
     pub event: EventKind,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip(kind: EventKind) -> EventKind {
+        let event = Event {
+            seq: 0,
+            tick: 12,
+            ts_ns: 1,
+            event: kind,
+        };
+        let line = serde_json::to_string(&event).expect("serialises");
+        let back: Event = serde_json::from_str(&line).expect("deserialises");
+        back.event
+    }
+
+    #[test]
+    fn the_arbiter_events_round_trip_with_their_tags() {
+        let cases = [
+            EventKind::IntentPushed {
+                intent_id: 3,
+                tier: "command".to_owned(),
+                skill: "get_wood".to_owned(),
+                args: vec!["oak".to_owned()],
+            },
+            EventKind::IntentState {
+                intent_id: 3,
+                state: "suspended".to_owned(),
+            },
+            EventKind::OwnerChanged {
+                generation: 9,
+                owner: "reflex:creeper".to_owned(),
+            },
+            EventKind::ReplanNeeded { intent_id: 3 },
+            EventKind::WakeBrain {
+                cause: "reflex".to_owned(),
+                detail: "creeper ran 40 ticks".to_owned(),
+            },
+        ];
+        for case in cases {
+            let back = round_trip(case.clone());
+            assert_eq!(back, case);
+        }
+
+        let line = serde_json::to_string(&Event {
+            seq: 1,
+            tick: 2,
+            ts_ns: 3,
+            event: EventKind::OwnerChanged {
+                generation: 4,
+                owner: "reflex:lava".to_owned(),
+            },
+        })
+        .unwrap();
+        assert!(line.contains("\"kind\":\"owner_changed\""), "{line}");
+        assert!(line.contains("\"generation\":4"), "{line}");
+    }
+}
+

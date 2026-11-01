@@ -14,6 +14,9 @@ pub enum ReadError {
     Io(io::Error),
     /// `seq` was not the next number after the previous event.
     SeqGap { line: u64, expected: u64, found: u64 },
+    /// The expected sequence number would overflow: no further event can be
+    /// valid after `u64::MAX`.
+    SeqOverflow { line: u64 },
     /// A complete line is not a valid event.
     Corrupt { line: u64, message: String },
     /// The last line has no newline and is not a complete event: a writer
@@ -29,6 +32,9 @@ impl fmt::Display for ReadError {
                 f,
                 "event log line {line}: sequence gap, expected {expected}, found {found}"
             ),
+            ReadError::SeqOverflow { line } => {
+                write!(f, "event log line {line}: sequence number overflowed")
+            }
             ReadError::Corrupt { line, message } => {
                 write!(f, "event log line {line}: corrupt event: {message}")
             }
@@ -73,6 +79,12 @@ impl<R: BufRead> Reader<R> {
     /// The line number the reader is on, one-based.
     pub fn line(&self) -> u64 {
         self.line
+    }
+
+    /// Test hook: start replay at a given expected sequence number.
+    #[cfg(test)]
+    pub(crate) fn skip_to(&mut self, expected: u64) {
+        self.expected = expected;
     }
 
     fn next_event(&mut self) -> Option<Result<Event, ReadError>> {
@@ -131,7 +143,11 @@ impl<R: BufRead> Reader<R> {
                 found: event.seq,
             }));
         }
-        self.expected = self.expected.saturating_add(1);
+        let Some(next) = self.expected.checked_add(1) else {
+            self.done = true;
+            return Some(Err(ReadError::SeqOverflow { line }));
+        };
+        self.expected = next;
         Some(Ok(event))
     }
 }
