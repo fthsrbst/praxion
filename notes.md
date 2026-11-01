@@ -6,6 +6,15 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-01 · Claude Opus 5.5 · Never let a worker edit a script that running workers execute
+
+Three parallel `oc-run.sh` runs died with exit 2 ("syntax error near `)'") when a fourth worker edited
+`oc-run.sh`: bash reads a script lazily, so a running instance picks up the half-changed file. The
+workers themselves finished (the service keeps going); only the wrapper crashed. Edit shared tooling
+only when no run uses it, or copy the script per run.
+
+---
+
 ## 2026-10-31 · Claude Opus 5.5 · Lessons from the first Windows 2.7 runs
 
 - Free workers claim "all fixed" when they are not: a hands fix left a ring buffer, sliced waits and the

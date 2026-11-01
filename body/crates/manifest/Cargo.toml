@@ -1,0 +1,11 @@
+[package]
+name = "praxion-manifest"
+description = "Typed reader for versions/manifest.toml, the single source of Praxion's pins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"

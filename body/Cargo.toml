@@ -1,0 +1,10 @@
+# The body: Rust workspace for everything Praxion does against Minecraft.
+# One member per crate; see docs/architecture.md §10. Pins are in versions/manifest.toml, never here.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"

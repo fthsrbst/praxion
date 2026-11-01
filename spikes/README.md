@@ -14,7 +14,8 @@ Results go to that file, not here.
 | `hands/` | E5–E13: Windows input injection, hooks, timer jitter | Rust, `windows-sys` |
 | `captures/` | Capture files (ignored) | — |
 
-Toolchain: `nightly-2026-08-20`, host `x86_64-pc-windows-gnu` (no MSVC on this PC).
+Toolchain: `nightly-2026-08-20`, host `x86_64-pc-windows-gnu` (no MSVC on this PC). Every pin
+(toolchain, Minecraft version, jar hashes, Azalea commit) is in `versions/manifest.toml`.
 
 Setup (idempotent, one command): `python spikes/setup.py`; `python spikes/setup.py --check` only
 reports. Details: `SETUP.md`.

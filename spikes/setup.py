@@ -34,55 +34,98 @@ if sys.version_info < MIN_PYTHON:
 
 import tomllib  # Python 3.11+
 
-# --------------------------------------------------------------------------- pins
-#
-# Every pinned value lives here, with where it comes from. Change one only together with the
-# document named in its comment.
-PINS = {
-    # Minecraft 26.3: docs/sessions/02-body-connection.md, "2.7 Round 0", version manifest table.
-    "minecraft_version": "26.3",
-    "server_jar_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
-    "server_jar_size": 62294556,
-    "client_jar_sha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
-    # Server jar download chain: manifest -> 26.3 version JSON -> downloads.server.url.
-    "version_manifest_url": "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
-    # Windows host triple (no MSVC on that PC; explains spikes/.cargo/config.toml).
-    "windows_target": "x86_64-pc-windows-gnu",
-    # rustup-init bootstrap; {triple} is the local host triple, {suffix} is ".exe" on Windows.
-    "rustup_dist_url": "https://static.rust-lang.org/rustup/dist/{triple}/rustup-init{suffix}",
-    # Azalea: same manifest table (branch 26.3). Cloned from this repo only.
-    "azalea_repo": "https://github.com/azalea-rs/azalea.git",
-    "azalea_commit": "8041a14706fbdb2b8c481d2e8960d7411e850796",
-    # Every patch matching this glob is applied in sorted order (spikes/patches/).
-    "patches_glob": "patches/*.patch",
-    # server.properties keys this setup owns. Every other key is left to the server defaults.
-    "server_properties": {
-        "online-mode": "false",
-        "server-ip": "127.0.0.1",
-        "server-port": "25566",
-        "level-seed": "praxion",
-        "spawn-protection": "0",
-        "enable-rcon": "true",
-        "rcon.port": "25575",
-        "rcon.password": "praxion-local",
-        "white-list": "false",
-        "enforce-whitelist": "false",
-        "accepts-transfers": "true",
-        "difficulty": "peaceful",
-    },
-}
+# --------------------------------------------------------------------------- errors
 
-# --------------------------------------------------------------------------- paths and constants
+
+class SetupError(Exception):
+    """A step cannot be completed; reported as a failed step, the run continues."""
+
+
+# --------------------------------------------------------------------------- repository root
 
 SPIKES = Path(__file__).resolve().parent
 REPO = SPIKES.parent
+
+
+def rel(path: Path) -> str:
+    """Path relative to the repository root, or the absolute path when it lies outside."""
+    try:
+        return path.resolve().relative_to(REPO).as_posix()
+    except ValueError:
+        return str(path)
+
+
+# --------------------------------------------------------------------------- version manifest
+#
+# Every pinned version, hash and URL lives in versions/manifest.toml: the one pin source, shared
+# with body/ (praxion-manifest) and harness/ (praxion_harness). Nothing pinned is written again
+# here, and each value's source is the comment above it in that file. MANIFEST_SCHEMA lists what
+# this script reads and the type it must have, so a broken edit fails at startup, not mid-run.
+
+MANIFEST_PATH = REPO / "versions" / "manifest.toml"
+
+MANIFEST_SCHEMA = {
+    "minecraft": (
+        ("version", str),
+        ("protocol", int),
+        ("server_jar_sha1", str),
+        ("server_jar_size", int),
+        ("client_jar_sha1", str),
+        ("version_manifest_url", str),
+    ),
+    "azalea": (("repo", str), ("commit", str), ("patches_glob", str)),
+    "rust": (("toolchain", str), ("windows_target", str), ("rustup_dist_url", str)),
+}
+
+
+def type_name(value) -> str:
+    return "bool" if isinstance(value, bool) else type(value).__name__
+
+
+def load_manifest() -> dict:
+    """versions/manifest.toml, parsed and checked against MANIFEST_SCHEMA."""
+    try:
+        data = tomllib.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SetupError(f"cannot read {rel(MANIFEST_PATH)}: {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise SetupError(f"invalid TOML in {rel(MANIFEST_PATH)}: {exc}") from exc
+
+    for section, fields in MANIFEST_SCHEMA.items():
+        table = data.get(section)
+        if not isinstance(table, dict):
+            raise SetupError(f"{rel(MANIFEST_PATH)} has no [{section}] table")
+        for key, expected in fields:
+            if key not in table:
+                raise SetupError(f"{rel(MANIFEST_PATH)} is missing {section}.{key}")
+            value = table[key]
+            if isinstance(value, bool) or not isinstance(value, expected):
+                raise SetupError(
+                    f"{rel(MANIFEST_PATH)}: {section}.{key} must be {expected.__name__}, "
+                    f"found {type_name(value)}"
+                )
+    return data
+
+
+try:
+    MANIFEST = load_manifest()
+except SetupError as exc:  # nothing below can run without the pins
+    sys.stderr.write(f"spikes/setup.py: {exc}\n")
+    raise SystemExit(2)
+MINECRAFT = MANIFEST["minecraft"]
+AZALEA = MANIFEST["azalea"]
+RUST_PIN = MANIFEST["rust"]
+
+# --------------------------------------------------------------------------- paths and constants
+
 CARGO_BIN = Path.home() / ".cargo" / "bin"
 TOOLCHAIN_DIR = SPIKES / ".toolchain"
-CARGO_CONFIG = SPIKES / ".cargo" / "config.toml"
+SPIKES_CARGO_CONFIG = SPIKES / ".cargo" / "config.toml"
+BODY_CARGO_CONFIG = REPO / "body" / ".cargo" / "config.toml"
 AZALEA_DIR = SPIKES / "azalea"
 ROUND0_DIR = SPIKES / "round0"
 SERVER_DIR = ROUND0_DIR / "server"
-SERVER_JAR = ROUND0_DIR / f"server-{PINS['minecraft_version']}.jar"
+SERVER_JAR = ROUND0_DIR / f"server-{MINECRAFT['version']}.jar"
 
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
@@ -93,10 +136,10 @@ STATUS_LABEL = {OK: "ok", DONE: "done", SKIP: "skip", WARN: "warn", MISSING: "mi
 # When several sub-results make one step, the worst one wins.
 STATUS_ORDER = (FAIL, WRONG, MISSING, DONE, WARN, OK)
 
-# The comment block below is the explanatory text of the current spikes/.cargo/config.toml, kept
-# verbatim (only the two paths are filled in). The script itself replaces the "Recreate ..." steps.
+# The comment block below is the explanatory text of the generated `.cargo/config.toml` of a Rust
+# workspace (`spikes/` or `body/`), kept verbatim apart from `{scope}`, `{linker}` and `{dlltool}`.
 CARGO_CONFIG_TEMPLATE = """\
-# Toolchain fix for every crate under spikes/ (pinned host x86_64-pc-windows-gnu, self-contained mingw,
+# Toolchain fix for every crate under {scope} (pinned host x86_64-pc-windows-gnu, self-contained mingw,
 # no MinGW binutils installed). Two problems, two settings:
 #
 # 1. dlltool. Crates that link through `raw-dylib` (windows-sys 0.61, getrandom 0.4) need rustc to
@@ -120,20 +163,29 @@ rustflags = [
 
 EULA_URL = "https://aka.ms/MinecraftEULA"
 
+# --------------------------------------------------------------------------- setup-owned values
+#
+# Values the setup itself owns. Nothing here is a version pin: every pin is in versions/manifest.toml.
+PINS = {
+    # server.properties keys this setup owns. Every other key is left to the server defaults.
+    "server_properties": {
+        "online-mode": "false",
+        "server-ip": "127.0.0.1",
+        "server-port": "25566",
+        "level-seed": "praxion",
+        "spawn-protection": "0",
+        "enable-rcon": "true",
+        "rcon.port": "25575",
+        "rcon.password": "praxion-local",
+        "white-list": "false",
+        "enforce-whitelist": "false",
+        "accepts-transfers": "true",
+        "difficulty": "peaceful",
+    },
+}
+
 
 # --------------------------------------------------------------------------- small helpers
-
-
-class SetupError(Exception):
-    """A step cannot be completed; reported as a failed step, the run continues."""
-
-
-def rel(path: Path) -> str:
-    """Path relative to the repository root, or the absolute path when it lies outside."""
-    try:
-        return path.resolve().relative_to(REPO).as_posix()
-    except ValueError:
-        return str(path)
 
 
 def one_line(text: str) -> str:
@@ -323,8 +375,8 @@ def launcher_java() -> Path | None:
 # --------------------------------------------------------------------------- rust chain
 
 
-def pinned_toolchain() -> str:
-    path = SPIKES / "rust-toolchain.toml"
+def rust_toolchain_channel(path: Path) -> str:
+    """The channel a rust-toolchain.toml declares."""
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -337,9 +389,24 @@ def pinned_toolchain() -> str:
     return channel
 
 
+def pinned_toolchain() -> str:
+    """The manifest's channel, after checking that both workspaces declare the same one."""
+    channel = RUST_PIN["toolchain"]
+    for path in (SPIKES / "rust-toolchain.toml", REPO / "body" / "rust-toolchain.toml"):
+        if not path.is_file():
+            continue
+        declared = rust_toolchain_channel(path)
+        if declared != channel:
+            raise SetupError(
+                f"{rel(path)} pins {declared} but {rel(MANIFEST_PATH)} pins {channel}; "
+                f"set rust.toolchain in the manifest and both rust-toolchain.toml files to one channel"
+            )
+    return channel
+
+
 def rustup_triple() -> str:
     if IS_WINDOWS:
-        return PINS["windows_target"]
+        return RUST_PIN["windows_target"]
     machine = platform.machine().lower()
     return "aarch64-apple-darwin" if machine in ("arm64", "aarch64") else "x86_64-apple-darwin"
 
@@ -361,14 +428,14 @@ def component_installed(rustup: Path, channel: str, name: str) -> bool:
 
 def install_rustup() -> Path:
     suffix = ".exe" if IS_WINDOWS else ""
-    url = PINS["rustup_dist_url"].format(triple=rustup_triple(), suffix=suffix)
+    url = RUST_PIN["rustup_dist_url"].format(triple=rustup_triple(), suffix=suffix)
     target = TOOLCHAIN_DIR / f"rustup-init{suffix}"
     created_dir = not TOOLCHAIN_DIR.exists()
     tmp = download(url, target)
     os.replace(tmp, target)
     cmd = [target, "-y", "--profile", "minimal", "--default-toolchain", "none"]
     if IS_WINDOWS:
-        cmd += ["--default-host", PINS["windows_target"]]
+        cmd += ["--default-host", RUST_PIN["windows_target"]]
     try:
         must_run(cmd, "rustup-init")
     finally:
@@ -566,7 +633,7 @@ def step_dlltool(ctx: Ctx) -> Step:
         return Step("dlltool shim", SKIP, "not needed on macOS")
     if not ctx.toolchain_ready:
         return Step("dlltool shim", MISSING, "pinned toolchain not installed (step 2)")
-    bin_dir = pinned_sysroot(ctx) / "lib" / "rustlib" / PINS["windows_target"] / "bin"
+    bin_dir = pinned_sysroot(ctx) / "lib" / "rustlib" / RUST_PIN["windows_target"] / "bin"
     source = bin_dir / "llvm-ar.exe"
     target = TOOLCHAIN_DIR / "llvm-dlltool.exe"
     if not source.is_file():
@@ -586,47 +653,62 @@ def step_dlltool(ctx: Ctx) -> Step:
     return Step("dlltool shim", DONE, f"copied llvm-ar.exe to {rel(target)}")
 
 
+def cargo_config_text(ctx: Ctx, scope: str) -> str:
+    """The `.cargo/config.toml` body for the workspace at scope ("spikes/" or "body/")."""
+    bin_dir = pinned_sysroot(ctx) / "lib" / "rustlib" / RUST_PIN["windows_target"] / "bin"
+    return CARGO_CONFIG_TEMPLATE.format(
+        scope=scope,
+        linker=(bin_dir / "rust-lld.exe").as_posix(),
+        dlltool=(TOOLCHAIN_DIR / "llvm-dlltool.exe").as_posix(),
+    )
+
+
+def ensure_cargo_config(ctx: Ctx, path: Path, scope: str) -> tuple[str, str]:
+    """(status, detail) for the generated config at path; written unless --check."""
+    text = cargo_config_text(ctx, scope)
+    current = path.read_text(encoding="utf-8") if path.is_file() else None
+    if current == text:
+        return OK, f"{rel(path)} matches the pinned toolchain paths"
+    if ctx.opts.check:
+        status = WRONG if current is not None else MISSING
+        return status, f"would write {rel(path)} with the pinned linker and dlltool"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return DONE, f"wrote {rel(path)}"
+
+
 def step_cargo_config(ctx: Ctx) -> Step:
     if not IS_WINDOWS:
         return Step("cargo config", SKIP, "not needed on macOS")
     if not ctx.toolchain_ready:
         return Step("cargo config", MISSING, "pinned toolchain not installed (step 2)")
 
-    target = PINS["windows_target"]
-    bin_dir = pinned_sysroot(ctx) / "lib" / "rustlib" / target / "bin"
-    text = CARGO_CONFIG_TEMPLATE.format(
-        linker=(bin_dir / "rust-lld.exe").as_posix(),
-        dlltool=(TOOLCHAIN_DIR / "llvm-dlltool.exe").as_posix(),
-    )
-    current = CARGO_CONFIG.read_text(encoding="utf-8") if CARGO_CONFIG.is_file() else None
-    if current == text:
-        return Step("cargo config", OK, f"{rel(CARGO_CONFIG)} matches the pinned toolchain paths")
-
-    if ctx.opts.check:
-        status = WRONG if current is not None else MISSING
-        return Step("cargo config", status, f"would write {rel(CARGO_CONFIG)} with the pinned linker and dlltool")
-
-    CARGO_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    CARGO_CONFIG.write_text(text, encoding="utf-8", newline="\n")
-    return Step("cargo config", DONE, f"wrote {rel(CARGO_CONFIG)}")
+    results = [
+        ensure_cargo_config(ctx, SPIKES_CARGO_CONFIG, "spikes/"),
+        ensure_cargo_config(ctx, BODY_CARGO_CONFIG, "body/"),
+    ]
+    statuses = [status for status, _ in results]
+    details = [detail for _, detail in results]
+    return Step("cargo config", combine(statuses), "; ".join(details))
 
 
 def step_azalea(ctx: Ctx) -> Step:
-    commit = PINS["azalea_commit"]
+    commit = AZALEA["commit"]
     short = commit[:7]
-    patches = sorted(SPIKES.glob(PINS["patches_glob"]))
+    patches = sorted(REPO.glob(AZALEA["patches_glob"]))
     if not patches:
-        raise SetupError(f"no patches match {PINS['patches_glob']} under {rel(SPIKES)}")
+        raise SetupError(f"no patches match {AZALEA['patches_glob']} under {rel(REPO)}")
 
     if not (AZALEA_DIR / ".git").exists():
         if ctx.opts.check:
-            return Step("azalea", MISSING, f"{rel(AZALEA_DIR)} not cloned; would clone {PINS['azalea_repo']}")
+            return Step("azalea", MISSING, f"{rel(AZALEA_DIR)} not cloned; would clone {AZALEA['repo']}")
         if AZALEA_DIR.exists() and any(AZALEA_DIR.iterdir()):
             raise SetupError(
                 f"{rel(AZALEA_DIR)} exists but is not a git clone; move it away and rerun, "
-                f"or reclone from {PINS['azalea_repo']} at {short}"
+                f"or reclone from {AZALEA['repo']} at {short}"
             )
-        must_run(["git", "clone", PINS["azalea_repo"], str(AZALEA_DIR)], "git clone azalea")
+        must_run(["git", "clone", AZALEA["repo"], str(AZALEA_DIR)], "git clone azalea")
 
     # Refuse to touch a clone that carries changes which are not ours.
     ours: set[str] = set()
@@ -636,7 +718,7 @@ def step_azalea(ctx: Ctx) -> Step:
     if foreign:
         shown = ", ".join(foreign[:8]) + (" ..." if len(foreign) > 8 else "")
         raise SetupError(
-            f"{rel(AZALEA_DIR)} has uncommitted changes that are not in {PINS['patches_glob']}: {shown}. "
+            f"{rel(AZALEA_DIR)} has uncommitted changes that are not in {AZALEA['patches_glob']}: {shown}. "
             "Commit, stash or remove them (or delete the clone and rerun); setup will not touch them."
         )
 
@@ -744,30 +826,30 @@ def ensure_eula(ctx: Ctx) -> tuple[str, str]:
 
 
 def download_server_jar() -> None:
-    version = PINS["minecraft_version"]
-    manifest = fetch_json(PINS["version_manifest_url"])
+    version = MINECRAFT["version"]
+    manifest = fetch_json(MINECRAFT["version_manifest_url"])
     entry = next((item for item in manifest.get("versions", []) if item.get("id") == version), None)
     if entry is None:
-        raise SetupError(f"Minecraft {version} is not in the version manifest {PINS['version_manifest_url']}")
+        raise SetupError(f"Minecraft {version} is not in the version manifest {MINECRAFT['version_manifest_url']}")
     meta = fetch_json(entry["url"])
     url = (meta.get("downloads", {}).get("server") or {}).get("url")
     if not url:
         raise SetupError(f"the {version} version JSON has no downloads.server.url")
 
-    tmp = download(url, SERVER_JAR, PINS["server_jar_size"])
+    tmp = download(url, SERVER_JAR, MINECRAFT["server_jar_size"])
     size = tmp.stat().st_size
     digest = sha1_of(tmp)
-    if size != PINS["server_jar_size"] or digest != PINS["server_jar_sha1"]:
+    if size != MINECRAFT["server_jar_size"] or digest != MINECRAFT["server_jar_sha1"]:
         tmp.unlink(missing_ok=True)
         raise SetupError(
-            f"server jar verification failed: size {size} (pinned {PINS['server_jar_size']}), "
-            f"sha1 {digest} (pinned {PINS['server_jar_sha1']}); the download was deleted"
+            f"server jar verification failed: size {size} (pinned {MINECRAFT['server_jar_size']}), "
+            f"sha1 {digest} (pinned {MINECRAFT['server_jar_sha1']}); the download was deleted"
         )
     os.replace(tmp, SERVER_JAR)
 
 
 def step_server(ctx: Ctx) -> Step:
-    version = PINS["minecraft_version"]
+    version = MINECRAFT["version"]
     statuses: list[str] = []
     parts: list[str] = []
 
@@ -775,7 +857,7 @@ def step_server(ctx: Ctx) -> Step:
     if SERVER_JAR.is_file():
         size = SERVER_JAR.stat().st_size
         digest = sha1_of(SERVER_JAR)
-        if size == PINS["server_jar_size"] and digest == PINS["server_jar_sha1"]:
+        if size == MINECRAFT["server_jar_size"] and digest == MINECRAFT["server_jar_sha1"]:
             statuses.append(OK)
             parts.append(f"server-{version}.jar sha1 and size match")
         elif ctx.opts.check:
@@ -842,7 +924,7 @@ def step_server(ctx: Ctx) -> Step:
 
 
 def step_client(ctx: Ctx) -> Step:
-    version = PINS["minecraft_version"]
+    version = MINECRAFT["version"]
     version_dir = minecraft_dir() / "versions" / version
     jar = version_dir / f"{version}.jar"
     meta = version_dir / f"{version}.json"
@@ -852,7 +934,7 @@ def step_client(ctx: Ctx) -> Step:
         problems.append(f"version JSON missing ({rel(meta)})")
     if not jar.is_file():
         problems.append(f"client jar missing ({rel(jar)})")
-    elif sha1_of(jar) != PINS["client_jar_sha1"]:
+    elif sha1_of(jar) != MINECRAFT["client_jar_sha1"]:
         problems.append(f"client jar sha1 {sha1_of(jar)} does not match the pin")
 
     if problems:

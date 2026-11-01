@@ -3,6 +3,29 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-01 (Demo-0 start)
+
+All on Claude's recommendation.
+
+- **Demo-0 data path: the headless body connects through the forwarder, and the world model is fed
+  only by the forwarder's tee.** The headless client writes packets (plus the minimal protocol replies
+  it must send itself); it never feeds perception. Reason: decoder, world model and perception stay
+  unchanged when Demo-1 swaps in the real client, and the forwarder is exercised under real load from
+  Demo-0 on. Rejected: a direct connection that decodes its own packets. (User.)
+- **Rule-list syntax: Praxion's own small line-based DSL** (`guard -> action`, as in session 5's
+  example), parsed by a hand-written Rust parser, with three-valued guards written explicitly.
+  Rejected: TOML or RON data (no parser to write, but hard to read at 20 to 30 rules). (User.)
+- **Demo-0 first-night task:** wood, crafting table, wooden pickaxe, stone pickaxe and sword, food if
+  animals are near, a shelter before dusk (dig into a slope or enclose itself), then wait for morning
+  with reflexes on. Gate: at least 18 of 20 fresh seeds reach morning without death (session 7). (User.)
+- **Demo-0 build order:** (1) version manifest, body workspace, harness skeleton; (2) harness and
+  referee on a real server; (3) forwarder, decoder and world model from the spikes; (4) perception API;
+  (5) headless body; (6) receipts and event log; (7) fake world and interpreter; (8) primitives and
+  planner; (9) reflexes and arbiter; (10) first night on 20 fresh seeds. Steps 2 and 3 run in
+  parallel; every step is tested on its own, by a model other than its writer, and live where it plays. (User.)
+- **Secrets live in an ignored `.env`** (`TYPESAFE_API_KEY`, `OPENAI_API_KEY`); `.env.example` documents
+  the names. The user fills in the keys. (User.)
+
 ## 2026-11-01
 
 All four on Claude's recommendation, after the 2.7 Windows runs (`docs/sessions/02-body-connection.md`).

@@ -1,0 +1,35 @@
+# Praxion version manifest: the single source of every pinned version, hash and URL.
+# Read by spikes/setup.py, body/crates/manifest (crate `praxion-manifest`) and
+# harness/praxion_harness/manifest.py. Change a pin here and nowhere else; the source of each
+# value is in its comment. Protocol 777 is decided in docs/decisions.md (2026-10-29, "Version
+# pinned"). Setup-owned values such as the server.properties keys are not pins and stay elsewhere.
+
+[minecraft]
+# docs/sessions/02-body-connection.md, "2.7 Round 0", version manifest table.
+version = "26.3"
+# docs/decisions.md 2026-10-29 "Version pinned: Minecraft Java 26.3 (protocol 777)".
+protocol = 777
+# Same 2.7 Round 0 table: downloads.server.sha1 of the 26.3 version JSON.
+server_jar_sha1 = "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c"
+# Same 2.7 Round 0 table: downloads.server.size.
+server_jar_size = 62294556
+# Same 2.7 Round 0 table: downloads.client.sha1, verified against the launcher install.
+client_jar_sha1 = "e877b6a07acd633fb3bb475002175cec036e7b87"
+# Server jar download chain: this manifest -> 26.3 version JSON -> downloads.server.url.
+version_manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+
+[azalea]
+# Same 2.7 Round 0 table (branch 26.3). The spike clone takes it from this repo only.
+repo = "https://github.com/azalea-rs/azalea.git"
+# Same 2.7 Round 0 table: the commit the spikes build against.
+commit = "8041a14706fbdb2b8c481d2e8960d7411e850796"
+# Every patch matching this glob is applied in sorted order; relative to the repository root.
+patches_glob = "spikes/patches/*.patch"
+
+[rust]
+# docs/decisions.md 2026-10-30: the only nightly the Azalea 26.3 branch builds on, no extra flags.
+toolchain = "nightly-2026-08-20"
+# Windows host triple: that PC has no MSVC, which is why spikes/ and body/ need .cargo/config.toml.
+windows_target = "x86_64-pc-windows-gnu"
+# rustup-init bootstrap; {triple} is the local host triple, {suffix} is ".exe" on Windows.
+rustup_dist_url = "https://static.rust-lang.org/rustup/dist/{triple}/rustup-init{suffix}"

@@ -1,0 +1,19 @@
+# Test fixture: versions/manifest.toml with `minecraft.protocol` as a string. Loading this must fail.
+
+[minecraft]
+version = "26.3"
+protocol = "777"
+server_jar_sha1 = "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c"
+server_jar_size = 62294556
+client_jar_sha1 = "e877b6a07acd633fb3bb475002175cec036e7b87"
+version_manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+
+[azalea]
+repo = "https://github.com/azalea-rs/azalea.git"
+commit = "8041a14706fbdb2b8c481d2e8960d7411e850796"
+patches_glob = "spikes/patches/*.patch"
+
+[rust]
+toolchain = "nightly-2026-08-20"
+windows_target = "x86_64-pc-windows-gnu"
+rustup_dist_url = "https://static.rust-lang.org/rustup/dist/{triple}/rustup-init{suffix}"

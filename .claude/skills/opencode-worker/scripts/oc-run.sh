@@ -8,6 +8,8 @@
 #        OC_WALL_SECS   kill after this much wall time (default 1800)
 # Exit:  0 finished with FINAL_REPORT   10 stalled   11 wall timeout
 #        12 finished without FINAL_REPORT   13 could not start or worker error
+# On 10 and 11 the stranded service session is exported to
+# <log-dir>/<name>.session.json and deleted, so it stops working.
 set -uo pipefail
 
 brief=${1:?brief file required}
@@ -35,6 +37,31 @@ kill_tree() {
   kill -TERM "$1" 2>/dev/null
 }
 
+# The shared service owns the session and keeps running it after its client is killed
+# (measured 2026-10-31: 18 minutes of stray edits after a timeout). Killing the client
+# alone is not enough, so find the session by the title the run was given, export it
+# for evidence, then delete it. Best effort: never mask the watchdog's exit code.
+stop_session() {
+  local id dest
+  dest=$logdir/$name.session.json
+  id=$(opencode session list --format json -n 100 2>/dev/null \
+    | node "$(dirname "$0")/oc-events.js" session-id "$name" 2>/dev/null)
+  if [[ -z $id ]]; then
+    echo "oc-run: WARNING no session titled '$name' to stop" >&2
+    return 0
+  fi
+  if ! opencode session export "$id" >"$dest" 2>/dev/null || [[ ! -s $dest ]]; then
+    echo "oc-run: WARNING export of session $id failed or is empty: $dest" >&2
+  fi
+  # Delete even when the export failed: stopping the work matters more than the record.
+  if opencode session delete "$id" >/dev/null 2>&1; then
+    echo "oc-run: stopped session $id, exported to $dest"
+  else
+    echo "oc-run: WARNING could not delete session $id" >&2
+  fi
+  return 0
+}
+
 opencode run --auto --format json --title "$name" --model "$model" "$(cat "$brief")" \
   </dev/null >"$log" 2>&1 &
 pid=$!
@@ -48,10 +75,12 @@ while kill -0 "$pid" 2>/dev/null; do
   size=$(wc -c <"$log")
   if (( size != last_size )); then last_size=$size; last_change=$now; fi
   if (( now - last_change > stall )); then
-    kill_tree "$pid"; echo "oc-run: STALLED (no output for ${stall}s), log: $log"; exit 10
+    kill_tree "$pid"; echo "oc-run: STALLED (no output for ${stall}s), log: $log"
+    stop_session; exit 10
   fi
   if (( now - start > wall )); then
-    kill_tree "$pid"; echo "oc-run: WALL TIMEOUT (${wall}s), log: $log"; exit 11
+    kill_tree "$pid"; echo "oc-run: WALL TIMEOUT (${wall}s), log: $log"
+    stop_session; exit 11
   fi
 done
 wait "$pid"

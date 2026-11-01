@@ -11,8 +11,14 @@ spikes/round0/blocks-truth*.txt
 spikes/azalea/
 spikes/.toolchain/
 spikes/.cargo/config.toml
+body/.cargo/config.toml
 spikes/round0/server/
 spikes/round0/*.jar
 spikes/**/*.prxcap
 spikes/**/*.prxcap.stats.jsonl
 spikes/round0/tools/
+
+# Local secrets
+.env
+.env.*
+!.env.example
