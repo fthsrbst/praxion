@@ -1,1 +1,1 @@
-spikes/patches/*.patch -text
+versions/patches/*.patch -text

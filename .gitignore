@@ -8,17 +8,19 @@ spikes/**/*.pcap
 spikes/**/captures/
 spikes/round0/client-natives/
 spikes/round0/blocks-truth*.txt
-spikes/azalea/
-spikes/.toolchain/
 spikes/.cargo/config.toml
 body/.cargo/config.toml
 spikes/round0/server/
-spikes/round0/*.jar
 spikes/**/*.prxcap
 spikes/**/*.prxcap.stats.jsonl
 spikes/round0/tools/
+
+# Pinned third-party inputs (machine-local downloads and clones) and machine-local paths
+third_party/
+local/
 
 # Local secrets
 .env
 .env.*
 !.env.example
+runs/

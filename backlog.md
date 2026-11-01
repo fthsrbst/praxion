@@ -139,14 +139,32 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Source: Claude Opus 5.5, 2026-11-01
 - State: E1, E2 (with Azalea patches), E3, E5, E6, E7, E13 passed; E4, E9 measured; all proposals decided
   (`docs/decisions.md` 2026-11-01). Demo-0 is unblocked. Results: `docs/sessions/02-body-connection.md`
-  "2.7 Windows runs". Setup: `python spikes/setup.py`.
+  "2.7 Windows runs". Setup: `python setup.py`.
 - Remaining (before any Demo-1 code): E8 (needs a mouse-button command in `spikes/hands` and a live decode
   tap), E10 (menu clicks at GUI scales 1-4), E11 (window modes; use a separate `--gameDir` so the user's
   `options.txt` is untouched), E12 (needs the user's physical key presses), E15, E16; E5 pointer-speed
   matrix (the user changes the system setting). `spikes/hands` review leftovers: finding #1 (key slot
   published before its scancode; guarded by the gate except on a same-thread panic) and #6-8 (E12
   timestamps taken at the wrong points) must be fixed before E12.
-- Pointers: `spikes/README.md`, `spikes/SETUP.md`, `logs/briefs/` (worker briefs, ignored)
+- Pointers: `spikes/README.md`, `SETUP.md`, `logs/briefs/` (worker briefs, ignored)
+
+### oc-run.sh: unique session title per run
+- Source: Claude Opus 5.5, 2026-11-01 (review rv1 by Iceman, finding "title-only session match")
+- State: `stop_session` finds the session by title = brief name; two runs of the same brief at once could
+  export and delete the other run's session.
+- Remaining: pass `--title "$name-$$-$start"` and match that exact title. Edit only when no oc-run.sh is
+  running (notes.md 2026-11-01).
+- Pointers: `.claude/skills/opencode-worker/scripts/oc-run.sh`
+
+### Body restart in the middle of a game connection (before Demo-1)
+- Source: Claude Opus 5.5, 2026-11-01
+- State: the forwarder sends a gap to a tee subscriber that joins mid-connection; the decoder then
+  marks that connection's world view invalid. In Demo-0 the headless client simply reconnects.
+- Remaining: Demo-1 plays the user's real client, which cannot be asked to reconnect. Options: the
+  forwarder keeps a bounded replay of each connection's login and configuration phase plus the
+  latest chunk data (needs parsing in the forwarder, against the decision), or the body asks the user
+  to rejoin, or the decoder rebuilds from later full-chunk packets. Decide before Demo-1 code.
+- Pointers: `body/crates/tee/src/lib.rs`, docs/decisions.md 2026-11-01 "Tee stream format"
 
 ## Done
 

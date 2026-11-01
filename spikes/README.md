@@ -7,18 +7,21 @@ Results go to that file, not here.
 
 | Dir | What | Language |
 |---|---|---|
-| `round0/` | Server jar, server run dir, data reports (jars and worlds ignored) | — |
-| `azalea/` | Azalea clone at the pinned commit `8041a14` (ignored; re-clone to reproduce) | Rust |
+| `round0/` | Server run dir and data reports (world ignored); the server jar lives in `third_party/minecraft/` | — |
 | `proxy/` | E1: byte-forwarding TCP proxy with a tee to a capture file; `pingbench` | Rust, std only |
-| `decode/` | E2, E3, E4: offline decoder of capture files with Azalea crates | Rust |
+| `decode/` | E2, E3, E4: offline decoder of capture files with Azalea crates (path deps into `third_party/azalea/`) | Rust |
 | `hands/` | E5–E13: Windows input injection, hooks, timer jitter | Rust, `windows-sys` |
 | `captures/` | Capture files (ignored) | — |
+
+The pinned third-party inputs are outside this folder: the Azalea clone at commit `8041a14` in
+`third_party/azalea/` and the server jar in `third_party/minecraft/` (both ignored, machine-local).
+The patches are committed in `versions/patches/`.
 
 Toolchain: `nightly-2026-08-20`, host `x86_64-pc-windows-gnu` (no MSVC on this PC). Every pin
 (toolchain, Minecraft version, jar hashes, Azalea commit) is in `versions/manifest.toml`.
 
-Setup (idempotent, one command): `python spikes/setup.py`; `python spikes/setup.py --check` only
-reports. Details: `SETUP.md`.
+Setup (idempotent, one command): `python setup.py`; `python setup.py --check` only reports.
+Details: `../SETUP.md`.
 
 ## Shared contracts
 

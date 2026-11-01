@@ -1,5 +1,5 @@
 # Praxion version manifest: the single source of every pinned version, hash and URL.
-# Read by spikes/setup.py, body/crates/manifest (crate `praxion-manifest`) and
+# Read by setup.py, body/crates/manifest (crate `praxion-manifest`) and
 # harness/praxion_harness/manifest.py. Change a pin here and nowhere else; the source of each
 # value is in its comment. Protocol 777 is decided in docs/decisions.md (2026-10-29, "Version
 # pinned"). Setup-owned values such as the server.properties keys are not pins and stay elsewhere.
@@ -24,7 +24,7 @@ repo = "https://github.com/azalea-rs/azalea.git"
 # Same 2.7 Round 0 table: the commit the spikes build against.
 commit = "8041a14706fbdb2b8c481d2e8960d7411e850796"
 # Every patch matching this glob is applied in sorted order; relative to the repository root.
-patches_glob = "spikes/patches/*.patch"
+patches_glob = "versions/patches/*.patch"
 
 [rust]
 # docs/decisions.md 2026-10-30: the only nightly the Azalea 26.3 branch builds on, no extra flags.

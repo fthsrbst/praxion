@@ -13,7 +13,7 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
 - Discussion sessions (`docs/discussion-plan.md`): all done. `docs/architecture.md` draft 2 is reviewed
   and accepted (reviews in `docs/reviews/`). Session 2.7 experiments ran on the Windows PC on
   2026-10-31: results in `docs/sessions/02-body-connection.md` "2.7 Windows runs"; Demo-0's experiments
-  passed. Spikes and their one-command setup: `spikes/` (`python spikes/setup.py`, `spikes/SETUP.md`).
+  passed. Spikes and their one-command setup: `spikes/` (`python setup.py`, `SETUP.md`).
   Agreed decisions go to `docs/decisions.md`; per-session notes go to `docs/sessions/NN-topic.md`.
   Next: Demo-0 (architecture §1.1), designed with the user step by step. The remaining hands
   experiments (E8, E10, E11, E12, E15, E16) gate Demo-1 only (`backlog.md`).

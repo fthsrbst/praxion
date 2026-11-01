@@ -521,9 +521,12 @@ version-pack layers [D]. Only the directories Demo-0 needs are created first:
 body/        Rust workspace: forwarder, decoder, perception, world, reflexes, arbiter,
              interpreter, primitives, planner, actuator (headless first), receipts, ruleset, event log
 harness/     test server control, referee, fixtures, fake world, server checklist
-versions/    version manifest and generated data tables
+versions/    version manifest, Azalea patches and generated data tables
 docs/        decisions, sessions, research, reviews, this file
-spikes/      local experiment code (untracked)
+spikes/      experiment code (session 2.7)
+setup.py     one-command setup; writes local/paths.toml (machine-local, ignored)
+third_party/ pinned downloads and clones: Azalea, server jar, toolchain shim (ignored)
+runs/        harness run directories, one fresh world per seed (ignored)
 ```
 
 Other directories are added when their demo needs them: `brain/` and the interface for Demo-1 and

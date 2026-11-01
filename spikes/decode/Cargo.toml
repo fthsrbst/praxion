@@ -13,15 +13,15 @@ name = "decode"
 path = "src/main.rs"
 
 [dependencies]
-azalea-block = { path = "../azalea/azalea-block" }
-azalea-buf = { path = "../azalea/azalea-buf" }
-azalea-core = { path = "../azalea/azalea-core" }
-azalea-protocol = { path = "../azalea/azalea-protocol", default-features = false, features = ["connecting"] }
-azalea-registry = { path = "../azalea/azalea-registry" }
-azalea-world = { path = "../azalea/azalea-world" }
+azalea-block = { path = "../../third_party/azalea/azalea-block" }
+azalea-buf = { path = "../../third_party/azalea/azalea-buf" }
+azalea-core = { path = "../../third_party/azalea/azalea-core" }
+azalea-protocol = { path = "../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-registry = { path = "../../third_party/azalea/azalea-registry" }
+azalea-world = { path = "../../third_party/azalea/azalea-world" }
 
 [dev-dependencies]
-azalea-entity = { path = "../azalea/azalea-entity" }
+azalea-entity = { path = "../../third_party/azalea/azalea-entity" }
 
 # release builds of the decoder are what E3 measures
 [profile.release]

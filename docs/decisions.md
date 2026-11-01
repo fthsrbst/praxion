@@ -23,6 +23,24 @@ All on Claude's recommendation.
   (5) headless body; (6) receipts and event log; (7) fake world and interpreter; (8) primitives and
   planner; (9) reflexes and arbiter; (10) first night on 20 fresh seeds. Steps 2 and 3 run in
   parallel; every step is tested on its own, by a model other than its writer, and live where it plays. (User.)
+- **Headless body: our own thin client on `azalea-protocol`, with physics lifted from `azalea-physics`'s
+  pure helpers** (`move_colliding`, collisions, `jump_from_ground`); `azalea-client` is only a reference
+  for packet order. Fallback if lifting stalls: run `azalea-physics` systems in a minimal bevy `World`.
+  Rejected: `azalea-client` or the `azalea` bevy app as the body (a second world model next to the
+  decoder). Evidence: `docs/research/demo0-azalea-headless.md`. (User.)
+- **Harness: Python, RCON plus server-log tail, a fresh world per seed under `runs/<id>/`, every fixture
+  command in a JSON-lines log.** Player-dependent referee tests wait for the headless bot instead of
+  opening the real client on the user's screen. (User.)
+- **Third-party inputs leave `spikes/`:** the Azalea clone goes to `third_party/azalea`, the server jar to
+  `third_party/minecraft/`, the toolchain shim to `third_party/toolchain` (all ignored); patches to
+  `versions/patches/`; the setup script to the root `setup.py`, which also writes the machine-local
+  `local/paths.toml`. Reason: product code must not depend on the throwaway spikes folder. (Claude; the
+  user asked Claude to decide such things without asking.)
+- **Tee stream format `PRXCAP2`** (`body/crates/tee`): the spike's capture format plus a `gap` record
+  carrying the bytes the tee dropped for a connection; the reader also reads `PRXCAP1` spike captures. A
+  tee subscriber that joins while a game connection is open first gets a gap for it, since it cannot
+  decode a stream it joined mid-way. One subscriber at a time; a full tee queue drops tee bytes, never
+  game bytes. (Claude.)
 - **Secrets live in an ignored `.env`** (`TYPESAFE_API_KEY`, `OPENAI_API_KEY`); `.env.example` documents
   the names. The user fills in the keys. (User.)
 

@@ -1,6 +1,6 @@
 # Azalea headless protocol body survey (pinned commit 8041a14)
 
-Pinned checkout: `spikes/azalea/` at commit `8041a14` (branch `26.3`), with local patches `spikes/patches/azalea-8041a14-26.3.patch`. Workspace version `0.16.0+mc26.3`, `PROTOCOL_VERSION = 777` (`azalea-protocol/src/packets/mod.rs:14`). All claims below cite that checkout. Items I could not verify are marked **unverified**.
+Pinned checkout: `third_party/azalea/` at commit `8041a14` (branch `26.3`), with local patches `versions/patches/azalea-8041a14-26.3.patch`. Workspace version `0.16.0+mc26.3`, `PROTOCOL_VERSION = 777` (`azalea-protocol/src/packets/mod.rs:14`). All claims below cite that checkout. Items I could not verify are marked **unverified**.
 
 ## 1. Login without the `azalea` bevy app
 
@@ -103,7 +103,7 @@ All of these live in `azalea-client` and are ECS-bound (bevy systems/observers/m
 
 ## 6. Licence
 
-- Workspace license: `license = "MIT"` in `[workspace.package]` (`spikes/azalea/Cargo.toml`, top-level). Every crate sets `license.workspace = true` (verified for all 16 crates: `azalea`, `azalea-auth`, `azalea-block`, `azalea-brigadier`, `azalea-buf`, `azalea-chat`, `azalea-client`, `azalea-core`, `azalea-crypto`, `azalea-entity`, `azalea-inventory`, `azalea-language`, `azalea-physics`, `azalea-protocol`, `azalea-registry`, `azalea-world`).
+- Workspace license: `license = "MIT"` in `[workspace.package]` (`third_party/azalea/Cargo.toml`, top-level). Every crate sets `license.workspace = true` (verified for all 16 crates: `azalea`, `azalea-auth`, `azalea-block`, `azalea-brigadier`, `azalea-buf`, `azalea-chat`, `azalea-client`, `azalea-core`, `azalea-crypto`, `azalea-entity`, `azalea-inventory`, `azalea-language`, `azalea-physics`, `azalea-protocol`, `azalea-registry`, `azalea-world`).
 - Single `LICENSE.md` at the workspace root: MIT, copyright 2022 mat.
 - Third-party dependency licenses (bevy, tokio, serde, etc.) were **not** surveyed; **unverified**. The version manifest should record them before release (architecture.md §4 "Version manifest").
 
