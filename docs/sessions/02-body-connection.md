@@ -449,6 +449,8 @@ reports are deterministic.
 
 Machine: the user's Windows 11 laptop (RTX 3060 Laptop, 8 threads, on AC, power plan "Performance").
 Server: vanilla 26.3 jar (sha1 match), offline mode, `127.0.0.1:25566`, RCON on loopback.
+Setup on a new machine: `python spikes/setup.py` (see `spikes/SETUP.md`); a fresh GitHub clone set
+up, built and passed all tests in 3 min 14 s on this PC (2026-11-01), and decoded `corpus5` with 0 errors.
 Client: vanilla 26.3 started by `spikes/round0/launch_client.py` straight from the version JSON (74
 libraries and the client jar sha1-checked), no launcher tweaker. Code: `spikes/` (see `spikes/README.md`).
 

@@ -144,8 +144,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   E11, E12 (needs the user's physical key presses), E5 pointer-speed matrix (user changes the setting),
   E14, E15, E16. Hands spike review finding #1 (key slot published before its scancode; guarded by the
   gate except on a same-thread panic) and #6-8 (E12 timestamps) are open in `spikes/hands`.
-- Also: a one-command setup script for a new machine (Rust + llvm-tools + dlltool copy, server jar,
-  Azalea clone at the pin + patches, generated `.cargo/config.toml` without hard-coded paths).
 - Pointers: `spikes/README.md`, `logs/briefs/` (worker briefs, ignored), `spikes/captures/` (ignored)
 
 ## Done
