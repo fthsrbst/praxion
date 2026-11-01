@@ -1,0 +1,18 @@
+[package]
+name = "praxion-world"
+description = "The raw store: everything the decoder receives, readable only through typed queries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+azalea-block = { path = "../../../third_party/azalea/azalea-block" }
+azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
+azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+azalea-world = { path = "../../../third_party/azalea/azalea-world" }
+uuid = "1.23.4"

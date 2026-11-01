@@ -53,6 +53,9 @@ All on Claude's recommendation.
   logic (unknown propagates); actions are a primitive call, `do skill(...)`, `done` or `fail(kind)`.
   The loader rejects unknown names, type errors, more than 30 rules, cycles, composition depth over 2
   and unreachable rules. Reference: `docs/rule-lists.md`. (Claude.)
+- **The headless actuator reads the raw store for physics, read-only.** It plays the game client, which
+  also simulates movement with full world knowledge; decision-making layers (reflexes, interpreter,
+  planner) still see the world only through perception. (Claude.)
 - **`until` reads as English and composition depth depends on the author.** `ACTION until G` keeps the
   rule committed until G becomes true (or its own guard falls, or `max_ticks`). Hand-written core skills
   may compose to depth 4 so each stays at 2 to 6 rules; LLM-written skills keep the depth-2 cap at
