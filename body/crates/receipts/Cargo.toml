@@ -1,0 +1,26 @@
+[package]
+name = "praxion-receipts"
+description = "Per-action evidence contracts and causal attribution (architecture §5.3)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "praxion_receipts"
+path = "src/lib.rs"
+
+[dependencies]
+praxion-decoder = { path = "../decoder" }
+praxion-eventlog = { path = "../eventlog" }
+praxion-interpreter = { path = "../interpreter" }
+praxion-rules = { path = "../rules" }
+praxion-world = { path = "../world" }
+azalea-block = { path = "../../../third_party/azalea/azalea-block" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+
+[dev-dependencies]
+azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
+praxion-tee = { path = "../tee" }

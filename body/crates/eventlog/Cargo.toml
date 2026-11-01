@@ -1,0 +1,15 @@
+[package]
+name = "praxion-eventlog"
+description = "The body's append-only JSON Lines event log: typed events, buffered writer, replay reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "praxion_eventlog"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
