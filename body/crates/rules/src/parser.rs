@@ -308,8 +308,19 @@ fn parse_literal(c: &mut Cursor<'_>, ty: ValueType) -> Result<ArgValue, Error> {
             }
         }
         ValueType::Item | ValueType::Block | ValueType::EntityKind => {
-            let token = c.expect_ident("an identifier")?;
-            let name = parse_name(c, token)?;
+            let Some(token) = c.next() else {
+                return Err(Error::at("expected an identifier", c.line.end));
+            };
+            let name = match &token.kind {
+                TokenKind::Ident(_) => parse_name(c, token.clone())?,
+                TokenKind::Tag(tag) => format!("#{tag}"),
+                other => {
+                    return Err(Error::at(
+                        format!("expected an identifier, found {}", other.describe()),
+                        token.span.start,
+                    ));
+                }
+            };
             Ok(match ty {
                 ValueType::Item => ArgValue::Item(name),
                 ValueType::Block => ArgValue::Block(name),
@@ -479,6 +490,10 @@ fn parse_primary(c: &mut Cursor<'_>) -> Result<Expr, Error> {
     match &token.kind {
         TokenKind::Int(n) => Ok(Expr::new(ExprKind::Int(*n), token.span)),
         TokenKind::Dollar(name) => Ok(Expr::new(ExprKind::Param(name.clone()), token.span)),
+        TokenKind::Tag(name) => Ok(Expr::new(
+            ExprKind::Name(format!("#{name}")),
+            token.span,
+        )),
         TokenKind::LParen => {
             let inner = parse_or(c)?;
             c.expect_kind(&TokenKind::RParen, "`)`", || {
@@ -541,6 +556,10 @@ fn parse_arg(c: &mut Cursor<'_>) -> Result<Expr, Error> {
     match &token.kind {
         TokenKind::Int(n) => Ok(Expr::new(ExprKind::Int(*n), token.span)),
         TokenKind::Dollar(name) => Ok(Expr::new(ExprKind::Param(name.clone()), token.span)),
+        TokenKind::Tag(name) => Ok(Expr::new(
+            ExprKind::Name(format!("#{name}")),
+            token.span,
+        )),
         TokenKind::Ident(name) => {
             let name = name.clone();
             match name.as_str() {

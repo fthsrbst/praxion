@@ -3,8 +3,8 @@
 # get_stone_pickaxe -> get_cobblestone -> get_wooden_pickaxe -> leaf fits the
 # core depth of 4. It therefore mines its own logs instead of calling get_wood.
 skill get_planks(n: int = 4)
-  doc "Craft at least n oak planks."
+  doc "Craft at least n planks of any wood type."
   rules:
-    count(oak_planks) >= $n -> done
-    count(oak_log) >= 1 -> craft(oak_planks)
-    true -> mine(oak_log)
+    count(#planks) >= $n -> done
+    count(#logs) >= 1 -> craft(#planks)
+    true -> mine(#logs)

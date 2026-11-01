@@ -18,6 +18,7 @@ path = "src/main.rs"
 azalea-block = { path = "../../../third_party/azalea/azalea-block" }
 azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
 azalea-physics = { path = "../../../third_party/azalea/azalea-physics" }
 azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
@@ -27,6 +28,7 @@ praxion-tee = { path = "../tee" }
 praxion-world = { path = "../world" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+indexmap = "2.13"
 tokio = { version = "1.54", features = ["rt", "net", "time", "sync", "macros"] }
 uuid = "1.29"
 

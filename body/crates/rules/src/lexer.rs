@@ -16,6 +16,9 @@ pub enum TokenKind {
     Str(String),
     /// `$name`.
     Dollar(String),
+    /// `#name`: an item or block tag. `#` followed by anything else starts a
+    /// comment.
+    Tag(String),
     Arrow,
     LParen,
     RParen,
@@ -40,6 +43,7 @@ impl TokenKind {
             Self::Int(n) => format!("`{n}`"),
             Self::Str(s) => format!("string {:?}", s),
             Self::Dollar(s) => format!("`${s}`"),
+            Self::Tag(s) => format!("`#{s}`"),
             Self::Arrow => "`->`".into(),
             Self::LParen => "`(`".into(),
             Self::RParen => "`)`".into(),
@@ -93,8 +97,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                 col = 1;
             }
             '#' => {
-                while i < chars.len() && chars[i] != '\n' {
-                    advance(&mut i, &mut col);
+                let start = Pos::new(line, col);
+                advance(&mut i, &mut col);
+                if i < chars.len() && is_ident_start(chars[i]) {
+                    let name = read_ident(&chars, &mut i, &mut col);
+                    out.push(Token {
+                        kind: TokenKind::Tag(name),
+                        span: Span::new(start, Pos::new(line, col)),
+                    });
+                } else {
+                    while i < chars.len() && chars[i] != '\n' {
+                        advance(&mut i, &mut col);
+                    }
                 }
             }
             '"' => {

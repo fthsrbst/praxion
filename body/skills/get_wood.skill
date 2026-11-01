@@ -1,6 +1,8 @@
-# Collect oak logs. The first rung of the first-night chain: no tool needed.
+# Collect logs of any wood type. The first rung of the first-night chain: no
+# tool needed. `#logs` comes from the 26.3 block tag, so birch, spruce and the
+# other woods work on any seed.
 skill get_wood(n: int = 1)
-  doc "Collect at least n oak logs."
+  doc "Collect at least n logs of any wood type."
   rules:
-    count(oak_log) >= $n -> done
-    true -> mine(oak_log)
+    count(#logs) >= $n -> done
+    true -> mine(#logs)

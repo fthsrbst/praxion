@@ -406,3 +406,36 @@ fn an_empty_world_reads_as_air() {
     assert!(body.position().y < 60.0);
     assert!(!body.on_ground());
 }
+
+/// A world that reports its chunks as not loaded, like a player who walked
+/// past the loaded edge (review m1).
+struct NotReady(TestWorld);
+
+impl Blocks for NotReady {
+    fn block(&self, pos: BlockPos) -> Option<BlockState> {
+        self.0.block(pos)
+    }
+
+    fn ready(&self, _position: Vec3) -> bool {
+        false
+    }
+}
+
+#[test]
+fn an_unloaded_chunk_freezes_the_body() {
+    let world = NotReady(TestWorld::flat(63, 4));
+    let mut body = body_at(0.5, 80.0, 0.5);
+    let start = body.position();
+    for _ in 0..40 {
+        body.step(&Held::NONE, &world);
+    }
+    assert_eq!(body.position(), start, "no movement and no gravity while frozen");
+    assert!(!body.on_ground());
+
+    // Once the chunk is loaded the same body falls normally.
+    let mut body = body_at(0.5, 80.0, 0.5);
+    for _ in 0..40 {
+        body.step(&Held::NONE, &TestWorld::flat(63, 4));
+    }
+    assert!(body.position().y < 80.0);
+}

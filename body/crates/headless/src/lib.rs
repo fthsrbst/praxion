@@ -21,9 +21,11 @@
 
 mod chunks;
 mod config;
+mod driver;
 mod error;
 mod events;
 mod frame;
+mod interact;
 mod login;
 mod movement;
 mod physics;
@@ -34,11 +36,13 @@ mod win;
 mod worldfeed;
 
 pub use azalea_protocol::packets::game::ServerboundGamePacket;
+pub use driver::{Driver, DriverHandle, TickView};
 pub use error::Error;
 pub use events::Event;
-pub use frame::{Click, ControlFrame, FrameError, Held, Look, MenuAction};
+pub use frame::{Click, ControlFrame, FrameError, Held, Look, MenuAction, MenuMode};
+pub use interact::{ActuatorState, AppliedReport, Outgoing, Pick, pick};
 pub use login::protocol_version;
 pub use physics::Body;
 pub use script::{Script, ScriptLook, Step};
 pub use session::{ConnectOptions, Session, SessionStats};
-pub use worldfeed::WorldFeed;
+pub use worldfeed::{ObservedPacket, WorldFeed};

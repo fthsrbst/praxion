@@ -35,9 +35,11 @@ use tokio::time::Instant;
 
 use crate::chunks::ChunkBatchInfo;
 use crate::config;
+use crate::driver::{DriverHandle, TickView};
 use crate::error::Error;
 use crate::events::{Command, Event};
 use crate::frame::{Click, ControlFrame, Held};
+use crate::interact::{ActuatorState, AppliedReport, Outgoing};
 use crate::login::{self, GameConn};
 use crate::movement::Movement;
 use crate::physics::Body;
@@ -55,6 +57,7 @@ pub(crate) struct Context<'a> {
     pub auto_respawn: bool,
     pub trace: bool,
     pub script: Option<Arc<Script>>,
+    pub driver: Option<DriverHandle>,
     pub stats: &'a Arc<SessionStats>,
 }
 
@@ -64,6 +67,10 @@ struct PlayState {
     body: Body,
     world: Option<WorldFeed>,
     runner: Option<Runner>,
+    driver: Option<DriverHandle>,
+    actuator: ActuatorState,
+    /// The state id of the open container, from `container_set_content`/`_slot`.
+    menu_state_id: u32,
     /// The controls the actuator currently holds.
     held: Held,
     /// The input packet the server already has.
@@ -94,6 +101,7 @@ impl PlayState {
         auto_respawn: bool,
         world: Option<WorldFeed>,
         script: Option<Arc<Script>>,
+        driver: Option<DriverHandle>,
         position: Vec3,
         look: LookDirection,
     ) -> Self {
@@ -104,6 +112,9 @@ impl PlayState {
             body: Body::new(position),
             world,
             runner: script.map(|script| Runner::new((*script).clone())),
+            driver,
+            actuator: ActuatorState::default(),
+            menu_state_id: 0,
             held: Held::NONE,
             last_sent_input: ServerboundPlayerInput::default(),
             last_sprinting: false,
@@ -132,7 +143,46 @@ impl PlayState {
 
         let mut stepped = false;
         if self.client_loaded {
-            self.apply_frame(tick, stats);
+            let frame = self.next_frame(tick, stats);
+            let mut applied_ok = false;
+            match frame.apply_with_menu(&mut self.body, tick) {
+                Ok(applied) => {
+                    applied_ok = true;
+                    self.held = frame.held;
+                    for click in &frame.clicks {
+                        match click {
+                            Click::Attack => stats
+                                .attack_clicks
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            Click::Use => stats
+                                .use_clicks
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        };
+                    }
+                    if applied.clicks > 0 {
+                        eprintln!("clicks: {:?}", frame.clicks);
+                    }
+                }
+                Err(error) => {
+                    // A dropped frame must not leave a control held.
+                    stats
+                        .frames_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("frame dropped: {error}");
+                    self.held = Held::NONE;
+                }
+            }
+            let report = if applied_ok {
+                self.interact(&frame, writer, trace).await?
+            } else {
+                AppliedReport::default()
+            };
+            if let Some(driver) = &self.driver {
+                driver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .applied(tick, &report);
+            }
             stepped = self.step_physics(stats);
         }
 
@@ -151,44 +201,91 @@ impl PlayState {
         Ok(())
     }
 
-    fn apply_frame(&mut self, tick: u64, stats: &SessionStats) {
+    /// The frame for this tick: from the external driver when there is one,
+    /// else from the script runner, else idle.
+    fn next_frame(&mut self, tick: u64, stats: &SessionStats) -> ControlFrame {
+        if let Some(driver) = &self.driver {
+            let packets = self
+                .world
+                .as_ref()
+                .map(WorldFeed::take_packets)
+                .unwrap_or_default();
+            let frame = if let Some(feed) = &self.world {
+                let world = feed.lock();
+                driver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .frame(&TickView {
+                        tick,
+                        body: &self.body,
+                        world: Some(&world),
+                        packets: &packets,
+                    })
+            } else {
+                driver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .frame(&TickView {
+                        tick,
+                        body: &self.body,
+                        world: None,
+                        packets: &packets,
+                    })
+            };
+            stats
+                .frames
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return frame;
+        }
         let Some(runner) = &mut self.runner else {
-            return;
+            return ControlFrame::new(tick, self.body.generation(), Held::NONE);
         };
-        let frame: ControlFrame = runner.frame(tick, self.body.generation());
+        let frame = runner.frame(tick, self.body.generation());
         stats
             .frames
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match frame.apply(&mut self.body, tick) {
-            Ok(applied) => {
-                self.held = frame.held;
-                for click in &frame.clicks {
-                    match click {
-                        Click::Attack => stats
-                            .attack_clicks
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                        Click::Use => stats
-                            .use_clicks
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    };
-                }
-                if applied.clicks > 0 {
-                    eprintln!("clicks: {:?} (accepted, not executed)", frame.clicks);
-                }
-            }
-            Err(error) => {
-                // A dropped frame must not leave a control held.
-                stats
-                    .frames_dropped
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("frame dropped: {error}");
-                self.held = Held::NONE;
-            }
-        }
         if !self.script_done_logged && runner.finished() {
             self.script_done_logged = true;
             eprintln!("script finished: everything released");
         }
+        frame
+    }
+
+    /// Turn the frame's clicks and menu actions into the packets a vanilla
+    /// client would send, and report what the actuator used for attribution.
+    async fn interact(
+        &mut self,
+        frame: &ControlFrame,
+        writer: &mut WriteConnection<ServerboundGamePacket>,
+        trace: bool,
+    ) -> Result<AppliedReport, Error> {
+        let Some(feed) = &self.world else {
+            return Ok(AppliedReport::default());
+        };
+        let (packets, report) = {
+            let world = feed.lock();
+            crate::interact::plan(
+                &mut self.actuator,
+                &self.body,
+                &world,
+                frame,
+                self.menu_state_id,
+            )
+        };
+        for packet in packets {
+            match packet {
+                Outgoing::Packet(packet) => login::send(writer, packet, trace).await?,
+                Outgoing::PlayerAction {
+                    action,
+                    pos,
+                    direction,
+                    seq,
+                } => {
+                    login::send_player_action(writer, action, pos, direction, seq, trace).await?
+                }
+            }
+        }
+        Ok(report)
     }
 
     /// Step physics if the world around us is usable; returns whether we did.
@@ -333,6 +430,7 @@ pub(crate) async fn run(
         ctx.auto_respawn,
         world,
         ctx.script.clone(),
+        ctx.driver.clone(),
         Vec3::ZERO,
         LookDirection::default(),
     );
@@ -454,6 +552,7 @@ async fn handle(
             login::send(writer, ServerboundPong { id: p.id }, ctx.trace).await?;
         }
         ClientboundGamePacket::PlayerPosition(p) => {
+            eprintln!("player_position {:?} relative={:?}", p.change, p.relative);
             state.body.teleport(&p.change, &p.relative);
             state
                 .movement
@@ -530,6 +629,22 @@ async fn handle(
                 ctx.trace,
             )
             .await?;
+        }
+        ClientboundGamePacket::OpenScreen(_) => {
+            state.menu_state_id = 0;
+        }
+        ClientboundGamePacket::ContainerSetContent(p) => {
+            if p.container_id != 0 {
+                state.menu_state_id = p.state_id;
+            }
+        }
+        ClientboundGamePacket::ContainerSetSlot(p) => {
+            if p.container_id != 0 {
+                state.menu_state_id = p.state_id;
+            }
+        }
+        ClientboundGamePacket::ContainerClose(_) => {
+            state.menu_state_id = 0;
         }
         ClientboundGamePacket::StartConfiguration(_) => {
             login::send(writer, ServerboundConfigurationAcknowledged, ctx.trace).await?;

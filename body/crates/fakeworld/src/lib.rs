@@ -106,6 +106,39 @@ impl State {
         self.inventory.get(item).copied().unwrap_or(0)
     }
 
+    /// The count of an item or of every member of an item tag (`#planks`).
+    fn count_any(&self, item: &str) -> u32 {
+        if let Some(tag) = item.strip_prefix('#') {
+            recipes::item_tag(tag)
+                .unwrap_or(&[])
+                .iter()
+                .map(|value| self.count(value))
+                .sum()
+        } else {
+            self.count(item)
+        }
+    }
+
+    /// Consumes `count` of an item, or of any members of an item tag.
+    fn take_any(&mut self, item: &str, count: u32) -> bool {
+        if let Some(tag) = item.strip_prefix('#') {
+            let mut left = count;
+            for value in recipes::item_tag(tag).unwrap_or(&[]) {
+                let take = self.count(value).min(left);
+                if take > 0 {
+                    self.take(value, take);
+                    left -= take;
+                }
+                if left == 0 {
+                    return true;
+                }
+            }
+            left == 0
+        } else {
+            self.take(item, count)
+        }
+    }
+
     fn grant(&mut self, item: &str, count: u32) {
         *self.inventory.entry(item.to_string()).or_insert(0) += count;
     }
@@ -143,6 +176,48 @@ impl State {
         self.blocks
             .iter()
             .any(|block| block.name == name && block.distance <= radius)
+    }
+
+    /// `near(#logs, r)`: any member of the block tag is near.
+    fn nearby_any(&self, name: &str, radius: u32) -> bool {
+        if let Some(tag) = name.strip_prefix('#') {
+            let values = recipes::block_tag(tag).unwrap_or(&[]);
+            self.blocks.iter().any(|block| {
+                block.distance <= radius && values.iter().any(|value| *value == block.name)
+            })
+        } else {
+            self.nearby(name, radius)
+        }
+    }
+
+    /// The block a tag resolves to for a placement: the first member the player
+    /// holds, or the first member.
+    fn place_block_any(&self, name: &str) -> Option<String> {
+        if let Some(tag) = name.strip_prefix('#') {
+            let values = recipes::block_tag(tag).unwrap_or(&[]);
+            values
+                .iter()
+                .find(|value| self.count(value) > 0)
+                .or_else(|| values.first())
+                .map(|value| (*value).to_string())
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    /// The recipe for an item or item tag whose ingredients this world has.
+    fn recipe_for(&self, item: &str) -> Option<&'static recipes::Recipe> {
+        let candidates: Vec<&'static recipes::Recipe> = if let Some(tag) = item.strip_prefix('#') {
+            recipes::recipes_for_tag(tag).collect()
+        } else {
+            recipes::recipes_for(item).collect()
+        };
+        candidates.into_iter().find(|recipe| {
+            recipe
+                .inputs()
+                .iter()
+                .all(|input| self.count_any(&input.item) >= input.count)
+        })
     }
 
     fn nearby_entity(&self, kind: &str, radius: u32) -> bool {
@@ -191,7 +266,7 @@ impl State {
                 let Some(block) = arg_name(action, 0) else {
                     return (MINE_TICKS, Some(Outcome::Failed("bad_argument".into())));
                 };
-                if !self.nearby(block, 4) {
+                if !self.nearby_any(block, 4) {
                     return (MINE_TICKS, Some(Outcome::Failed("no_block".into())));
                 }
                 if recipes::needs_pickaxe(block) && !self.has_pickaxe() {
@@ -203,7 +278,7 @@ impl State {
                 let Some(block) = arg_name(action, 0) else {
                     return (PLACE_TICKS, Some(Outcome::Failed("bad_argument".into())));
                 };
-                if self.count(block) == 0 {
+                if self.count_any(block) == 0 {
                     return (PLACE_TICKS, Some(Outcome::Failed("no_item".into())));
                 }
                 (PLACE_TICKS, None)
@@ -212,16 +287,9 @@ impl State {
                 let Some(item) = arg_name(action, 0) else {
                     return (CRAFT_TICKS, Some(Outcome::Failed("bad_argument".into())));
                 };
-                let Some(recipe) = recipes::recipe(item) else {
+                let Some(recipe) = self.recipe_for(item) else {
                     return (CRAFT_TICKS, Some(Outcome::Failed("no_recipe".into())));
                 };
-                if recipe
-                    .inputs
-                    .iter()
-                    .any(|input| self.count(input.item) < input.count)
-                {
-                    return (CRAFT_TICKS, Some(Outcome::Failed("missing_ingredients".into())));
-                }
                 if recipe.needs_table && !self.nearby("crafting_table", 4) {
                     return (CRAFT_TICKS, Some(Outcome::Failed("needs_table".into())));
                 }
@@ -293,15 +361,35 @@ impl State {
                 if self.rng.chance(CHANCE_MINE_FAIL) {
                     return Outcome::Failed("block_resisted".into());
                 }
-                self.remove_block(&block);
-                if let Some(drops) = recipes::block_drops(&block) {
+                let mined = if block.starts_with('#') {
+                    let values = recipes::block_tag(block.strip_prefix('#').unwrap_or("")).unwrap_or(&[]);
+                    let name = self
+                        .blocks
+                        .iter()
+                        .find(|nearby| values.iter().any(|value| *value == nearby.name))
+                        .map(|nearby| nearby.name.clone());
+                    let Some(name) = name else {
+                        return Outcome::Failed("no_block".into());
+                    };
+                    self.remove_block(&name);
+                    name
+                } else {
+                    if !self.remove_block(&block) {
+                        return Outcome::Failed("no_block".into());
+                    }
+                    block
+                };
+                if let Some(drops) = recipes::block_drops(&mined) {
                     self.grant_drops(drops);
                 }
                 Outcome::Confirmed
             }
             "place" => {
                 let block = arg_name(action, 0).unwrap_or_default().to_string();
-                if !self.take(&block, 1) {
+                let Some(block) = self.place_block_any(&block) else {
+                    return Outcome::Failed("no_item".into());
+                };
+                if !self.take_any(&block, 1) {
                     return Outcome::Failed("no_item".into());
                 }
                 if self.blocks.iter().any(|nearby| nearby.name == block) {
@@ -317,21 +405,21 @@ impl State {
             }
             "craft" => {
                 let item = arg_name(action, 0).unwrap_or_default().to_string();
-                let Some(recipe) = recipes::recipe(&item) else {
+                let Some(recipe) = self.recipe_for(&item) else {
                     return Outcome::Failed("no_recipe".into());
                 };
-                let cap = self.caps.get(&item).copied().unwrap_or(u32::MAX);
-                if self.count(&item) >= cap {
+                let cap = self.caps.get(recipe.output).copied().unwrap_or(u32::MAX);
+                if self.count(recipe.output) >= cap {
                     self.stats.wasted_crafts += 1;
                 }
-                for input in recipe.inputs {
-                    if !self.take(input.item, input.count) {
+                for input in recipe.inputs() {
+                    if !self.take_any(&input.item, input.count) {
                         return Outcome::Failed("missing_ingredients".into());
                     }
                 }
                 self.grant(recipe.output, recipe.output_count);
                 self.stats.crafts += 1;
-                self.perturb_craft(&item);
+                self.perturb_craft(recipe.output);
                 Outcome::Confirmed
             }
             "eat" => {
@@ -609,7 +697,7 @@ impl Facts for FakeWorld {
                 .args
                 .first()
                 .and_then(ArgValue::name)
-                .is_some_and(|name| state.count(name) > 0),
+                .is_some_and(|name| state.count_any(name) > 0),
             "near" => match call.args.first().and_then(ArgValue::name) {
                 Some(name) => {
                     let radius = call
@@ -618,7 +706,7 @@ impl Facts for FakeWorld {
                         .and_then(ArgValue::as_int)
                         .unwrap_or(0)
                         .max(0) as u32;
-                    state.nearby(name, radius)
+                    state.nearby_any(name, radius)
                 }
                 None => false,
             },
@@ -653,7 +741,7 @@ impl Facts for FakeWorld {
                 call.args
                     .first()
                     .and_then(ArgValue::name)
-                    .map(|name| i64::from(state.count(name)))
+                    .map(|name| i64::from(state.count_any(name)))
                     .unwrap_or(0),
             ),
             _ => IntValue::Unknown(call.clone()),

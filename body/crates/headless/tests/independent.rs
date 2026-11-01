@@ -203,7 +203,6 @@ fn frame_aim_pitch_beyond_90() {
 // FINDING 1: NaN in a ControlFrame is not validated; apply() accepts it and
 // poisons the body's look direction. See review file.
 #[test]
-#[ignore = "FINDING 1"]
 fn frame_nan_refused() {
     let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
     let mut frame = ControlFrame::new(0, body.generation(), Held::NONE);

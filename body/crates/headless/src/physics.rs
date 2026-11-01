@@ -60,12 +60,13 @@ use azalea_core::{
     cursor3d::{Cursor3d, CursorIterationType},
     direction::{Axis, Direction},
     math::{self, EPSILON},
-    position::{BlockPos, Vec2, Vec3},
+    position::{BlockPos, ChunkPos, Vec2, Vec3},
 };
 use azalea_entity::{
-    Attributes, LookDirection, Physics, PlayerAbilities, Pose, Position,
+    ActiveEffects, Attributes, LookDirection, Physics, PlayerAbilities, Pose, Position,
     dimensions::{EntityDimensions, calculate_dimensions},
 };
+use azalea_inventory::{ItemStack, components::Tool};
 use azalea_physics::{
     collision::{BLOCK_SHAPE, BlockWithShape, Shapes, VoxelShape, legacy_blocks_motion},
     get_block_pos_below_that_affects_movement,
@@ -93,11 +94,33 @@ const MIN_VERTICAL_SPEED: f64 = 0.003;
 /// Both read as air, exactly like `azalea_world`'s `unwrap_or_default()`.
 pub trait Blocks {
     fn block(&self, pos: BlockPos) -> Option<BlockState>;
+
+    /// Whether the chunks around `position` are loaded, so physics may run.
+    ///
+    /// Vanilla freezes a player whose chunk is not loaded: no movement and no
+    /// gravity. The default is `true`, for fixtures that provide every block
+    /// through [`Blocks::block`]. A world with no dimension at all is "not
+    /// playing" rather than "an unloaded chunk", so it keeps the old behaviour
+    /// (read as air) and the physics tests can use an empty [`praxion_world::World`].
+    fn ready(&self, _position: Vec3) -> bool {
+        true
+    }
 }
 
 impl Blocks for praxion_world::World {
     fn block(&self, pos: BlockPos) -> Option<BlockState> {
         self.block_state(pos)
+    }
+
+    fn ready(&self, position: Vec3) -> bool {
+        if !self.status().is_valid() || self.dimension().is_none() {
+            return true;
+        }
+        // Vanilla freezes a player whose own chunk is not loaded. The live
+        // session additionally refuses to step until the 3x3 chunks around the
+        // player are there (`play.rs::world_ready`); this check is the minimum
+        // that keeps a direct `Body::step` caller from falling through a gap.
+        self.has_chunk(ChunkPos::from(&position))
     }
 }
 
@@ -116,6 +139,7 @@ pub struct Body {
     pose: Pose,
     attributes: Attributes,
     abilities: PlayerAbilities,
+    active_effects: ActiveEffects,
     sprinting: bool,
     /// The crouching pose, one tick behind the sneak key (see the module docs).
     crouching: bool,
@@ -138,6 +162,7 @@ impl Body {
             pose,
             attributes: Attributes::new(EntityKind::Player),
             abilities: PlayerAbilities::default(),
+            active_effects: ActiveEffects::default(),
             sprinting: false,
             crouching: false,
             trying_to_crouch: false,
@@ -201,6 +226,13 @@ impl Body {
 
     /// One client tick: the frame's held controls, then azalea's physics order.
     pub fn step(&mut self, held: &Held, world: &dyn Blocks) {
+        // Vanilla freezes a player whose chunk is not loaded: no movement, no
+        // gravity (review m1). The input is remembered so the first tick after
+        // the chunk arrives sees the held keys.
+        if !world.ready(self.position()) {
+            self.last_input = *held;
+            return;
+        }
         // Update, before GameTick: pose, dimensions and bounding box from the
         // (one tick old) crouching state.
         self.crouching = self.last_input.sneak;
@@ -252,6 +284,74 @@ impl Body {
     /// Whether the body currently touches water (after the last step).
     pub fn is_in_water(&self) -> bool {
         self.physics.is_in_water()
+    }
+
+    /// The eye position the interaction ray starts from.
+    pub fn eye_position(&self) -> Vec3 {
+        self.position.up(f64::from(self.dimensions.eye_height))
+    }
+
+    /// The vanilla 26.3 block interaction range (4.5 blocks).
+    pub fn block_interaction_range(&self) -> f64 {
+        self.attributes.block_interaction_range.calculate()
+    }
+
+    /// The vanilla 26.3 entity interaction range (3.0 blocks).
+    pub fn entity_interaction_range(&self) -> f64 {
+        self.attributes.entity_interaction_range.calculate()
+    }
+
+    /// Ticks between two full-strength attacks (`20 / attack_speed`).
+    pub fn attack_cooldown_ticks(&self) -> u32 {
+        let speed = self.attributes.attack_speed.calculate();
+        if speed <= 0. {
+            return 20;
+        }
+        ((1. / speed) * 20.).ceil() as u32
+    }
+
+    /// How much destroy progress one tick adds to `block` with `held`.
+    ///
+    /// Ported from `azalea-entity/src/mining.rs:17-129` (`get_mine_progress`,
+    /// `destroy_speed`, `base_destroy_speed`, `has_correct_tool_for_drops`).
+    /// Haste and mining fatigue come from [`ActiveEffects`], efficiency and
+    /// block-break speed from the attributes. The eye-in-water aqua-affinity
+    /// adjustment is a TODO in azalea too (`mining.rs:103-109`).
+    pub fn mine_progress(&self, block: BlockState, held: &ItemStack) -> f32 {
+        let block = Box::<dyn BlockTrait>::from(block);
+        let destroy_time = block.behavior().destroy_time;
+        if destroy_time == -1. {
+            return 0.;
+        }
+        let divisor = if has_correct_tool_for_drops(block.as_ref(), held) {
+            30.
+        } else {
+            100.
+        };
+        let mut speed = base_destroy_speed(block.as_block_kind(), held);
+        if speed > 1. {
+            speed += self.attributes.mining_efficiency.calculate() as f32;
+        }
+        if let Some(amplifier) = self.active_effects.get_dig_speed_amplifier() {
+            speed *= 1. + (amplifier + 1) as f32 * 0.2;
+        }
+        if let Some(level) = self
+            .active_effects
+            .get_level(azalea_registry::builtin::MobEffect::MiningFatigue)
+        {
+            let multiplier = match level {
+                0 => 0.3,
+                1 => 0.09,
+                2 => 0.0027,
+                _ => 8.1E-4,
+            };
+            speed *= multiplier;
+        }
+        speed *= self.attributes.block_break_speed.calculate() as f32;
+        if !self.on_ground() {
+            speed /= 5.;
+        }
+        (speed / destroy_time) / divisor
     }
 
     fn set_sprinting(&mut self, sprinting: bool) {
@@ -1090,6 +1190,39 @@ fn get_fluid_falling_adjusted_movement(
     } else {
         new_velocity
     }
+}
+
+/// `has_correct_tool_for_drops` (`azalea-entity/src/mining.rs:48-65`).
+fn has_correct_tool_for_drops(block: &dyn BlockTrait, item: &ItemStack) -> bool {
+    if !block.behavior().requires_correct_tool_for_drops {
+        return true;
+    }
+    let Some(tool) = item.get_component::<Tool>() else {
+        return false;
+    };
+    let registry_block = block.as_block_kind();
+    for rule in &tool.rules {
+        if let Some(correct) = rule.correct_for_drops
+            && rule.blocks.contains(registry_block)
+        {
+            return correct;
+        }
+    }
+    false
+}
+
+/// `base_destroy_speed` (`azalea-entity/src/mining.rs:118-129`).
+fn base_destroy_speed(block: azalea_registry::builtin::BlockKind, item: &ItemStack) -> f32 {
+    let tool = item.get_component::<Tool>();
+    let Some(tool) = tool else { return 1. };
+    for rule in &tool.rules {
+        if let Some(speed) = rule.speed
+            && rule.blocks.contains(block)
+        {
+            return speed;
+        }
+    }
+    tool.default_mining_speed
 }
 
 #[cfg(test)]

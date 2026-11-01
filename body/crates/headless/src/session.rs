@@ -21,6 +21,7 @@ use azalea_protocol::packets::game::ServerboundGamePacket;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 
+use crate::driver::DriverHandle;
 use crate::error::Error;
 use crate::events::{Command, Event};
 use crate::script::Script;
@@ -28,7 +29,7 @@ use crate::worldfeed::WorldFeed;
 use crate::{login, play};
 
 /// Options for [`Session::connect_with`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ConnectOptions {
     /// Ask to respawn as soon as the server says we died.
     pub auto_respawn: bool,
@@ -40,9 +41,24 @@ pub struct ConnectOptions {
     pub trace_packets: bool,
     /// A scripted frame source. Without it the body holds no control at all.
     pub script: Option<Arc<Script>>,
+    /// An external decision layer. Takes precedence over `script`.
+    pub driver: Option<DriverHandle>,
     /// Subscribe to the forwarder's tee at this address and run the decoder and
     /// world in-process. Without it there is no world and movement is refused.
     pub tee: Option<SocketAddr>,
+}
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("auto_respawn", &self.auto_respawn)
+            .field("tune_loop", &self.tune_loop)
+            .field("trace_packets", &self.trace_packets)
+            .field("script", &self.script.is_some())
+            .field("driver", &self.driver.is_some())
+            .field("tee", &self.tee)
+            .finish()
+    }
 }
 
 /// Counters for the owner, written by the session thread.
@@ -358,6 +374,7 @@ async fn run_session(
         auto_respawn: options.auto_respawn,
         trace: options.trace_packets,
         script: options.script,
+        driver: options.driver,
         stats: &stats,
     };
     if let Err(error) = play::run(conn, &mut context, world).await {

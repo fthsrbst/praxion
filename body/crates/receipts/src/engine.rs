@@ -87,13 +87,15 @@ struct StoredOutcome {
 impl Receipt {
     fn new(id: ReceiptId, intent: Intent, world: &World) -> Self {
         let initial_block = match &intent.expect {
-            Expect::BlockBecomesAir { pos } | Expect::BlockState { pos, .. } => {
-                world.block_state(*pos).map(|state| BlockSnapshot { state })
-            }
+            Expect::BlockBecomesAir { pos } | Expect::BlockState { pos, .. } => intent
+                .initial_block
+                .map(|state| BlockSnapshot { state })
+                .or_else(|| world.block_state(*pos).map(|state| BlockSnapshot { state })),
             _ => None,
         };
         let baseline_count = match &intent.expect {
             Expect::Inventory { item, .. } => item_count(world, item),
+            Expect::StorageInventory { item, .. } => storage_count(world, item),
             _ => 0,
         };
         let slot_before = match &intent.expect {
@@ -139,7 +141,9 @@ impl Receipt {
                         }
                         _ => None,
                     };
-                    if let Some(state) = state {
+                    if let Some(state) = state
+                        && self.intent.initial_block.is_none()
+                    {
                         self.initial_block = Some(BlockSnapshot { state });
                     }
                 }
@@ -147,6 +151,13 @@ impl Receipt {
             Expect::Inventory { item, .. } => {
                 if is_inventory_packet(packet) {
                     let current = item_count(world, item);
+                    self.baseline_count = current;
+                    self.inventory_last = current;
+                }
+            }
+            Expect::StorageInventory { item, .. } => {
+                if is_inventory_packet(packet) {
+                    let current = storage_count(world, item);
                     self.baseline_count = current;
                     self.inventory_last = current;
                 }
@@ -177,7 +188,13 @@ impl Receipt {
                 let item = item.clone();
                 let delta = *delta;
                 let attribution = self.intent.attribution;
-                self.observe_inventory(packet, tick, world, &item, delta, attribution)
+                self.observe_inventory(packet, tick, world, &item, delta, attribution, false)
+            }
+            Expect::StorageInventory { item, delta } => {
+                let item = item.clone();
+                let delta = *delta;
+                let attribution = self.intent.attribution;
+                self.observe_inventory(packet, tick, world, &item, delta, attribution, true)
             }
             Expect::Unrefuted => self.observe_movement(packet, tick),
             Expect::SlotClick { container_id, slot, state_id } => {
@@ -301,11 +318,16 @@ impl Receipt {
         item: &str,
         delta: i64,
         attribution: Attribution,
+        storage: bool,
     ) -> Option<(Outcome, Option<String>)> {
         if !is_inventory_packet(packet) || !world.status().is_valid() {
             return None;
         }
-        let current = item_count(world, item);
+        let current = if storage {
+            storage_count(world, item)
+        } else {
+            item_count(world, item)
+        };
         let changed = current != self.inventory_last;
         self.inventory_last = current;
         if !changed {
@@ -402,8 +424,8 @@ impl Receipt {
         }
     }
 
-    /// `EntityHurt`: the hurt animation, the hurt entity event (status 2) or the
-    /// entity's removal settles the attack receipt.
+    /// `EntityHurt`: the damage event, the hurt animation, the hurt entity
+    /// event (status 2) or the entity's removal settles the attack receipt.
     fn observe_entity_hurt(
         &mut self,
         packet: &Packet,
@@ -414,6 +436,9 @@ impl Receipt {
             return None;
         };
         let hit = match packet {
+            // 26.3 sends a damage event for every hit; this is the packet a
+            // NoAI zombie death produced in the live capture.
+            ClientboundGamePacket::DamageEvent(event) => event.entity_id.0 == id,
             ClientboundGamePacket::HurtAnimation(hurt) => hurt.id.0 == id,
             ClientboundGamePacket::EntityEvent(event) => {
                 event.entity_id.0 == id && event.event_id == 2
@@ -482,7 +507,7 @@ impl Receipt {
                 };
                 (Outcome::Unconfirmed, Some(note.to_owned()))
             }
-            Expect::Inventory { .. } => {
+            Expect::Inventory { .. } | Expect::StorageInventory { .. } => {
                 (Outcome::Unconfirmed, Some("no_inventory_delta".to_owned()))
             }
             Expect::Unrefuted => (Outcome::Confirmed, Some("unrefuted".to_owned())),
@@ -552,14 +577,17 @@ impl Receipt {
                     _ => None,
                 }
             }
-            Expect::Inventory { item, delta } => {
+            Expect::Inventory { item, delta } | Expect::StorageInventory { item, delta } => {
                 if self.inventory_hit.is_some()
                     || !is_inventory_packet(packet)
                     || !world.status().is_valid()
                 {
                     return None;
                 }
-                let current = item_count(world, item);
+                let current = match &self.intent.expect {
+                    Expect::StorageInventory { .. } => storage_count(world, item),
+                    _ => item_count(world, item),
+                };
                 let changed = current != self.inventory_last;
                 self.inventory_last = current;
                 if !changed {
@@ -614,6 +642,11 @@ impl Receipt {
                 _ => None,
             },
             Expect::EntityHurt { id } => match packet {
+                Packet::PlayClientbound(ClientboundGamePacket::DamageEvent(event))
+                    if event.entity_id.0 == *id && self.hurt_hit.is_none() =>
+                {
+                    Some("entity_hurt")
+                }
                 Packet::PlayClientbound(ClientboundGamePacket::HurtAnimation(hurt))
                     if hurt.id.0 == *id && self.hurt_hit.is_none() =>
                 {
@@ -1057,6 +1090,42 @@ fn item_count(world: &World, item: &str) -> i64 {
         })
         .map(|stack| i64::from(stack.count()))
         .sum()
+}
+
+/// The player's storage slots only (inventory index 9 upwards, plus the
+/// cursor). Slots 0 to 8 are the crafting result, the crafting grid and the
+/// armour slots; a result sitting there has not reached the inventory yet.
+///
+/// While a menu is open the server reports the player's storage as the menu's
+/// last 36 slots (a menu puts its own slots first and the player's 27 storage
+/// slots plus 9 hotbar slots last). `World::inventory` is only updated by
+/// container 0 packets, so a result the server shift-clicked into the hotbar
+/// reaches us as a container packet for the open menu and would otherwise be
+/// invisible to the receipt.
+fn storage_count(world: &World, item: &str) -> i64 {
+    const PLAYER_STORAGE_SLOTS: usize = 36;
+    let wanted: Option<ItemKind> = item.parse().ok();
+    let count = |stack: &praxion_world::ItemStack| {
+        let matches = match &wanted {
+            Some(wanted) => stack.kind() == *wanted,
+            None => normalize(&stack.kind().to_str()) == normalize(item),
+        };
+        if matches { i64::from(stack.count()) } else { 0 }
+    };
+    let open = world
+        .open_container()
+        .filter(|container| container.slots().len() >= PLAYER_STORAGE_SLOTS);
+    let stored: i64 = match open {
+        Some(container) => {
+            let slots = container.slots();
+            slots[slots.len() - PLAYER_STORAGE_SLOTS..]
+                .iter()
+                .map(count)
+                .sum()
+        }
+        None => world.inventory().iter().skip(9).map(count).sum(),
+    };
+    stored + count(world.carried_item())
 }
 
 fn slot_item(world: &World, container_id: i32, slot: i16) -> Option<SlotItem> {

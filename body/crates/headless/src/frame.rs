@@ -97,12 +97,32 @@ pub enum Click {
     Use,
 }
 
-/// A container action. This step has no menus, so any value is refused.
+/// A container action. The session executes it; [`ControlFrame::apply`] alone
+/// still refuses menu frames so a caller that has no inventory cannot half-apply
+/// one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MenuAction {
     pub window: u32,
     pub slot: i16,
     pub button: i8,
+}
+
+/// How the frame's [`MenuAction`] is performed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MenuMode {
+    /// Pick the slot up (button 0) or place one item (button 1).
+    #[default]
+    Click,
+    /// Shift-click: quick-move the stack.
+    ShiftClick,
+    /// Swap the slot with a hotbar slot; `button` is the hotbar index 0 to 8.
+    Swap,
+    /// Drop one item (button 0) or the whole stack (button 1).
+    Throw,
+    /// Clone the slot (creative only).
+    Clone,
+    /// Close the window; the slot and button are ignored.
+    Close,
 }
 
 /// What a decision layer asks the actuator to do for one tick.
@@ -114,10 +134,14 @@ pub struct ControlFrame {
     pub generation: u32,
     pub held: Held,
     pub look: Look,
-    /// Clicks this tick. Counted and logged, never executed in this step.
+    /// Clicks this tick. Held across ticks, like a physical mouse button.
     pub clicks: Vec<Click>,
-    /// Menu actions. `None` is the only accepted value in this step.
+    /// The hotbar slot to select, if it should change.
+    pub select_slot: Option<u8>,
+    /// A container action. `None` means no menu action this tick.
     pub menu: Option<MenuAction>,
+    /// How `menu` is performed.
+    pub menu_mode: MenuMode,
 }
 
 impl ControlFrame {
@@ -129,7 +153,9 @@ impl ControlFrame {
             held,
             look: Look::None,
             clicks: Vec::new(),
+            select_slot: None,
             menu: None,
+            menu_mode: MenuMode::Click,
         }
     }
 }
@@ -143,6 +169,9 @@ pub enum FrameError {
     WrongTick { frame: u64, current: u64 },
     /// The frame carries container actions and this step has no menus.
     MenuUnsupported,
+    /// A look field is NaN or infinite. The frame is refused before the body is
+    /// touched; a NaN yaw would otherwise poison every later movement.
+    InvalidNumber { field: &'static str },
 }
 
 impl std::fmt::Display for FrameError {
@@ -155,6 +184,9 @@ impl std::fmt::Display for FrameError {
                 write!(f, "frame tick {frame}, simulating tick {current}")
             }
             FrameError::MenuUnsupported => write!(f, "menu actions are not supported yet"),
+            FrameError::InvalidNumber { field } => {
+                write!(f, "frame look field `{field}` is not finite")
+            }
         }
     }
 }
@@ -169,8 +201,29 @@ impl ControlFrame {
     /// Validate, then apply the frame's look and held state to `body`.
     ///
     /// Nothing is applied when validation fails, so the caller can keep the
-    /// previous held state or fall back to a release frame.
+    /// previous held state or fall back to a release frame. A frame with a menu
+    /// action is refused: use [`ControlFrame::apply_with_menu`] in a session
+    /// that owns an inventory.
     pub fn apply(&self, body: &mut Body, current_tick: u64) -> Result<Applied, FrameError> {
+        self.apply_inner(body, current_tick, false)
+    }
+
+    /// Like [`ControlFrame::apply`], but accepts a menu action. The caller must
+    /// execute the menu action after this returns.
+    pub fn apply_with_menu(
+        &self,
+        body: &mut Body,
+        current_tick: u64,
+    ) -> Result<Applied, FrameError> {
+        self.apply_inner(body, current_tick, true)
+    }
+
+    fn apply_inner(
+        &self,
+        body: &mut Body,
+        current_tick: u64,
+        menus_supported: bool,
+    ) -> Result<Applied, FrameError> {
         if self.generation != body.generation() {
             return Err(FrameError::Stale {
                 frame: self.generation,
@@ -183,8 +236,29 @@ impl ControlFrame {
                 current: current_tick,
             });
         }
-        if self.menu.is_some() {
+        if self.menu.is_some() && !menus_supported {
             return Err(FrameError::MenuUnsupported);
+        }
+
+        // Refuse non-finite look values before touching the body (review M1).
+        match self.look {
+            Look::None => {}
+            Look::Delta { dyaw, dpitch } => {
+                if !dyaw.is_finite() {
+                    return Err(FrameError::InvalidNumber { field: "dyaw" });
+                }
+                if !dpitch.is_finite() {
+                    return Err(FrameError::InvalidNumber { field: "dpitch" });
+                }
+            }
+            Look::Aim { yaw, pitch } => {
+                if !yaw.is_finite() {
+                    return Err(FrameError::InvalidNumber { field: "yaw" });
+                }
+                if !pitch.is_finite() {
+                    return Err(FrameError::InvalidNumber { field: "pitch" });
+                }
+            }
         }
 
         match self.look {
@@ -193,10 +267,12 @@ impl ControlFrame {
                 let look = body.look();
                 body.set_look(LookDirection::new(
                     look.y_rot() + dyaw,
-                    look.x_rot() + dpitch,
+                    (look.x_rot() + dpitch).clamp(-90., 90.),
                 ));
             }
-            Look::Aim { yaw, pitch } => body.set_look(LookDirection::new(yaw, pitch)),
+            Look::Aim { yaw, pitch } => {
+                body.set_look(LookDirection::new(yaw, pitch.clamp(-90., 90.)));
+            }
         }
 
         Ok(Applied {

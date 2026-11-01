@@ -1,16 +1,18 @@
 use std::path::{Path, PathBuf};
 
 use azalea_block::BlockState;
+use azalea_core::entity_id::{MinecraftEntityId, OptionalEntityId};
 use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos, Vec3};
 use azalea_inventory::operations::ClickType;
 use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
 use azalea_protocol::packets::game::{
     ClientboundBlockChangedAck, ClientboundBlockUpdate, ClientboundContainerSetContent,
-    ClientboundContainerSetSlot, ClientboundGamePacket, ClientboundPlayerPosition,
-    ClientboundSectionBlocksUpdate, ServerboundContainerClick, ServerboundGamePacket,
+    ClientboundContainerSetSlot, ClientboundDamageEvent, ClientboundGamePacket,
+    ClientboundOpenScreen, ClientboundPlayerPosition, ClientboundSectionBlocksUpdate,
+    ServerboundContainerClick, ServerboundGamePacket,
     c_section_blocks_update::BlockStateWithPosition, s_container_click::HashedStack,
 };
-use azalea_registry::builtin::{BlockKind, ItemKind};
+use azalea_registry::builtin::{BlockKind, ItemKind, MenuKind};
 use azalea_registry::Registry;
 use praxion_decoder::Packet;
 use praxion_eventlog::{Event, EventKind, Outcome, Writer, read};
@@ -48,6 +50,18 @@ fn block_ack(seq: u32) -> Packet {
     Packet::PlayClientbound(ClientboundGamePacket::BlockChangedAck(
         ClientboundBlockChangedAck { seq },
     ))
+}
+
+/// The 26.3 damage packet a hit produces (the live capture showed this, not a
+/// hurt animation, for a NoAI zombie).
+fn damage_event(id: i32) -> Packet {
+    Packet::PlayClientbound(ClientboundGamePacket::DamageEvent(ClientboundDamageEvent {
+        entity_id: MinecraftEntityId(id),
+        source_type_id: 0,
+        source_cause_id: OptionalEntityId(None),
+        source_direct_id: OptionalEntityId(None),
+        source_position: None,
+    }))
 }
 
 fn section_update(pos: BlockPos, state: BlockState) -> Packet {
@@ -342,6 +356,76 @@ fn place_confirms_on_the_placed_state_plus_ack() {
     h.observe_at(4, block_ack(8));
     h.advance_at(30);
     assert_eq!(h.outcome(second), Some(Outcome::Unconfirmed));
+}
+
+#[test]
+fn a_same_batch_block_update_confirms_with_the_pre_action_state() {
+    // The server answered the use in the tick batch that registered the
+    // intent, so the world already holds the placed block when the receipt is
+    // created. The explicit pre-action state keeps the update as evidence.
+    let mut h = Harness::new("place-same-batch");
+    let pos = BlockPos::new(0, 64, 0);
+    h.apply(&block_update(pos, stone()));
+    h.tick = 0;
+    let receipt = h.register(
+        Intent::place(1, pos, "stone", 7, 0).with_initial_block(Some(BlockState::AIR)),
+    );
+    h.observe_at(1, block_update(pos, stone()));
+    h.observe_at(1, block_ack(7));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+
+    // Placing the state that was already there is still not a change.
+    h.apply(&block_update(pos, dirt()));
+    let unchanged = h.register(
+        Intent::place(2, pos, "dirt", 8, 1).with_initial_block(Some(dirt())),
+    );
+    h.observe_at(2, block_update(pos, dirt()));
+    h.observe_at(2, block_ack(8));
+    h.advance_at(30);
+    assert_eq!(h.outcome(unchanged), Some(Outcome::Unconfirmed));
+}
+
+#[test]
+fn attack_confirms_on_a_damage_event_for_the_target() {
+    let mut h = Harness::new("attack-damage-event");
+    h.tick = 0;
+    let receipt = h.register(Intent::attack(1, 63, 0));
+    h.observe_at(1, damage_event(63));
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
+
+    let other = h.register(Intent::attack(2, 64, 0));
+    h.observe_at(2, damage_event(63));
+    h.advance_at(30);
+    assert_eq!(h.outcome(other), Some(Outcome::Unconfirmed));
+}
+
+#[test]
+fn a_craft_result_in_the_open_menu_player_slots_counts_as_storage() {
+    // A crafting table's player inventory lives in the menu's last 36 slots,
+    // and `World::inventory` is not updated while a menu is open. The storage
+    // receipt must read the menu's copy.
+    let mut h = Harness::new("craft-open-menu");
+    h.apply(&Packet::PlayClientbound(
+        ClientboundGamePacket::OpenScreen(ClientboundOpenScreen {
+            container_id: 1,
+            menu_type: MenuKind::Crafting,
+            title: "Crafting".into(),
+        }),
+    ));
+    h.apply(&content(1, 0, vec![ItemStack::Empty; 46]));
+    h.tick = 0;
+    let receipt = h.register(Intent::storage_inventory(
+        1,
+        "craft",
+        "wooden_pickaxe",
+        1,
+        0,
+    ));
+    h.observe_at(
+        1,
+        set_slot(1, 1, 45, ItemStack::new(ItemKind::WoodenPickaxe, 1)),
+    );
+    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
 }
 
 #[test]

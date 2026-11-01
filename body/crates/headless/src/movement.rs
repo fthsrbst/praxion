@@ -50,6 +50,11 @@ impl Movement {
         self.last_sent_position = position;
         self.last_sent_look = look;
         self.position_remainder = 0;
+        // `last_on_ground` is deliberately left alone: azalea's teleport
+        // handler (`azalea-client/src/plugins/packet/game/mod.rs:422-450`) does
+        // not touch `Physics::last_on_ground`, so the next comparison still
+        // sees the pre-teleport state. The position packet that follows a
+        // teleport carries `on_ground` anyway.
     }
 
     /// The movement packet for this tick, if a vanilla client would send one.

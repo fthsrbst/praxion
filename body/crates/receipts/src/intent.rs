@@ -31,6 +31,11 @@ pub enum Expect {
     /// whole causal story. A craft carries the container state id and slot of
     /// the click that took the result; use [`Intent::craft`] for it.
     Inventory { item: String, delta: i64 },
+    /// `craft`: like [`Expect::Inventory`], but only the player's storage slots
+    /// count (inventory 9 to 44, or the open menu's last 36 slots). A result
+    /// still sitting in the crafting result slot is not evidence that the craft
+    /// reached the inventory.
+    StorageInventory { item: String, delta: i64 },
     /// `move_to`, `look`, `wait`: no server correction within the window.
     Unrefuted,
     /// A menu action: this click was sent and the server did not revert it.
@@ -60,6 +65,11 @@ pub struct Intent {
     pub window: u64,
     /// What the evidence must show.
     pub expect: Expect,
+    /// The target cell's state just before the action was planned, when the
+    /// caller knows it. The receipt must compare against this rather than a
+    /// snapshot taken at registration: a fast server can send the block update
+    /// in the same tick batch that registers the intent.
+    pub initial_block: Option<azalea_block::BlockState>,
 }
 
 impl Intent {
@@ -74,6 +84,7 @@ impl Intent {
             evidence: EvidenceKind::BlockBecomesAir,
             window: DIG_WINDOW,
             expect: Expect::BlockBecomesAir { pos },
+            initial_block: None,
         }
     }
 
@@ -95,6 +106,7 @@ impl Intent {
             evidence: EvidenceKind::BlockStateChanged,
             window: PLACE_WINDOW,
             expect: Expect::BlockState { pos, block },
+            initial_block: None,
         }
     }
 
@@ -121,6 +133,7 @@ impl Intent {
             evidence: EvidenceKind::InventoryDelta,
             window: INVENTORY_WINDOW,
             expect: Expect::Inventory { item, delta },
+            initial_block: None,
         }
     }
 
@@ -146,6 +159,29 @@ impl Intent {
         intent
     }
 
+    /// `craft`: the output reaches the player's storage, not just the crafting
+    /// result slot.
+    pub fn storage_inventory(
+        intent_id: IntentId,
+        primitive: impl Into<String>,
+        item: impl Into<String>,
+        delta: i64,
+        start_tick: u64,
+    ) -> Self {
+        let item = item.into();
+        Self {
+            intent_id,
+            primitive: primitive.into(),
+            args: vec![item.clone(), delta.to_string()],
+            start_tick,
+            attribution: Attribution::None,
+            evidence: EvidenceKind::InventoryDelta,
+            window: INVENTORY_WINDOW,
+            expect: Expect::StorageInventory { item, delta },
+            initial_block: None,
+        }
+    }
+
     /// `move_to`, `look` or another action verified by absence of a correction.
     pub fn movement(
         intent_id: IntentId,
@@ -161,6 +197,7 @@ impl Intent {
             evidence: EvidenceKind::NoCorrection,
             window: MOVE_WINDOW,
             expect: Expect::Unrefuted,
+            initial_block: None,
         }
     }
 
@@ -185,6 +222,7 @@ impl Intent {
             evidence: EvidenceKind::NoCorrection,
             window: SLOT_CLICK_WINDOW,
             expect: Expect::SlotClick { container_id, slot, state_id },
+            initial_block: None,
         }
     }
 
@@ -199,6 +237,7 @@ impl Intent {
             evidence: EvidenceKind::EntityHurt,
             window: 20,
             expect: Expect::EntityHurt { id: entity_id },
+            initial_block: None,
         }
     }
 
@@ -214,12 +253,21 @@ impl Intent {
             evidence: EvidenceKind::FactKnown,
             window: 20,
             expect: Expect::FactKnown { fact },
+            initial_block: None,
         }
     }
 
     /// Override the settle window (measurement, tests, corpus replay).
     pub fn with_window(mut self, window: u64) -> Self {
         self.window = window;
+        self
+    }
+
+    /// Supply the target cell's state just before the action. The actuator's
+    /// report carries it, so a block update the server sends in the same tick
+    /// batch as the registration is still evidence of a real change.
+    pub fn with_initial_block(mut self, state: Option<azalea_block::BlockState>) -> Self {
+        self.initial_block = state;
         self
     }
 

@@ -71,6 +71,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         tune_loop: true,
         trace_packets: args.verbose,
         script,
+        driver: None,
         tee: args.tee,
     };
 

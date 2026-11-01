@@ -6,6 +6,6 @@ skill get_crafting_table_near()
   rules:
     near(crafting_table, 4) -> done
     has(crafting_table) -> place(crafting_table)
-    count(oak_planks) >= 4 -> craft(crafting_table)
-    count(oak_log) >= 1 -> craft(oak_planks)
-    true -> mine(oak_log)
+    count(#planks) >= 4 -> craft(crafting_table)
+    count(#logs) >= 1 -> craft(#planks)
+    true -> mine(#logs)

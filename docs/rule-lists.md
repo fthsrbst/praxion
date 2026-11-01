@@ -28,17 +28,21 @@ or         := and ('or' and)*
 and        := not ('and' not)*
 not        := 'not' not | cmp
 cmp        := primary ('<' | '<=' | '==' | '!=' | '>=' | '>') primary
-primary    := 'true' | 'false' | INT | '$' NAME | NAME '(' args? ')' | '(' expr ')'
+primary    := 'true' | 'false' | INT | '$' NAME | TAG | NAME '(' args? ')' | '(' expr ')'
 args       := arg (',' arg)*
-arg        := INT | '$' NAME | NAME | NAME '(' args? ')'
+arg        := INT | '$' NAME | TAG | NAME | NAME '(' args? ')'
 TYPE       := 'int' | 'item' | 'block' | 'entity_kind' | 'bool'
+TAG        := '#' NAME
 ```
 
-- One construct per line; indentation is ignored. `#` starts a comment.
+- One construct per line; indentation is ignored. `#` starts a comment unless
+  it is immediately followed by an identifier, in which case it is an item or
+  block tag (`#logs`). Write comments as `# text` or with any non-identifier
+  character after the `#`.
   A rule belongs to the preceding `skill` line.
 - Rules are ordered: the first true rule has the highest priority.
 - `minecraft:` may prefix an identifier and is dropped: `minecraft:stone` is
-  `stone`.
+  `stone`. The same holds inside a tag: `#minecraft:logs` is `#logs`.
 - Precedence: `not` binds tighter than `and`, which binds tighter than `or`.
   Comparisons bind tighter than `not`. Comparisons do not chain.
 - Parameters are positional and may have defaults. A defaulted parameter must
@@ -74,6 +78,14 @@ the same calls.
 | `near(block, r)` | `bool` | a block of that kind within `r` |
 | `near_entity(kind, r)` | `bool` | an entity of that kind within `r` |
 
+An `item` or `block` argument may be a tag: `count(#logs)`, `has(#planks)`,
+`mine(#logs)`, `near(#logs, 4)`, `craft(#planks)`. Tags are the 26.3 data pack's
+item and block tags, resolved when `praxion-gamedata` is built; a tag that the
+jar does not define is rejected at load time. A tag argument in a primitive
+declares the union of its members' effects (`mine(#logs)` covers every log
+type), and a tag in `craft` picks a member recipe whose ingredients the player
+has.
+
 Guards use Kleene three-valued logic. A fact is `True`, `False`, or
 `Unknown(fact)`:
 
@@ -94,7 +106,7 @@ Every action is a primitive with a versioned record
 continuous, cancellation class, default `max_ticks`, declared effects and the
 evidence kind that settles its receipt. Effects come from game data, not from
 hand: `craft` consumes and produces exactly what the 26.3 recipe says
-(`body/crates/gamedata/src/recipes.rs`), and `mine`/`attack` carry the possible
+(`body/crates/gamedata`), and `mine`/`attack` carry the possible
 drops, count ranges and tool requirements of the 26.3 loot tables. The tables
 are read from the pinned server jar when `praxion-gamedata` is built. For a
 primitive whose effect depends on its first argument, `effects_for(args)` gives

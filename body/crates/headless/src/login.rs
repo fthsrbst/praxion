@@ -9,11 +9,13 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use azalea_core::direction::Direction;
+use azalea_core::position::BlockPos;
 use azalea_protocol::connect::{Connection, ConnectionError, WriteConnection};
 use azalea_protocol::packets::{
     ClientIntention, PROTOCOL_VERSION, Packet, ProtocolPacket,
     config::{ClientboundConfigPacket, ServerboundConfigPacket},
-    game::{ClientboundGamePacket, ServerboundGamePacket},
+    game::{ClientboundGamePacket, ServerboundGamePacket, ServerboundPlayerAction, s_player_action},
     handshake::ServerboundIntention,
     login::{
         ClientboundLoginPacket, ServerboundCookieResponse, ServerboundCustomQueryAnswer,
@@ -160,6 +162,56 @@ where
     }
     writer.write(packet).await?;
     Ok(())
+}
+
+/// Write a `ServerboundPlayerAction` with the server's 26.3 action ordinal.
+///
+/// The pinned azalea enum has seven variants and no
+/// `CHANGE_DESTROY_DIRECTION`, so its ordinals for abort, stop and
+/// release-use-item are one lower than the 26.3 server's
+/// (`ServerboundPlayerActionPacket$Action`: START 0, CHANGE_DIRECTION 1, ABORT 2,
+/// STOP 3, DROP_ALL 4, DROP 5, RELEASE 6, SWAP 7, STAB 8). Serialising a normal
+/// packet and patching the action byte keeps the rest of the codec (position,
+/// direction, sequence) exactly azalea's.
+pub(crate) async fn send_player_action<W>(
+    writer: &mut WriteConnection<W>,
+    action: u8,
+    pos: BlockPos,
+    direction: Direction,
+    seq: u32,
+    trace: bool,
+) -> Result<(), Error>
+where
+    W: ProtocolPacket + Debug,
+{
+    let packet = ServerboundGamePacket::PlayerAction(ServerboundPlayerAction {
+        action: s_player_action::Action::StartDestroyBlock,
+        pos,
+        direction,
+        seq,
+    });
+    let mut bytes = azalea_protocol::write::serialize_packet(&packet)
+        .map_err(|error| Error::Io(std::io::Error::other(error.to_string())))?;
+    let id_len = varint_len(&bytes);
+    if let Some(byte) = bytes.get_mut(id_len) {
+        *byte = action;
+    }
+    if trace {
+        eprintln!("-> player_action {action} {pos:?} {direction:?} seq {seq}");
+    }
+    writer.raw.write(&bytes).await.map_err(Error::Io)
+}
+
+/// The length of the first VarInt in `bytes`.
+fn varint_len(bytes: &[u8]) -> usize {
+    let mut len = 0;
+    for byte in bytes {
+        len += 1;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    len
 }
 
 /// Read one packet with the login/configuration silence bound, logging its name.

@@ -6,7 +6,7 @@ skill get_wooden_pickaxe()
   doc "Have a wooden pickaxe, with a crafting table placed nearby."
   rules:
     count(wooden_pickaxe) >= 1 -> done
-    count(oak_planks) >= 3 and count(stick) >= 2 and near(crafting_table, 4) -> craft(wooden_pickaxe)
+    count(#planks) >= 3 and count(stick) >= 2 and near(crafting_table, 4) -> craft(wooden_pickaxe)
     count(stick) < 2 -> do get_sticks(2)
-    count(oak_planks) < 3 -> do get_planks(3)
+    count(#planks) < 3 -> do get_planks(3)
     true -> do get_crafting_table_near()

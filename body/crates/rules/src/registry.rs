@@ -243,6 +243,7 @@ impl Primitives {
                 loot_effects(block.drops, mine_changes.clone()),
             );
         }
+        insert_block_tag_effects(&mut mine);
         primitives.add(mine);
 
         primitives.add(PrimitiveRecord {
@@ -290,6 +291,7 @@ impl Primitives {
                 .per_argument
                 .insert(recipe.output.to_string(), craft_effects(recipe));
         }
+        insert_item_tag_effects(&mut craft);
         primitives.add(craft);
 
         primitives.add(PrimitiveRecord {
@@ -469,9 +471,12 @@ fn craft_effects(recipe: &gamedata::Recipe) -> Effects {
         produces: vec![delta(recipe.output, recipe.output_count)],
         drops: Vec::new(),
         consumes: recipe
-            .inputs
-            .iter()
-            .map(|input| delta(input.item, input.count))
+            .inputs()
+            .into_iter()
+            .map(|input| ItemDelta {
+                item: input.item,
+                count: input.count,
+            })
             .collect(),
         changes: Vec::new(),
     }
@@ -481,11 +486,11 @@ fn craft_effects(recipe: &gamedata::Recipe) -> Effects {
 /// argument. `effects_for` gives the exact input and output counts.
 fn craft_summary() -> Effects {
     let mut produces: BTreeMap<&'static str, u32> = BTreeMap::new();
-    let mut consumes: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let mut consumes: BTreeMap<String, u32> = BTreeMap::new();
     for recipe in gamedata::RECIPES {
         let output = produces.entry(recipe.output).or_insert(0);
         *output = (*output).max(recipe.output_count);
-        for input in recipe.inputs {
+        for input in recipe.inputs() {
             let count = consumes.entry(input.item).or_insert(0);
             *count = (*count).max(input.count);
         }
@@ -498,9 +503,73 @@ fn craft_summary() -> Effects {
         drops: Vec::new(),
         consumes: consumes
             .into_iter()
-            .map(|(item, count)| delta(item, count))
+            .map(|(item, count)| ItemDelta { item, count })
             .collect(),
         changes: Vec::new(),
+    }
+}
+
+/// Adds one `#tag` entry to a primitive's per-argument effects: the union of
+/// every member the primitive already knows. `mine(#logs)` therefore declares
+/// the drops of every log type, and `craft(#planks)` the inputs of every planks
+/// recipe.
+fn insert_tag_effects(
+    record: &mut PrimitiveRecord,
+    tags: &[gamedata::Tag],
+) {
+    for tag in tags {
+        let mut merged = Effects::default();
+        let mut any = false;
+        for value in tag.values {
+            let Some(effects) = record.per_argument.get(*value) else {
+                continue;
+            };
+            any = true;
+            merge_effects(&mut merged, effects);
+        }
+        if any {
+            record.per_argument.insert(format!("#{}", tag.name), merged);
+        }
+    }
+}
+
+fn insert_block_tag_effects(record: &mut PrimitiveRecord) {
+    insert_tag_effects(record, gamedata::BLOCK_TAGS);
+}
+
+fn insert_item_tag_effects(record: &mut PrimitiveRecord) {
+    insert_tag_effects(record, gamedata::ITEM_TAGS);
+}
+
+fn merge_effects(into: &mut Effects, other: &Effects) {
+    for delta in &other.produces {
+        match into.produces.iter_mut().find(|entry| entry.item == delta.item) {
+            Some(entry) => entry.count = entry.count.max(delta.count),
+            None => into.produces.push(delta.clone()),
+        }
+    }
+    for drop in &other.drops {
+        match into.drops.iter_mut().find(|entry| entry.item == drop.item) {
+            Some(entry) => {
+                entry.min = entry.min.min(drop.min);
+                entry.max = entry.max.max(drop.max);
+                if entry.tool.is_none() {
+                    entry.tool = drop.tool.clone();
+                }
+            }
+            None => into.drops.push(drop.clone()),
+        }
+    }
+    for delta in &other.consumes {
+        match into.consumes.iter_mut().find(|entry| entry.item == delta.item) {
+            Some(entry) => entry.count = entry.count.max(delta.count),
+            None => into.consumes.push(delta.clone()),
+        }
+    }
+    for change in &other.changes {
+        if !into.changes.contains(change) {
+            into.changes.push(change.clone());
+        }
     }
 }
 
@@ -572,8 +641,8 @@ mod tests {
         let planks = craft.effects_for(&[ArgValue::Item("oak_planks".into())]);
         assert_eq!(
             planks.consumes,
-            vec![delta("oak_log", 1)],
-            "one log in"
+            vec![delta("#oak_logs", 1)],
+            "one log tag in"
         );
         assert_eq!(
             planks.produces,
@@ -583,8 +652,28 @@ mod tests {
         let pickaxe = craft.effects_for(&[ArgValue::Item("stone_pickaxe".into())]);
         assert_eq!(
             pickaxe.consumes,
-            vec![delta("cobblestone", 3), delta("stick", 2)]
+            vec![delta("#stone_tool_materials", 3), delta("stick", 2)]
         );
         assert_eq!(pickaxe.produces, vec![delta("stone_pickaxe", 1)]);
+    }
+
+    #[test]
+    fn tag_arguments_resolve_to_their_members() {
+        let p = Primitives::standard();
+        let mine = p.get("mine").unwrap();
+        let logs = mine.effects_for(&[ArgValue::Block("#logs".into())]);
+        assert!(
+            logs.produces.iter().any(|delta| delta.item == "birch_log"),
+            "mine(#logs) declares birch: {:?}",
+            logs.produces
+        );
+
+        let craft = p.get("craft").unwrap();
+        let planks = craft.effects_for(&[ArgValue::Item("#planks".into())]);
+        assert!(
+            planks.produces.iter().any(|delta| delta.item == "birch_planks"),
+            "craft(#planks) declares birch planks: {:?}",
+            planks.produces
+        );
     }
 }

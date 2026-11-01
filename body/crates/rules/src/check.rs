@@ -281,7 +281,10 @@ fn type_of(
             Ok(skill.params[index].ty)
         }
         ExprKind::Name(name) => match expected {
-            Some(ty @ (ValueType::Item | ValueType::Block | ValueType::EntityKind)) => Ok(ty),
+            Some(ty @ (ValueType::Item | ValueType::Block | ValueType::EntityKind)) => {
+                check_tag(name, ty, skill, expr.span)?;
+                Ok(ty)
+            }
             _ => Err(err(
                 skill,
                 format!(
@@ -355,7 +358,12 @@ fn check_arg(
     match want {
         ArgType::Value(ty) => check_value(expr, ty, skill, facts),
         ArgType::BlockOrEntity => match &expr.kind {
-            ExprKind::Name(_) => Ok(()),
+            ExprKind::Name(name) => {
+                if name.starts_with('#') {
+                    check_tag(name, ValueType::Block, skill, expr.span)?;
+                }
+                Ok(())
+            }
             ExprKind::Param(name) => {
                 let index = skill
                     .param_index(name)
@@ -395,6 +403,32 @@ fn check_arg(
     }
 }
 
+/// Rejects a tag that the 26.3 data pack does not define for this type.
+fn check_tag(
+    name: &str,
+    ty: ValueType,
+    skill: &Skill,
+    span: Span,
+) -> Result<(), Error> {
+    let Some(tag) = name.strip_prefix('#') else {
+        return Ok(());
+    };
+    let exists = match ty {
+        ValueType::Item => praxion_gamedata::item_tag(tag).is_some(),
+        ValueType::Block => praxion_gamedata::block_tag(tag).is_some(),
+        ValueType::EntityKind | ValueType::Int | ValueType::Bool => false,
+    };
+    if exists {
+        Ok(())
+    } else {
+        Err(err(
+            skill,
+            format!("unknown {} tag `#{tag}`", ty.name()),
+            span,
+        ))
+    }
+}
+
 fn check_value(
     expr: &Expr,
     want: ValueType,
@@ -404,12 +438,13 @@ fn check_value(
     match &expr.kind {
         ExprKind::Int(_) if want == ValueType::Int => Ok(()),
         ExprKind::Bool(_) if want == ValueType::Bool => Ok(()),
-        ExprKind::Name(_)
+        ExprKind::Name(name)
             if matches!(
                 want,
                 ValueType::Item | ValueType::Block | ValueType::EntityKind
             ) =>
         {
+            check_tag(name, want, skill, expr.span)?;
             Ok(())
         }
         ExprKind::Param(name) => {
