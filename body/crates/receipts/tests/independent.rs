@@ -3,14 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use azalea_block::BlockState;
-use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos, Vec3};
+use azalea_core::position::{BlockPos, Vec3};
 use azalea_inventory::operations::ClickType;
 use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
 use azalea_protocol::packets::game::{
-    ClientboundBlockChangedAck, ClientboundContainerSetContent,
-    ClientboundContainerSetSlot, ClientboundGamePacket, ClientboundPlayerPosition,
-    ClientboundSectionBlocksUpdate, ServerboundContainerClick, ServerboundGamePacket,
-    c_section_blocks_update::BlockStateWithPosition, s_container_click::HashedStack,
+    ClientboundBlockChangedAck, ClientboundContainerSetContent, ClientboundGamePacket, ClientboundPlayerPosition, ServerboundContainerClick, ServerboundGamePacket, s_container_click::HashedStack,
 };
 use azalea_registry::builtin::{BlockKind, ItemKind};
 use praxion_decoder::Packet;
