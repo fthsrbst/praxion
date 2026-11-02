@@ -7,6 +7,12 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 All on Claude's recommendation.
 
+- **Failure counts are per rule within a frame, reset only by that rule's success (2026-11-02).** The
+  first rule ("a different rule firing resets the streak") livelocked live: on seed 303 the parent
+  alternated `get_sticks` and `get_planks`, each failing `not_found`, for 2,200 ticks
+  (`runs/s9d-f11-3-seed303`, seq 83-125). Now each frame keeps a failure count per rule; a rule's
+  success (primitive confirmed or child `done`) resets only its own count; the third failure of any one
+  rule fails the frame with that kind. Rules out: resetting on alternation. (Claude.)
 - **Child-skill failures count toward the parent rule's failure streak, and skills explore with a
   frontier `explore` primitive.** Live runs from a free spawn livelocked: a child's `failed(kind)` only
   made the calling rule ineligible for one tick, so the parent re-called the same child forever.
