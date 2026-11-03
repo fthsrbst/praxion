@@ -7,6 +7,14 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 All on Claude's recommendation, agreed by the user, except where marked (user).
 
+- **A thin Demo-2 slice comes before Demo-1 (user, 2026-11-03).** Right after Demo-0, the brain gets a
+  first vertical slice on the protocol (headless) body: the LLM writes one new skill, admission checks
+  it, the body plays it. Then Demo-1, then the rest of Demo-2. Reason: the brain needs the body port,
+  not real input, so "a bot that writes its own skill" is visible weeks earlier (estimate 2-4 weeks
+  instead of 5-10), while the Demo-1 hands experiments still need the user at the Windows PC. Risk
+  accepted: the slice runs on an idealised body; the body port is the same for both actuators. The
+  slice's scope (models, admission checks, `brain/` interface) is designed with the user before code.
+  Rules out: Demo-2 strictly after Demo-1.
 - **The movement-style layer is part of Demo-1, not earlier (user, 2026-11-03).** The first demo video
   (headless body, first-person spectator) looked robotic: one-step exact aims, constant speed and
   rhythm. That is the movement-style layer's job (session 13), not the brain's: Jev and the LLM decide

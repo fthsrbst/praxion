@@ -45,6 +45,11 @@ Engineering principle 3 needs a gate for "first code". Proposed, in dependency o
 | Demo-1 | Demo-0 through the real client: SendInput actuator, movement style (human camera, speed and timing, session 13), take-over, command gesture, body-side control verbs, indicator | the first demo, without learning, that moves like a person (movement statistics and the blind test, §9) |
 | Demo-2 | brain: Jev and LLM clients, curriculum, skill writer and admission, memory briefing | Praxion writes and admits its own skills |
 
+**Order (2026-11-03) [D]:** Demo-0, then a thin Demo-2 slice on the protocol body (the LLM writes one
+skill, admission checks it, the headless body plays it), then Demo-1, then the rest of Demo-2. The
+brain talks to the body only through the body port (§5.4), so the slice does not depend on SendInput.
+The slice's scope is designed with the user before code.
+
 First product code is gated on the reviewed draft and the passed 2.7 experiments [D], and then
 starts with Demo-0 only [D]. The gate is split (2026-11-01) [D]: Demo-0 depends on E1-E4 and E13,
 which passed; Demo-1 code waits for E8, E10, E11, E12, E15 and E16.

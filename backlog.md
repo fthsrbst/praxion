@@ -39,6 +39,17 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Pointers: `runs/test-body-e83d1bea80fc485895e6d958a73de976` (303 done), `runs/test-body-6df7c6bd11304710b9656ecc034e9830`
   (101 pit), `notes.md` 2026-11-02 and 2026-11-03.
 
+### Design the thin Demo-2 slice with the user (after Demo-0)
+- Source: Claude Opus 5.5, 2026-11-03 (order decided by the user, `docs/decisions.md`)
+- State: order decided only: Demo-0, then this slice on the headless body, then Demo-1.
+- Remaining: a design session before any `brain/` code. Questions to settle, each with a
+  recommendation: which skill the slice targets (one the hand-written set lacks, e.g. `get_iron_pickaxe`
+  or `make_shelter`); which model writes it (hosted LLM, and where Jev decides); what admission checks
+  (DSL checker, depth and effect checks from the registry, fake-world runs on N seeds, then a referee-
+  checked headless run); the `brain/` to body-port interface (architecture §5.4, §5.7); what is logged
+  as evidence. Then build in dependency order with review rounds.
+- Pointers: architecture §1.1, §5.4, §5.7, §6.3; sessions 8 and 11.
+
 ### Melee smoke test is timing-dependent
 - Source: Claude Opus 5.5, 2026-11-03 (macOS)
 - State: `test_melee_reflex_preempts_and_the_skill_resumes` passed 3 of 5 runs today. Failures: (a) the
