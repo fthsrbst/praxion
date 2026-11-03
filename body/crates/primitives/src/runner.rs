@@ -8,7 +8,6 @@
 //! ends with the receipt's outcome, or with its own typed failure.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use azalea_core::direction::Direction;
@@ -112,6 +111,10 @@ pub struct Runner {
     outcome: Option<Outcome>,
     intent_id: Option<u64>,
     started: bool,
+    /// The memory this runner's `explore` calls share. It is per runner, so
+    /// two runners (parallel tests, two bodies) never see each other's
+    /// history.
+    explore_memory: ExploreMemory,
 }
 
 #[derive(Debug)]
@@ -165,7 +168,7 @@ impl Runner {
                 sent: false,
                 waited: 0,
             }),
-            "explore" => Active::Explore(Explore::new(arg)?),
+            "explore" => Active::Explore(Explore::new(arg, &mut self.explore_memory)?),
             "attack" => Active::Attack(Attack {
                 kind: arg,
                 entity: None,
@@ -317,7 +320,7 @@ impl Runner {
             Active::Place(state) => state.tick(ctx, self.started),
             Active::Craft(state) => state.tick(ctx, self.started),
             Active::Eat(state) => state.tick(ctx, self.started),
-            Active::Explore(state) => state.tick(ctx, self.started),
+            Active::Explore(state) => state.tick(ctx, self.started, &mut self.explore_memory),
             Active::Attack(state) => state.tick(ctx, self.started),
             Active::Equip(state) => state.tick(ctx),
             Active::Wait(state) => state.tick(ctx),
@@ -1170,7 +1173,7 @@ struct Explore {
     /// bounded refresh period rather than a cache invalidation storm.
     target_search_tick: u64,
     frontier_scan_tick: u64,
-    /// How many `explore` calls this process has made, so a retry starts from a
+    /// How many `explore` calls this run has made, so a retry starts from a
     /// different frontier instead of repeating the same walk.
     rotation: usize,
     /// Ticks with nowhere to go. A closed or fully known pocket fails early so
@@ -1232,68 +1235,78 @@ fn remember(cells: &mut Vec<BlockPos>, pos: BlockPos) {
     cells.push(pos);
 }
 
-/// A per-process counter so consecutive `explore` calls (a failed call and its
-/// retry, or a new skill after a failure) start from a different frontier in
-/// the ranked list. Without it, a retry repeated the same walk from an empty
-/// explored set and could burn every 1200-tick budget in the same direction.
-fn explore_rotation() -> usize {
-    static CALLS: AtomicU64 = AtomicU64::new(0);
-    (CALLS.fetch_add(1, Ordering::Relaxed) % 8) as usize
-}
-
 /// Cells recent `explore` calls reached or rejected. A call used to forget its
 /// explored set when it ended, so the next 1200-tick retry walked the same way.
-/// The set is shared for the process (one run), newest first, and bounded.
+/// The set is kept for the run, newest last, and bounded.
 const RECENT_EXPLORED_CELLS: usize = 128;
 
-static RECENT_EXPLORED: std::sync::Mutex<VecDeque<BlockPos>> =
-    std::sync::Mutex::new(VecDeque::new());
-
-fn recent_explored() -> Vec<BlockPos> {
-    let recent = RECENT_EXPLORED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    recent.iter().copied().collect()
+/// The memory one run's `explore` calls share. It used to be process-wide
+/// statics that two runners (parallel tests, two bodies) shared; `Runner` owns
+/// one, so a run only ever sees its own history.
+#[derive(Debug, Default)]
+struct ExploreMemory {
+    /// Cells recent `explore` calls reached or rejected, oldest first.
+    recent: VecDeque<BlockPos>,
+    /// The highest surface altitude this run's `explore` calls stood at, once
+    /// one has run.
+    home_y: Option<i32>,
+    /// The first cell this run explored, as `(x, z)`.
+    origin: Option<(i32, i32)>,
+    /// How many `explore` calls this run has started.
+    calls: u64,
 }
 
-fn remember_recent(pos: BlockPos) {
-    let mut recent = RECENT_EXPLORED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !recent.contains(&pos) {
-        if recent.len() >= RECENT_EXPLORED_CELLS {
-            recent.pop_front();
+impl ExploreMemory {
+    /// The remembered cells, oldest first.
+    fn recent(&self) -> Vec<BlockPos> {
+        self.recent.iter().copied().collect()
+    }
+
+    /// Remember a cell, newest last. An already remembered cell keeps its
+    /// place; a full memory drops its oldest cell.
+    fn remember(&mut self, pos: BlockPos) {
+        if self.recent.contains(&pos) {
+            return;
         }
-        recent.push_back(pos);
+        if self.recent.len() >= RECENT_EXPLORED_CELLS {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(pos);
+    }
+
+    /// The highest surface altitude recent `explore` calls stood at. Wood grows
+    /// on the surface; an explore that follows one-block descents into a cave
+    /// can burn every budget underground, so a candidate much below this line
+    /// is refused.
+    fn home_y(&mut self, start: i32) -> i32 {
+        let home = self.home_y.get_or_insert(start);
+        *home = (*home).max(start);
+        *home
+    }
+
+    /// The first cell this body explored, as (x, z). Frontier ranking pushes
+    /// away from it, so a call heads outward instead of circling the nearest
+    /// ring of the known map. One run is one body, so a per-run origin is
+    /// exact.
+    fn origin(&mut self, start: BlockPos) -> BlockPos {
+        let (x, z) = *self.origin.get_or_insert((start.x, start.z));
+        BlockPos::new(x, start.y, z)
+    }
+
+    /// A per-run counter so consecutive `explore` calls (a failed call and its
+    /// retry, or a new skill after a failure) start from a different frontier
+    /// in the ranked list. Without it, a retry repeated the same walk from an
+    /// empty explored set and could burn every 1200-tick budget in the same
+    /// direction.
+    fn next_rotation(&mut self) -> usize {
+        let rotation = (self.calls % 8) as usize;
+        self.calls = self.calls.wrapping_add(1);
+        rotation
     }
 }
 
-/// The highest surface altitude recent `explore` calls stood at. Wood grows on
-/// the surface; an explore that follows one-block descents into a cave can burn
-/// every budget underground, so a candidate much below this line is refused.
-static EXPLORE_HOME_Y: AtomicI32 = AtomicI32::new(i32::MIN);
-
-fn explore_home_y(start: i32) -> i32 {
-    EXPLORE_HOME_Y
-        .fetch_max(start, Ordering::Relaxed)
-        .max(start)
-}
-
-/// The first cell this body explored, as (x, z). Frontier ranking pushes away
-/// from it, so a call heads outward instead of circling the nearest ring of
-/// the known map. One process is one run, so a process-wide origin is exact.
-static EXPLORE_ORIGIN: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
-
-fn explore_origin(start: BlockPos) -> BlockPos {
-    let mut origin = EXPLORE_ORIGIN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (x, z) = *origin.get_or_insert((start.x, start.z));
-    BlockPos::new(x, start.y, z)
-}
-
 impl Explore {
-    fn new(target: String) -> Result<Self, String> {
+    fn new(target: String, memory: &mut ExploreMemory) -> Result<Self, String> {
         if let Some(tag) = target.strip_prefix('#') {
             if gamedata::block_tag(tag).is_none() {
                 return Err(format!("unknown block tag `#{tag}`"));
@@ -1324,7 +1337,7 @@ impl Explore {
             explored: {
                 // Continue from where recent calls walked, so a retry does not
                 // repeat the same direction from an empty set.
-                let mut explored = recent_explored();
+                let mut explored = memory.recent();
                 if explored.len() > EXPLORE_MEMORY_CELLS {
                     explored.drain(..explored.len() - EXPLORE_MEMORY_CELLS);
                 }
@@ -1335,7 +1348,7 @@ impl Explore {
             candidates: VecDeque::new(),
             target_search_tick: 0,
             frontier_scan_tick: 5,
-            rotation: explore_rotation(),
+            rotation: memory.next_rotation(),
             idle_ticks: 0,
             next_plan_tick: 0,
             goals: 0,
@@ -1350,11 +1363,12 @@ impl Explore {
         &mut self,
         ctx: &mut Ctx<'_>,
         started: bool,
+        memory: &mut ExploreMemory,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let frame = idle(ctx);
         self.waited += 1;
         let start = ctx.body.position().to_block_pos_floor();
-        let home = explore_home_y(start.y);
+        let home = memory.home_y(start.y);
         // The completion check is cheap: a 5-block scan. The wider 32-block
         // target search runs only when a new plan is needed, never while a
         // follower is walking, so exploring keeps the 20 TPS tick rate.
@@ -1373,7 +1387,7 @@ impl Explore {
                 self.idle_ticks = 0;
                 self.candidates.clear();
                 if let Some(goal) = self.goal.take() {
-                    remember_recent(goal);
+                    memory.remember(goal);
                     remember(&mut self.explored, goal);
                     self.goals = self.goals.saturating_add(1);
                 }
@@ -1421,7 +1435,7 @@ impl Explore {
                 // is how the body sat at an edge for 160 ticks.
                 self.candidates.clear();
                 if let Some(goal) = self.goal.take() {
-                    remember_recent(goal);
+                    memory.remember(goal);
                     remember(&mut self.rejected, goal);
                 }
                 let stuck = ctx.body.position().to_block_pos_floor();
@@ -1508,7 +1522,7 @@ impl Explore {
                 )
             } else {
                 rank_frontiers_from(
-                    explore_origin(start),
+                    memory.origin(start),
                     start,
                     horizontal,
                     EXPLORE_FRONTIER_VERTICAL,
@@ -1574,7 +1588,7 @@ impl Explore {
                         return (frame, None, None);
                     }
                     _ => {
-                        remember_recent(goal);
+                        memory.remember(goal);
                         remember(&mut self.rejected, goal);
                         self.next_plan_tick = ctx.tick.saturating_add(5);
                     }
@@ -2534,7 +2548,8 @@ mod tests {
         // one-cell pit and every later call idled 120 ticks. Descending must
         // stay within the planner's safe (damage-free) three-block drop; a peak
         // is left along its slopes.
-        let explore = Explore::new("#logs".into()).expect("a known block tag");
+        let mut memory = ExploreMemory::default();
+        let explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
         assert_eq!(explore.planner.max_drop(), 3);
     }
 
@@ -2714,9 +2729,42 @@ mod tests {
 
     #[test]
     fn consecutive_explore_calls_rotate() {
-        let first = explore_rotation();
-        let second = explore_rotation();
+        let mut memory = ExploreMemory::default();
+        let first = memory.next_rotation();
+        let second = memory.next_rotation();
         assert_ne!(first, second, "a retry starts from a different frontier");
+    }
+
+    #[test]
+    fn explore_memory_is_per_runner() {
+        // Two runners must not share explore's history: the cells one
+        // remembers and the rotations one has consumed stay invisible to the
+        // other.
+        let mut first = ExploreMemory::default();
+        let mut second = ExploreMemory::default();
+        first.remember(at(1, 64, 2));
+        first.next_rotation();
+        first.next_rotation();
+        assert_eq!(first.recent(), vec![at(1, 64, 2)]);
+        assert!(second.recent().is_empty(), "the other run remembers nothing");
+        assert_eq!(second.next_rotation(), 0, "the other run has not rotated");
+
+        // The memory is bounded: it keeps the newest cells and drops the
+        // oldest, and re-remembering a cell does not grow it.
+        let mut memory = ExploreMemory::default();
+        for i in 0..(RECENT_EXPLORED_CELLS as i32 + 5) {
+            memory.remember(at(i, 64, 0));
+        }
+        let recent = memory.recent();
+        assert_eq!(recent.len(), RECENT_EXPLORED_CELLS);
+        assert_eq!(recent[0], at(5, 64, 0), "the five oldest cells were dropped");
+        assert_eq!(
+            recent[RECENT_EXPLORED_CELLS - 1],
+            at(RECENT_EXPLORED_CELLS as i32 + 4, 64, 0),
+            "the newest cell is last"
+        );
+        memory.remember(at(5, 64, 0));
+        assert_eq!(memory.recent().len(), RECENT_EXPLORED_CELLS);
     }
 
     #[test]
