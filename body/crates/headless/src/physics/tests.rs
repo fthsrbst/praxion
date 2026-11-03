@@ -439,3 +439,24 @@ fn an_unloaded_chunk_freezes_the_body() {
     }
     assert!(body.position().y < 80.0);
 }
+
+#[test]
+fn the_bounding_box_follows_the_position_after_a_step() {
+    // A placement check reads this box between steps; a box from the start of
+    // the last step lags a walking body by its last move (review, 2026-11-03).
+    let world = TestWorld::flat(-1, 4);
+    let mut body = body_at(0.5, 0.0, 0.5);
+    settle(&mut body, &world, 2);
+    let held = Held {
+        forward: true,
+        ..Held::NONE
+    };
+    for _ in 0..5 {
+        body.step(&held, &world);
+    }
+    let position = body.position();
+    let bounding_box = body.bounding_box();
+    assert_close((bounding_box.min.z + bounding_box.max.z) / 2., position.z, 1e-9, "box centre z");
+    assert_close((bounding_box.min.x + bounding_box.max.x) / 2., position.x, 1e-9, "box centre x");
+    assert_close(bounding_box.min.y, position.y, 1e-9, "box bottom");
+}

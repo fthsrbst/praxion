@@ -175,6 +175,15 @@ impl Body {
         *self.position
     }
 
+    /// The collision box at the body's current position, the one the server
+    /// tests a block placement against. Built from the position, not read
+    /// from `physics.bounding_box`: that field is set at the start of a step
+    /// and lags the position by the step's movement. The pose (sneaking) is
+    /// still the one the last step used.
+    pub fn bounding_box(&self) -> Aabb {
+        self.dimensions.make_bounding_box(*self.position)
+    }
+
     pub fn look(&self) -> LookDirection {
         self.look
     }
