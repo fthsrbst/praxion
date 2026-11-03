@@ -768,12 +768,18 @@ fn print_stats(
 // CTRL_C flag global
 pub static CTRL_C_FLAG: AtomicBool = AtomicBool::new(false);
 
+#[cfg(windows)]
 pub fn install_ctrl_handler() {
     unsafe {
         SetConsoleCtrlHandler(Some(ctrl_handler), 1);
     }
 }
 
+// No graceful Ctrl-C on other hosts: the default signal action ends the process.
+#[cfg(not(windows))]
+pub fn install_ctrl_handler() {}
+
+#[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn SetConsoleCtrlHandler(
@@ -782,8 +788,10 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[cfg(windows)]
 static CTRL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(windows)]
 unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
     const CTRL_C: u32 = 0;
     const CTRL_CLOSE: u32 = 2;
