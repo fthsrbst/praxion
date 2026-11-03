@@ -154,6 +154,8 @@ impl Runner {
                 name: arg,
                 target: None,
                 waited: 0,
+                tool_waited: 0,
+                hand: HandSelect::default(),
                 pickup: None,
             }),
             "place" => Active::Place(Place {
@@ -161,12 +163,14 @@ impl Runner {
                 target: None,
                 sent: false,
                 waited: 0,
+                hand: HandSelect::default(),
             }),
             "craft" => Active::Craft(Craft::new(arg)?),
             "eat" => Active::Eat(Eat {
                 item: arg,
                 sent: false,
                 waited: 0,
+                hand: HandSelect::default(),
             }),
             "explore" => Active::Explore(Explore::new(arg, &mut self.explore_memory)?),
             "attack" => Active::Attack(Attack {
@@ -448,6 +452,105 @@ fn select_item(world: &World, wanted: &str, frame: &mut ControlFrame) -> bool {
     true
 }
 
+/// How long `mine` tries to bring its tool into the main hand before it mines
+/// with what it holds (a swap waits for the server's slot update).
+const TOOL_SELECT_TICKS: u32 = 40;
+
+/// How long a swap from the main inventory may take to show in the world
+/// before it is sent again.
+const SWAP_WAIT_TICKS: u32 = 20;
+
+/// Brings one item into the main hand without repeating a swap.
+///
+/// The headless client does not predict inventory clicks: the world shows a
+/// swap only after the server's slot update. A swap re-sent every tick until
+/// then undid itself, because the second click swaps the items back. So a swap
+/// is sent once and then waited for, like `equip`; a hotbar key is idempotent
+/// and is pressed every tick.
+#[derive(Debug, Default)]
+struct HandSelect {
+    /// Ticks since the last swap was sent, while it has not shown yet.
+    swap_waited: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Selecting {
+    /// The item is in the main hand.
+    Held,
+    /// A hotbar key or a swap is on its way.
+    Pending,
+    /// The item is nowhere a click can reach (hotbar or main inventory).
+    Unavailable,
+}
+
+impl HandSelect {
+    fn tick(&mut self, world: &World, wanted: &str, frame: &mut ControlFrame) -> Selecting {
+        if held_matches(world, wanted) {
+            self.swap_waited = None;
+            return Selecting::Held;
+        }
+        if let Some(slot) = hotbar_index(world, wanted) {
+            frame.select_slot = Some(slot);
+            return Selecting::Pending;
+        }
+        if let Some(waited) = self.swap_waited.as_mut() {
+            *waited += 1;
+            if *waited <= SWAP_WAIT_TICKS {
+                return Selecting::Pending;
+            }
+        }
+        if select_item(world, wanted, frame) {
+            self.swap_waited = Some(0);
+            Selecting::Pending
+        } else {
+            self.swap_waited = None;
+            Selecting::Unavailable
+        }
+    }
+}
+
+/// What `mine` should hold for one block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolChoice {
+    /// The held item is as good as anything carried.
+    Keep,
+    /// Select this item first.
+    Select(String),
+    /// The block drops nothing without a tool the body does not carry.
+    Missing,
+}
+
+/// The best item in the main inventory and hotbar (window slots 9 to 44) for
+/// `state`, by the vanilla rules: an item the block drops with beats one it
+/// does not, then the faster base destroy speed wins. Ties keep the held item,
+/// so a body never swaps for nothing.
+///
+/// The offhand (slot 45) is left out on purpose: no click here moves an item
+/// from it into the main hand, so a tool there cannot be used to mine.
+fn choose_tool(state: BlockState, inventory: &[ItemStack], held: &ItemStack) -> ToolChoice {
+    let rank = |item: &ItemStack| {
+        let fit = praxion_headless::tool_fit(state, item);
+        (fit.drops, fit.speed)
+    };
+    let held_rank = rank(held);
+    let best = inventory
+        .iter()
+        .enumerate()
+        .filter(|(index, stack)| (9..=44).contains(index) && stack.count() > 0)
+        .map(|(_, stack)| (rank(stack), stack))
+        .max_by(|(a, _), (b, _)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let better = |(drops, speed): (bool, f32)| {
+        (drops && !held_rank.0) || (drops == held_rank.0 && speed > held_rank.1)
+    };
+    match best {
+        Some((best_rank, stack)) if better(best_rank) => {
+            ToolChoice::Select(normalize(item_name(stack)).to_owned())
+        }
+        _ if !held_rank.0 => ToolChoice::Missing,
+        _ => ToolChoice::Keep,
+    }
+}
+
 fn held_matches(world: &World, wanted: &str) -> bool {
     let slot = world.selected_hotbar_slot().unwrap_or(0) as usize;
     world
@@ -495,6 +598,9 @@ struct Mine {
     name: String,
     target: Option<BlockPos>,
     waited: u32,
+    /// Ticks spent selecting the tool before the first attack click.
+    tool_waited: u32,
+    hand: HandSelect,
     /// After the break is confirmed the runner walks to the drop before it
     /// settles, so the item is picked up. The mine receipt itself stays the
     /// block-break receipt; no inventory receipt is invented here.
@@ -532,6 +638,18 @@ impl Mine {
                     eprintln!("mine: nearest {:?} -> {:?}", self.name, answer);
                 }
                 self.waited += 1;
+                // The skill's `near(T, r)` reads the known map, which also
+                // holds cells out of sight (behind a corner, on a ledge). Walk
+                // toward such a cell until a ray reaches it, as `craft` does
+                // for its table; only a block the known map lost too is gone.
+                if let Some((cell, _)) =
+                    nearest_known_block(ctx.perception, ctx.world, &self.name, 5, &[])
+                {
+                    if self.waited > 80 {
+                        return (frame, None, Some(Outcome::Failed("no_block".into())));
+                    }
+                    return (pickup_frame(ctx, center(cell)), None, None);
+                }
                 if self.waited > 40 {
                     return (frame, None, Some(Outcome::Failed("no_block".into())));
                 }
@@ -552,6 +670,34 @@ impl Mine {
             return (pickup_frame(ctx, center(target)), None, None);
         }
         self.waited = 0;
+        // Hold the best tool before the first attack click; a mine that is
+        // already under way keeps its item, because switching restarts the
+        // break. Stone mined by hand breaks and drops nothing, which is how a
+        // fresh-spawn body mined 21 stone and collected no cobblestone.
+        if !started && let Some(state) = ctx.world.block_state(target) {
+            let held = praxion_headless::held_item(ctx.world);
+            match choose_tool(state, ctx.world.inventory(), &held) {
+                ToolChoice::Keep => {}
+                ToolChoice::Missing => {
+                    return (frame, None, Some(Outcome::Failed("needs_tool".into())));
+                }
+                ToolChoice::Select(item) => {
+                    self.tool_waited = self.tool_waited.saturating_add(1);
+                    let selecting = self.hand.tick(ctx.world, &item, &mut frame);
+                    let give_up = selecting == Selecting::Unavailable
+                        || self.tool_waited > TOOL_SELECT_TICKS;
+                    if !give_up {
+                        return (frame, None, None);
+                    }
+                    // The better tool cannot be brought into the hand: mine
+                    // with the held item only if the block still drops with it.
+                    if !praxion_headless::tool_fit(state, &held).drops {
+                        return (frame, None, Some(Outcome::Failed("needs_tool".into())));
+                    }
+                    frame = idle(ctx);
+                }
+            }
+        }
         let (look, aligned) = aim_precise(ctx, center(target));
         frame.look = look;
         if !aligned {
@@ -700,6 +846,7 @@ struct Place {
     target: Option<(BlockPos, Direction)>,
     sent: bool,
     waited: u32,
+    hand: HandSelect,
 }
 
 impl Place {
@@ -722,11 +869,12 @@ impl Place {
         if count_item(ctx.world, &self.block) == 0 {
             return (frame, None, Some(Outcome::Failed("no_item".into())));
         }
-        if !held_matches(ctx.world, &self.block) {
-            if !select_item(ctx.world, &self.block, &mut frame) {
+        match self.hand.tick(ctx.world, &self.block, &mut frame) {
+            Selecting::Held => {}
+            Selecting::Pending => return (frame, None, None),
+            Selecting::Unavailable => {
                 return (frame, None, Some(Outcome::Failed("no_item".into())));
             }
-            return (frame, None, None);
         }
         if self.target.is_none() {
             self.target = place_target(ctx, &self.block);
@@ -2011,6 +2159,7 @@ struct Eat {
     item: String,
     sent: bool,
     waited: u32,
+    hand: HandSelect,
 }
 
 impl Eat {
@@ -2025,11 +2174,14 @@ impl Eat {
         if !self.sent && count_item(ctx.world, &self.item) == 0 {
             return (frame, None, Some(Outcome::Failed("no_item".into())));
         }
-        if !held_matches(ctx.world, &self.item) && !self.sent {
-            if !select_item(ctx.world, &self.item, &mut frame) {
-                return (frame, None, Some(Outcome::Failed("no_item".into())));
+        if !self.sent {
+            match self.hand.tick(ctx.world, &self.item, &mut frame) {
+                Selecting::Held => {}
+                Selecting::Pending => return (frame, None, None),
+                Selecting::Unavailable => {
+                    return (frame, None, Some(Outcome::Failed("no_item".into())));
+                }
             }
-            return (frame, None, None);
         }
         self.waited += 1;
         if self.waited > 140 {
@@ -2725,6 +2877,62 @@ mod tests {
         let first = cells[0];
         remember(&mut cells, first);
         assert_eq!(cells.len(), before);
+    }
+
+    fn inventory_with(items: &[(usize, azalea_registry::builtin::ItemKind)]) -> Vec<ItemStack> {
+        let mut inventory = vec![ItemStack::Empty; 46];
+        for (slot, kind) in items {
+            inventory[*slot] = ItemStack::new(*kind, 1);
+        }
+        inventory
+    }
+
+    #[test]
+    fn mine_selects_a_pickaxe_for_stone() {
+        use azalea_registry::builtin::ItemKind;
+        let stone = BlockState::from(BlockKind::Stone);
+        // The pickaxe sits in the main inventory, the hand holds planks.
+        let inventory = inventory_with(&[(20, ItemKind::WoodenPickaxe), (36, ItemKind::OakPlanks)]);
+        assert_eq!(
+            choose_tool(stone, &inventory, &inventory[36]),
+            ToolChoice::Select("wooden_pickaxe".into())
+        );
+        // A better pickaxe wins over a worse one.
+        let inventory = inventory_with(&[(37, ItemKind::WoodenPickaxe), (38, ItemKind::StonePickaxe)]);
+        assert_eq!(
+            choose_tool(stone, &inventory, &ItemStack::Empty),
+            ToolChoice::Select("stone_pickaxe".into())
+        );
+        // Already holding it: nothing to do.
+        assert_eq!(choose_tool(stone, &inventory, &inventory[38]), ToolChoice::Keep);
+    }
+
+    #[test]
+    fn mine_refuses_stone_without_a_pickaxe() {
+        use azalea_registry::builtin::ItemKind;
+        let stone = BlockState::from(BlockKind::Stone);
+        let inventory = inventory_with(&[(36, ItemKind::OakPlanks), (37, ItemKind::WoodenAxe)]);
+        assert_eq!(
+            choose_tool(stone, &inventory, &inventory[36]),
+            ToolChoice::Missing,
+            "stone mined by hand breaks and drops nothing"
+        );
+    }
+
+    #[test]
+    fn mine_uses_the_hand_when_no_tool_helps() {
+        use azalea_registry::builtin::ItemKind;
+        // A crafting table drops with any item; a pickaxe is no faster on it.
+        let table = BlockState::from(BlockKind::CraftingTable);
+        let inventory = inventory_with(&[(36, ItemKind::WoodenPickaxe)]);
+        assert_eq!(choose_tool(table, &inventory, &ItemStack::Empty), ToolChoice::Keep);
+        // An axe speeds a log up.
+        let log = BlockState::from(BlockKind::OakLog);
+        let inventory = inventory_with(&[(36, ItemKind::WoodenPickaxe), (37, ItemKind::WoodenAxe)]);
+        assert_eq!(
+            choose_tool(log, &inventory, &inventory[36]),
+            ToolChoice::Select("wooden_axe".into())
+        );
     }
 
     #[test]

@@ -1192,6 +1192,25 @@ fn get_fluid_falling_adjusted_movement(
     }
 }
 
+/// How well one item mines one block, by the same vanilla rules
+/// [`Body::mine_progress`] uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToolFit {
+    /// The block drops its loot when mined with this item.
+    pub drops: bool,
+    /// The item's base destroy speed on this block; `1.0` is the hand.
+    pub speed: f32,
+}
+
+/// How well `item` mines `block`: see [`ToolFit`].
+pub fn tool_fit(block: BlockState, item: &ItemStack) -> ToolFit {
+    let block = Box::<dyn BlockTrait>::from(block);
+    ToolFit {
+        drops: has_correct_tool_for_drops(block.as_ref(), item),
+        speed: base_destroy_speed(block.as_block_kind(), item),
+    }
+}
+
 /// `has_correct_tool_for_drops` (`azalea-entity/src/mining.rs:48-65`).
 fn has_correct_tool_for_drops(block: &dyn BlockTrait, item: &ItemStack) -> bool {
     if !block.behavior().requires_correct_tool_for_drops {

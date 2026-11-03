@@ -2,11 +2,16 @@
 # it has none. Depth 3: get_cobblestone -> get_wooden_pickaxe -> leaf. With the
 # pickaxe in hand, no stone in reach means walking to a frontier of the
 # perception known map first; without the pickaxe the wood chain comes first,
-# because stone cannot be mined yet.
+# because stone cannot be mined yet. Before that walk the body takes its placed
+# table along: the wooden pickaxe leaves three planks, one short of a new table,
+# and a body far from the trees then explored for one more log instead of
+# crafting. This skill decides to leave, so the rule lives here, not in the
+# caller (only the innermost frame selects a rule each tick).
 skill get_cobblestone(n: int = 3)
   doc "Collect at least n cobblestone, crafting a wooden pickaxe first if needed."
   rules:
     count(cobblestone) >= $n -> done
+    has(wooden_pickaxe) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table) -> mine(crafting_table)
     has(wooden_pickaxe) and not near(stone, 5) -> explore(stone)
     has(wooden_pickaxe) -> mine(stone) until count(cobblestone) >= $n
     true -> do get_wooden_pickaxe()

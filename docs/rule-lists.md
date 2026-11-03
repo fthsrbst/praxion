@@ -61,10 +61,10 @@ skill get_stone_pickaxe()
     true                                                        -> do get_wooden_pickaxe()
 ```
 
-The shipped `get_stone_pickaxe.skill` is exactly these five rules. It has no
-inline plank, stick or table steps: it calls `get_cobblestone`,
-`get_sticks` and `get_crafting_table_near`, and each of those is at most six
-rules too.
+The shipped `get_stone_pickaxe.skill` (see the trace below) grew out of this
+example. It has no inline plank, stick or table steps: it calls
+`get_cobblestone`, `get_sticks` and `get_crafting_table_near`, and each of those
+is at most six rules too.
 
 ## Facts and primitives
 
@@ -119,7 +119,7 @@ are read from the pinned server jar when `praxion-gamedata` is built. For a
 primitive whose effect depends on its first argument, `effects_for(args)` gives
 the exact effect; the record's `effects` is the union over all arguments.
 `observe(fact)` is discrete, settles with evidence `FactKnown`, and times out
-at its record's default `max_ticks` (20). `explore(target)` is continuous with a
+at its record's default `max_ticks` (100). `explore(target)` is continuous with a
 1200-tick budget: while no target cell is in the perception known map within 32
 blocks it walks to the nearest frontier (a known walkable cell next to unknown
 cells, scored away from cells already explored in that call); once a target is
@@ -225,7 +225,7 @@ skill get_wood(n: int = 1)
 ```
 
 The fake world's `mine` takes 6 ticks and its record's default `max_ticks` is
-40. Both mines drop one log; there are oak trees nearby (so `near(oak_log, 5)`
+240. Both mines drop one log; there are oak trees nearby (so `near(oak_log, 5)`
 is true and the explore rule is skipped) and the inventory starts empty.
 
 | Tick | What happens | Decision |
@@ -261,6 +261,7 @@ skill get_stone_pickaxe()
 skill get_cobblestone(n: int = 3)
   rules:
     count(cobblestone) >= $n -> done
+    has(wooden_pickaxe) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table) -> mine(crafting_table)
     has(wooden_pickaxe) and not near(stone, 5) -> explore(stone)
     has(wooden_pickaxe) -> mine(stone) until count(cobblestone) >= $n
     true -> do get_wooden_pickaxe()
@@ -268,7 +269,7 @@ skill get_cobblestone(n: int = 3)
 
 | Tick | What happens | Decision |
 |---|---|---|
-| 1 | parent rule 3 (`0 < 3`); child rule 1 is F, rule 2 is F (stone is in reach), rule 3 starts the commitment | `Run mine(stone)`, frames `get_stone_pickaxe` rule 3, `get_cobblestone` rule 3 |
+| 1 | parent rule 3 (`0 < 3`); child rule 1 is F, rules 2 and 3 are F (stone is in reach, so the table stays and no explore starts), rule 4 starts the commitment | `Run mine(stone)`, frames `get_stone_pickaxe` rule 3, `get_cobblestone` rule 4 |
 | 2–6 | the mine is in flight | `Waiting("mine in flight")` |
 | 7 | confirmed, 1 cobblestone; the goal `1 >= 3` is F, so the commitment holds | `Run mine(stone)` |
 | 8–12 | in flight | `Waiting("mine in flight")` |
@@ -282,8 +283,10 @@ skill get_cobblestone(n: int = 3)
 A failed mine does not end the skill: tick 7 would be `Waiting("retry")` and
 tick 8 starts it again. If no table were near, rule 5 would call
 `get_crafting_table_near` first; if fewer than two sticks were left, rule 4
-would call `get_sticks(2)`. If three cobblestone never arrive, the commitment
-ends at `max_ticks` (the `mine` record default, 40) and the rule is
+would call `get_sticks(2)`. Had no stone been in reach, child rule 2 would
+first mine the placed table, so the body carries it to the stone, and rule 5
+would place it again there. If three cobblestone never arrive, the commitment
+ends at `max_ticks` (the `mine` record default, 240) and the rule is
 re-selected from the top, so the skill keeps trying.
 
 ## Running it

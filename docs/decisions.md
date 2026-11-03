@@ -3,6 +3,33 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-03
+
+All on Claude's recommendation, agreed by the user.
+
+- **The body takes its placed crafting table along before it explores for stone.**
+  `get_cobblestone` gains one rule above its `explore(stone)` rule:
+  `has(wooden_pickaxe) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table)
+  -> mine(crafting_table)`. The table drops itself and is placed again by `get_crafting_table_near`
+  once the cobblestone is in. The rule lives in `get_cobblestone` because that skill decides to leave
+  and only the innermost frame selects a rule each tick; a first draft in `get_stone_pickaxe` could
+  never fire (review, 2026-11-03). Reason: the wooden pickaxe leaves three planks,
+  one short of a second table, so a fresh-spawn body that had walked to stone explored for one more log
+  and never reached the stone pickaxe within 1200 s (backlog, step 9c). Rules out: crafting a spare table
+  before leaving (one more log, a table left behind) and walking back to the placed table (long, risky
+  return from a cave, bounded by the known-map radius).
+- **`mine` selects its own tool.** Before the first attack click, `mine` puts the best item it
+  carries into the main hand by the vanilla rules the headless client already ports (an item the
+  block drops with beats one it does not, then the faster base destroy speed); a tie keeps the held
+  item. A block that drops nothing without a tool the body lacks fails `needs_tool` instead of being
+  broken for nothing. Reason: on a fresh spawn the body mined 21 stone by hand and collected no
+  cobblestone, because `mine` never changed the held item. Rules out: an explicit `equip` rule in
+  every mining skill (repeated, and silently wrong when forgotten).
+- **`explore`'s memory belongs to the run, not to the process.** The recent explored cells, the home
+  altitude, the explore origin and the rotation counter move from process-wide statics into an
+  `ExploreMemory` owned by `Runner`. Behaviour is unchanged. Reason: globals leak between runners
+  (parallel tests) and hide the "one process is one run" assumption. Rules out: keeping the statics.
+
 ## 2026-11-01 (Demo-0 start)
 
 All on Claude's recommendation.
