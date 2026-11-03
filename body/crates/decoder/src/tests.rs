@@ -639,9 +639,10 @@ fn unread_bytes_never_underflow() {
 #[test]
 fn trailing_bytes_in_a_frame_desync() {
     // A frame that carries bytes past its packet is a desync, never a guessed
-    // packet. (Azalea's own reader refuses the leftovers first, so this checks
-    // the observable outcome; `unread_bytes` is the decoder's backstop for
-    // packets whose reader does not check.)
+    // packet. Azalea's own reader refuses the leftovers only in debug builds
+    // (`#[cfg(debug_assertions)]` in azalea-protocol-macros); in release, the
+    // profile the body runs, `unread_bytes` is the check that fires. Either
+    // reason is the same observable outcome.
     let mut builder = Builder::new();
     builder.marker(Kind::Opened);
     let mut raw = serialize_packet(&ServerboundHandshakePacket::Intention(ServerboundIntention {
@@ -658,7 +659,12 @@ fn trailing_bytes_in_a_frame_desync() {
     let (_, events) = builder.decode();
     let reasons = desync_reasons(&events);
     assert_eq!(reasons.len(), 1, "{events:?}");
-    assert!(reasons[0].contains("Leftover data"), "{}", reasons[0]);
+    let expected = if cfg!(debug_assertions) {
+        "Leftover data"
+    } else {
+        "intention left 2 of 18 bytes unread"
+    };
+    assert!(reasons[0].contains(expected), "{}", reasons[0]);
     assert!(decoded(&events).is_empty(), "no packet is guessed from trailing bytes");
 }
 

@@ -166,6 +166,13 @@ fn the_fall_guard_refuses_a_deep_step() {
             set_block(&mut sim.world, BlockPos::new(x, 63, z), state(BlockKind::Air));
         }
     }
+    // Stand on the edge first: the follower only walks a grounded body, so a
+    // body still in its spawn tick would emit no move for the guard to stop.
+    // Two ticks: the first only gains downward velocity, the second collides.
+    for _ in 0..2 {
+        sim.body.step(&praxion_headless::Held::NONE, &sim.world);
+    }
+    assert!(sim.body.on_ground(), "the body stands on the edge");
     // A reflex that wants to go south, straight into the chasm.
     let action = ReflexAction::StepBack {
         to: BlockPos::new(0, 64, 1),

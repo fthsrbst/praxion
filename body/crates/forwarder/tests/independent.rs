@@ -267,6 +267,7 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     condition()
 }
 
+#[cfg(windows)]
 fn process_threads() -> usize {
     let pid = std::process::id();
     let script = format!("(Get-Process -Id {}).Threads.Count", pid);
@@ -280,6 +281,31 @@ fn process_threads() -> usize {
         .unwrap_or(0)
 }
 
+/// `ps -M` prints a header and one line per thread.
+#[cfg(target_os = "macos")]
+fn process_threads() -> usize {
+    let pid = std::process::id().to_string();
+    let output = Command::new("ps")
+        .args(["-M", "-p", &pid])
+        .output()
+        .expect("ps");
+    let lines = String::from_utf8_lossy(&output.stdout).lines().count();
+    assert!(lines > 1, "ps -M listed no threads");
+    lines - 1
+}
+
+#[cfg(target_os = "linux")]
+fn process_threads() -> usize {
+    std::fs::read_dir("/proc/self/task").expect("/proc/self/task").count()
+}
+
+/// Open file descriptors; sockets count here like handles do on Windows.
+#[cfg(unix)]
+fn process_handles() -> usize {
+    std::fs::read_dir("/dev/fd").expect("/dev/fd").count()
+}
+
+#[cfg(windows)]
 fn process_handles() -> usize {
     let pid = std::process::id();
     let script = format!("(Get-Process -Id {}).HandleCount", pid);

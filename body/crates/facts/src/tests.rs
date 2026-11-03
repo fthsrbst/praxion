@@ -37,6 +37,8 @@ use super::*;
 
 const EYE_Y: f64 = 65.0;
 const FEET_Y: f64 = EYE_Y - 1.62;
+/// Ticks of sweeping that cover the eye's section at the per-tick ray slice.
+const SWEEP_TICKS: usize = 10;
 
 fn spawn_info() -> CommonPlayerSpawnInfo {
     CommonPlayerSpawnInfo {
@@ -272,8 +274,16 @@ fn known_inventory_facts_count_items_and_tags() {
 fn known_block_facts_use_the_known_map() {
     let world = with_zombie(world());
     let mut perception = Perception::new(Config::default());
-    perception.begin_tick(&world);
-    perception.sweep(&world);
+    // The sweep spends a bounded slice of rays per tick, so filling the map
+    // around the eye takes a few ticks.
+    for _ in 0..SWEEP_TICKS {
+        perception.begin_tick(&world);
+        perception.sweep(&world);
+    }
+    assert!(
+        perception.known(BlockPos::new(2, 65, 0)).is_some(),
+        "the sweep reached the stone"
+    );
     let mut facts = Facts::new(&mut perception, &world);
 
     assert_eq!(
