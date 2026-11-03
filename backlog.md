@@ -20,23 +20,44 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 ## Open
 
 ### End-to-end skills from a free spawn
-- Source: OpenCode DeepSeek V4.1 Flash, 2026-11-02
-- State: Step 9c added the frontier `explore` primitive, bounded child failures, drop pickup, and
-  fixed the block-receipt false negative (a place into a replaceable clicked block, and a dig whose
-  block update arrived before registration). Stocked runs now pass 6/6 with every receipt confirmed
-  and zero failures (186-195 ticks). Fresh-spawn `get_wooden_pickaxe` passed on seeds 101 (1113
-  ticks), 202 (1704) and 303 (1292), all referee-confirmed. The far-logs desert run (seed 202,
-  teleported to 2000/-3056, no log within 40 by referee queries) found a tree and finished in 496
-  ticks. Fresh-spawn `get_stone_pickaxe` from nothing did not reach the pickaxe within 600 s on any
-  seed; a 1200 s 101 attempt was still churning planks/logs at tick 7136 when stopped.
-- Remaining: (1) make the fresh stone chain reliable: keep a spare table or enough planks after the
-  wooden pickaxe (gathering nine planks would leave four), return to the placed table instead of
-  crafting another, and approach cave stone from an exposed face; (2) `explore` forgets its explored
-  set between calls, so a fruitless 1200-tick path can repeat (the child-failure bound stops the
-  livelock, but the search is not cumulative); a per-run explored set or a rotating start direction
-  would fix it; (3) rerun the fresh stone chain with a longer cap once (1) lands.
-- Pointers: `logs/s9c/e2e-stocked-final-stocked.json`, `logs/s9c/e2e-fresh-final.json`,
-  `logs/s9c/e2e-202-303.json`, `runs/s9c-*`, `notes.md` 2026-11-02.
+- Source: OpenCode DeepSeek V4.1 Flash, 2026-11-02; updated Claude Opus 5.5, 2026-11-03 (macOS)
+- State: 2026-11-03 landed table carry (`get_cobblestone`), `mine` tool selection, one-shot swaps,
+  per-run `ExploreMemory` (commits 0367d23, e447391). Fresh-spawn `get_stone_pickaxe`, 1200 s cap,
+  macOS, peaceful daytime: **303** got wood, wooden pickaxe, carried the table (`mine(crafting_table)`
+  confirmed), mined 3 cobblestone with the pickaxe, then failed `unconfirmed` re-placing the table
+  (9 tries, same cell `45,97,40`). **202** failed `unconfirmed`: 87 place tries, all on `30,62,41`
+  / `31,62,41`, right after mining a log at its base. **101** never found a log: explore stops
+  choosing frontiers near `-260,66,-102` at tick ~1180 and fails `not_found` for 22,000 ticks
+  (twice in a row; an earlier run that day found logs). Smoke 7/7 passes.
+- Remaining, in order: (1) **place target selection** (blocks 202 and 303): the server acks the use
+  (`block_changed_ack`) but places nothing, so `place_target` picks a cell the server refuses, likely
+  one that overlaps the body after it mined into a hole; reproduce from the kept run dirs, add a unit
+  test, exclude the body's cells and rotate to another cell after one refusal; (2) **explore stuck in
+  a pit** (101): the WIP's unfinished "peak fix"; explore may not change the world, so a body below a
+  3-block rim has no frontier; (3) rerun 101/202/303; (4) seed 303 took 2392 s wall for 1499 ticks
+  (period p50 50 ms) - find where the run stalled outside the tick loop.
+- Pointers: `runs/test-body-b085245efcb94c54a5bc10bdf25470f4` (303),
+  `runs/test-body-c1c99fe603624a9cbc9a3cde79fc425e` (202), `runs/test-body-6df7c6bd11304710b9656ecc034e9830`
+  (101); `notes.md` 2026-11-02 and 2026-11-03. The fresh-spawn runner is not in the repo yet: it is a
+  20-line `start_body(seed, "get_stone_pickaxe", setup=peaceful daytime, max_ticks=24000)` loop;
+  make it a `-m server` harness test once (1) and (2) land.
+
+### Crafting-table click opens no menu under CPU load
+- Source: Claude Opus 5.5, 2026-11-03 (macOS)
+- State: smoke `test_wooden_pickaxe_from_given_logs[101]` failed once with `failed(needs_table)` while
+  a debug `cargo test` compiled in parallel: the table was placed and confirmed, `craft` sent a Use
+  click every 10 ticks for 3 x 60 ticks, no menu opened. Alone the same test passed 3/3.
+- Remaining: find why the Use click is not honoured under load (aim not settled, a click on the wrong
+  tick, or a server-side reach check); capture the tee on a loaded run.
+- Pointers: `runs/test-body-738422ab2b7b4f89a4351a36da5aee99`, `craft` in
+  `body/crates/primitives/src/runner.rs` (`CraftStage::Open`).
+
+### Mine and HandSelect tick paths lack tests
+- Source: OpenCode review, 2026-11-03
+- State: `choose_tool` has pure unit tests; the `Mine::tick` paths (`tool_waited` fallback, `Missing`
+  through `tick`, no swap once a dig is under way) and `HandSelect` (one swap, wait, resend after 20
+  ticks) are only covered live.
+- Remaining: a `World` fixture with an inventory in `praxion-primitives` tests and tests for those paths.
 
 ### Biome and light in the raw store (F3 facts)
 - Source: OpenCode DeepSeek V4.1 Flash, 2026-11-01

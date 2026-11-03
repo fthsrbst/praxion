@@ -6,6 +6,29 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-03 - Claude Opus 5.5 - macOS session: setup, test parity, first stone from a fresh spawn
+
+- **macOS works for body work.** `setup.py` finished without downloads by seeding
+  `third_party/azalea` from the old `spikes/round0/azalea` clone and the server jar from
+  `spikes/round0/dl/server.jar` (sha1 matches the manifest), with `--java spikes/round0/jdk/...`. Only
+  the rustup `llvm-tools` component was fetched. The spike proxy linked `kernel32` unconditionally
+  (fixed). The old round-0 Mac downloads under `spikes/round0/` (`jdk/`, `dl/`, `azalea/`, logs) show
+  as untracked: `.gitignore` does not cover them.
+- **Release and debug test runs differ.** Azalea's leftover-data check is `#[cfg(debug_assertions)]`;
+  in release (the profile the body runs) the decoder's own `unread_bytes` backstop names the desync.
+  The Windows "609 passed" count was debug. Run both when a test touches Azalea behaviour.
+- **Only the innermost frame selects.** A rule in a parent skill is not evaluated while a child runs;
+  the parent re-evaluates when the child ends. A rule that must fire "before the body leaves" belongs
+  in the skill that decides to leave. The independent review caught this before a live run did.
+- **The headless client does not predict inventory clicks.** A swap shows only after the server's slot
+  update, so any primitive that re-sends a swap every tick undoes it. `HandSelect` sends once and
+  waits; `equip` already did.
+- **Fresh-spawn seed 303 reached 3 cobblestone with a carried table**, the first fresh run to mine stone
+  with a tool. All three seeds now fail on other steps: place target selection (202, 303) and the
+  explore pit (101). See backlog "End-to-end skills from a free spawn".
+- OpenCode v2.1.2 on this Mac runs `opencode-go/deepseek-v4.1-flash`; one refactor and one review ran
+  through `oc-run.sh` cleanly (exit 0, no out-of-scope edits).
+
 ## 2026-11-02 - OpenCode DeepSeek V4.1 Flash - s9c: explore, child failures, pickup and the place false negative
 
 - **Bounded child failures**: a child's `failed(kind)` now increments the calling rule's failure
