@@ -26,6 +26,14 @@ pub struct TickTimes {
     pub over_25ms: u64,
 }
 
+/// One stage's wall time over the run, in milliseconds.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct StageTimes {
+    pub p50_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
 /// The counters shared by the driver (in the session thread) and the process
 /// (the event loop). A mutex, not atomics: the driver writes every tick and the
 /// process reads a few times a second.
@@ -40,6 +48,8 @@ pub struct Shared {
     pub ticks: u64,
     pub work_ns: Vec<u64>,
     pub period_ns: Vec<u64>,
+    /// Per-stage samples, so a slow tick can be attributed without a profiler.
+    pub stage_ns: BTreeMap<String, Vec<u64>>,
     pub over_25ms: u64,
     pub receipts: BTreeMap<String, u64>,
     pub reflex_activations: BTreeMap<String, u64>,
@@ -58,6 +68,7 @@ impl Shared {
             ticks: 0,
             work_ns: Vec::new(),
             period_ns: Vec::new(),
+            stage_ns: BTreeMap::new(),
             over_25ms: 0,
             receipts: BTreeMap::new(),
             reflex_activations: BTreeMap::new(),
@@ -76,6 +87,13 @@ impl Shared {
 
     pub fn record_period(&mut self, period_ns: u64) {
         self.period_ns.push(period_ns);
+    }
+
+    pub fn record_stage(&mut self, name: &str, stage_ns: u64) {
+        self.stage_ns
+            .entry(name.to_owned())
+            .or_default()
+            .push(stage_ns);
     }
 }
 
@@ -99,6 +117,8 @@ pub struct Summary {
     pub goal: Goal,
     pub ticks: u64,
     pub tick_time: TickTimes,
+    /// Per-stage wall time, by stage name.
+    pub tick_stages: BTreeMap<String, StageTimes>,
     pub receipts: BTreeMap<String, u64>,
     pub reflex_activations: BTreeMap<String, u64>,
     pub deaths: u64,
@@ -136,6 +156,22 @@ pub fn summary(shared: &Shared) -> Summary {
             period_p99_ms: percentile_ms(&period, 99.0),
             over_25ms: shared.over_25ms,
         },
+        tick_stages: shared
+            .stage_ns
+            .iter()
+            .map(|(name, samples)| {
+                let mut sorted = samples.clone();
+                sorted.sort_unstable();
+                (
+                    name.clone(),
+                    StageTimes {
+                        p50_ms: percentile_ms(&sorted, 50.0),
+                        p99_ms: percentile_ms(&sorted, 99.0),
+                        max_ms: sorted.last().map_or(0.0, |ns| *ns as f64 / 1_000_000.0),
+                    },
+                )
+            })
+            .collect(),
         receipts: shared.receipts.clone(),
         reflex_activations: shared.reflex_activations.clone(),
         deaths: shared.deaths,
@@ -173,6 +209,19 @@ mod tests {
         assert_eq!(percentile_ms(&values, 99.0), 4.0);
         assert_eq!(percentile_ms(&[], 50.0), 0.0);
         assert_eq!(percentile_ms(&[5_000_000], 99.0), 5.0);
+    }
+
+    #[test]
+    fn stage_times_are_reported_per_stage() {
+        let mut shared = Shared::new("run", "goal", vec![]);
+        shared.record_stage("arbiter", 2_000_000);
+        shared.record_stage("arbiter", 4_000_000);
+        shared.record_stage("sweep", 1_000_000);
+        let stages = summary(&shared).tick_stages;
+        assert_eq!(stages["arbiter"].p50_ms, 2.0);
+        assert_eq!(stages["arbiter"].p99_ms, 4.0);
+        assert_eq!(stages["arbiter"].max_ms, 4.0);
+        assert_eq!(stages["sweep"].p99_ms, 1.0);
     }
 
     #[test]

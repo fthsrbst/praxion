@@ -226,8 +226,14 @@ impl LiveDriver {
                 )
                 .with_window(*window),
             ),
-            IntentSpec::Movement { primitive, window } => Some(
-                Intent::movement(intent_id, primitive.clone(), report_tick).with_window(*window),
+            IntentSpec::Movement {
+                primitive,
+                args,
+                window,
+            } => Some(
+                Intent::movement(intent_id, primitive.clone(), report_tick)
+                    .with_window(*window)
+                    .with_args(args.clone()),
             ),
             IntentSpec::SlotClick {
                 container_id,

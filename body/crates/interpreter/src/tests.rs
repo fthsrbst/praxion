@@ -16,6 +16,12 @@ struct Mock {
     unknown: BTreeSet<String>,
     duration: u64,
     outcome: Option<Outcome>,
+    /// Per-primitive terminal outcomes, ahead of `outcome`, so a test can make
+    /// two rules fail with different kinds.
+    outcomes: BTreeMap<String, Outcome>,
+    /// The terminal outcome a continuous action reports, for the tests of the
+    /// explore/continuous path.
+    continuous_outcome: Option<Outcome>,
     flight: Option<(u64, Outcome)>,
     starts: Vec<StartAction>,
     applies: Vec<StartAction>,
@@ -31,6 +37,8 @@ impl Default for Mock {
             unknown: BTreeSet::new(),
             duration: 1,
             outcome: None,
+            outcomes: BTreeMap::new(),
+            continuous_outcome: None,
             flight: None,
             starts: Vec::new(),
             applies: Vec::new(),
@@ -83,7 +91,12 @@ impl Facts for Mock {
 impl Actuator for Mock {
     fn start(&mut self, action: &StartAction, tick: u64) -> u32 {
         self.starts.push(action.clone());
-        let outcome = self.outcome.clone().unwrap_or(Outcome::Confirmed);
+        let outcome = self
+            .outcomes
+            .get(&action.primitive)
+            .cloned()
+            .or_else(|| self.outcome.clone())
+            .unwrap_or(Outcome::Confirmed);
         self.flight = Some((tick + self.duration, outcome));
         self.duration as u32
     }
@@ -107,8 +120,11 @@ impl Actuator for Mock {
         }
     }
 
-    fn apply(&mut self, action: &StartAction, _tick: u64) {
+    fn apply(&mut self, action: &StartAction, tick: u64) {
         self.applies.push(action.clone());
+        if let Some(outcome) = self.continuous_outcome.clone() {
+            self.flight = Some((tick + self.duration, outcome));
+        }
     }
 
     fn release(&mut self) {
@@ -551,7 +567,7 @@ skill parent()
 }
 
 #[test]
-fn a_different_parent_rule_resets_the_child_failure_streak() {
+fn a_different_parent_rule_keeps_the_child_failure_count() {
     let program = program(
         r#"
 skill child()
@@ -579,16 +595,76 @@ skill parent()
     facts.bools.insert("tool".into(), false);
     facts.ints.insert("pause".into(), 1);
     assert_eq!(wait_ticks(&started(&mut interpreter, &mut facts, &mut act)), 5);
-    // The streak is gone; two fresh child failures do not fail the parent.
+    // The other rule firing does not clear the child rule's count: the third
+    // child failure fails the parent with the child's kind.
     facts.bools.insert("tool".into(), true);
     facts.ints.insert("pause".into(), 0);
-    for _ in 0..2 {
-        assert_eq!(
-            started(&mut interpreter, &mut facts, &mut act),
-            Decision::Waiting("retry".into())
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed("broken".into())
+    );
+    assert!(interpreter.finished());
+}
+
+#[test]
+fn a_b_a_alternation_still_fails_the_repeating_rule() {
+    // The live shape: a parent alternates two rules, each of whose children
+    // fails `not_found`. Each rule keeps its own count, so A's third failure
+    // fails the frame with A's kind even though B fired in between.
+    let program = program(
+        r#"
+skill s()
+  rules:
+    count(phase) == 0 or count(phase) == 2 -> mine(stone)
+    count(phase) == 1 -> place(dirt)
+"#,
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    act.outcomes
+        .insert("mine".into(), Outcome::Failed("no_block".into()));
+    act.outcomes
+        .insert("place".into(), Outcome::Failed("no_space".into()));
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    let phase = |facts: &mut Mock, value: i64| {
+        facts.ints.insert("phase".into(), value);
+    };
+    let run_failing_rule = |facts: &mut Mock, act: &mut Mock, interpreter: &mut Interpreter| {
+        assert!(
+            matches!(started(interpreter, facts, act), Decision::Run { .. }),
+            "the selected rule starts its primitive"
         );
-    }
-    assert!(!interpreter.finished());
+        assert_eq!(
+            started(interpreter, facts, act),
+            Decision::Waiting("retry".into()),
+            "the failed primitive is retried next tick"
+        );
+    };
+
+    phase(&mut facts, 0);
+    run_failing_rule(&mut facts, &mut act, &mut interpreter); // A: 1
+    phase(&mut facts, 1);
+    run_failing_rule(&mut facts, &mut act, &mut interpreter); // B: 1
+    phase(&mut facts, 2);
+    run_failing_rule(&mut facts, &mut act, &mut interpreter); // A: 2
+    phase(&mut facts, 1);
+    run_failing_rule(&mut facts, &mut act, &mut interpreter); // B: 2
+    phase(&mut facts, 0);
+    assert!(
+        matches!(
+            started(&mut interpreter, &mut facts, &mut act),
+            Decision::Run { .. }
+        ),
+        "A starts its third attempt"
+    );
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed("no_block".into()),
+        "A's third failure fails the frame, with A's kind"
+    );
+    assert!(interpreter.finished());
 }
 
 #[test]
@@ -677,7 +753,7 @@ fn three_consecutive_primitive_failures_fail_the_skill() {
 }
 
 #[test]
-fn another_rule_firing_resets_the_failure_streak() {
+fn another_rule_firing_keeps_the_failure_count() {
     let program = program(
         "skill s()\n  rules:\n    count(x) >= 1 -> wait(1)\n    true -> mine(stone)\n",
     );
@@ -698,21 +774,22 @@ fn another_rule_firing_resets_the_failure_streak() {
             Decision::Waiting("retry".into())
         );
     }
-    // A different rule fires, which resets the streak.
+    // A different rule fires for one tick; it does not reset mine's count.
     facts.ints.insert("x".into(), 1);
+    act.outcome = None;
     assert_eq!(wait_ticks(&started(&mut interpreter, &mut facts, &mut act)), 1);
     facts.ints.insert("x".into(), 0);
-    // A fresh mine failure starts the count again, so two more do not fail.
-    for _ in 0..2 {
-        assert!(matches!(
-            started(&mut interpreter, &mut facts, &mut act),
-            Decision::Run { .. }
-        ));
-        assert_eq!(
-            started(&mut interpreter, &mut facts, &mut act),
-            Decision::Waiting("retry".into())
-        );
-    }
+    act.outcome = Some(Outcome::Failed("no_block".into()));
+    // The wait settles, then mine's third failure fails the skill.
+    assert!(matches!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Run { .. }
+    ));
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed("no_block".into()),
+        "the count survived the other rule firing"
+    );
 }
 
 #[test]
@@ -764,4 +841,120 @@ fn start_fills_defaults_and_resolves_parameters() {
         }
         other => panic!("expected a run, got {other:?}"),
     }
+}
+
+#[test]
+fn a_terminal_continuous_failure_counts_toward_the_rule_streak() {
+    // `explore` is continuous and reports only when it actually ends. Before
+    // the fix its `failed(not_found)` was dropped, so the skill restarted the
+    // same 1200-tick search forever.
+    let program = program("skill s()\n  rules:\n    true -> explore(oak_log)\n");
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    act.continuous_outcome = Some(Outcome::Failed("not_found".into()));
+    act.duration = 1;
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    let mut decisions = Vec::new();
+    for _ in 0..20 {
+        let decision = interpreter.tick(&mut facts, &mut act);
+        decisions.push(decision.clone());
+        if let Decision::Failed(kind) = decision {
+            assert_eq!(kind, "not_found");
+            return;
+        }
+    }
+    panic!("the skill never failed: {decisions:?}");
+}
+
+#[test]
+fn a_continuous_success_clears_the_streak() {
+    let program = program(
+        "skill s()\n  rules:\n    count(x) >= 1 -> wait(1)\n    true -> explore(oak_log)\n",
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    act.continuous_outcome = Some(Outcome::Failed("not_found".into()));
+    act.duration = 1;
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+    // Two failures, below the limit.
+    for _ in 0..4 {
+        let _ = interpreter.tick(&mut facts, &mut act);
+    }
+    act.continuous_outcome = Some(Outcome::Confirmed);
+    for _ in 0..2 {
+        let _ = interpreter.tick(&mut facts, &mut act);
+    }
+    assert!(
+        !interpreter.finished(),
+        "a confirmed continuous action resets the streak"
+    );
+}
+
+#[test]
+fn frame_events_cover_push_done_and_failure() {
+    let program = program(
+        "skill child()\n  rules:\n    not near(oak_log, 5) -> fail(no_wood)\n    true -> done\nskill s()\n  rules:\n    true -> do child()\n",
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.set_max_primitive_failures(1);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+    let start_events = interpreter.take_events();
+    assert!(
+        matches!(
+            start_events.as_slice(),
+            [crate::InterpreterEvent::FramePushed { skill, depth: 1, .. }] if skill == "s"
+        ),
+        "root push: {start_events:?}"
+    );
+    // `near` is false by default in the mock, so the child fails at once.
+    let decision = started(&mut interpreter, &mut facts, &mut act);
+    assert!(matches!(decision, Decision::Failed(ref kind) if kind == "no_wood"), "{decision:?}");
+    let events = interpreter.take_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            crate::InterpreterEvent::FramePushed { skill, depth: 2, .. } if skill == "child"
+        )),
+        "child push: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            crate::InterpreterEvent::FrameFailed { skill, depth: 2, kind } if skill == "child" && kind == "no_wood"
+        )),
+        "child failure: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            crate::InterpreterEvent::FrameFailed { skill, depth: 1, kind } if skill == "s" && kind == "no_wood"
+        )),
+        "parent failure: {events:?}"
+    );
+    assert_eq!(interpreter.last_rule(), Some(("child", 0)));
+}
+
+#[test]
+fn a_root_done_emits_frame_done() {
+    let program = program("skill s()\n  rules:\n    true -> done\n");
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+    let _ = interpreter.take_events();
+    let decision = started(&mut interpreter, &mut facts, &mut act);
+    assert!(matches!(decision, Decision::Done), "{decision:?}");
+    let events = interpreter.take_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            crate::InterpreterEvent::FrameDone { skill, depth: 1 } if skill == "s"
+        )),
+        "root done: {events:?}"
+    );
 }

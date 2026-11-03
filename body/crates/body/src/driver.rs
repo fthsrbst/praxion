@@ -38,12 +38,12 @@ use praxion_arbiter::{Arbiter, FrameSource, Needs};
 use praxion_eventlog::{EventKind, Outcome as ReceiptOutcome, Versions, Writer};
 use praxion_headless::{AppliedReport, Body, ControlFrame, Driver, Held, TickView};
 use praxion_interpreter::{
-    Actuator, Decision, Facts as InterpreterFacts, IntValue, Interpreter, Outcome, StartAction,
-    Truth,
+    Actuator, Decision, Facts as InterpreterFacts, InterpreterEvent, IntValue, Interpreter, Outcome,
+    StartAction, Truth,
 };
 use praxion_perception::{Config as PerceptionConfig, Perception};
 use praxion_planner::{Block, KnownBlocks, LookStyle};
-use praxion_primitives::{Ctx, IntentSpec, Runner, fact_known};
+use praxion_primitives::{Ctx, IntentSpec, PrimitiveEvent, Runner, fact_known};
 use praxion_receipts::{Engine, Intent, ReceiptId};
 use praxion_reflexes::{EndermanGuard, Settings, View};
 use praxion_rules::{ArgValue, FactCall, Program};
@@ -93,7 +93,21 @@ pub struct BodyDriver {
     /// An action the interpreter selected on the tick a preempted primitive had
     /// to close its menu. It starts on the next tick, after the close.
     deferred_start: Option<StartAction>,
+    /// The primitive currently owned by the runner, for `primitive_finished`.
+    active_primitive: Option<ActivePrimitive>,
+    /// The runner's outcome was handed to the interpreter; do not re-deliver
+    /// it to a later flight (a finished continuous primitive leaves it set).
+    outcome_delivered: bool,
+    /// The last `rule_selected` written, so a steady rule costs no events.
+    last_rule_logged: Option<(String, usize)>,
     desync_logged: bool,
+}
+
+/// One primitive execution as the log sees it.
+struct ActivePrimitive {
+    primitive: String,
+    args: Vec<String>,
+    start_tick: u64,
 }
 
 impl BodyDriver {
@@ -130,6 +144,9 @@ impl BodyDriver {
             last_started: None,
             first_tick: None,
             deferred_start: None,
+            active_primitive: None,
+            outcome_delivered: false,
+            last_rule_logged: None,
             desync_logged: false,
         };
         let versions = driver.options.versions.clone();
@@ -172,6 +189,7 @@ impl BodyDriver {
                 for event in accepted.events {
                     let _ = self.log.append(tick, ts_ns, event);
                 }
+                self.log_interpreter_events(tick, ts_ns);
             }
             Err(error) => self.settle(format!("failed(start:{error})"), tick, ts_ns),
         }
@@ -270,8 +288,14 @@ impl BodyDriver {
                 )
                 .with_window(*window),
             ),
-            IntentSpec::Movement { primitive, window } => Some(
-                Intent::movement(intent_id, primitive.clone(), report_tick).with_window(*window),
+            IntentSpec::Movement {
+                primitive,
+                args,
+                window,
+            } => Some(
+                Intent::movement(intent_id, primitive.clone(), report_tick)
+                    .with_window(*window)
+                    .with_args(args.clone()),
             ),
             IntentSpec::SlotClick {
                 container_id,
@@ -328,8 +352,103 @@ impl BodyDriver {
     }
 
     fn start_primitive(&mut self, action: &StartAction, tick: u64, ts_ns: u64) {
+        self.finish_active_primitive(tick, ts_ns, None);
         if let Err(error) = self.runner.start(action) {
             self.settle(format!("failed(primitive:{error})"), tick, ts_ns);
+            return;
+        }
+        self.outcome_delivered = false;
+        self.active_primitive = Some(ActivePrimitive {
+            primitive: action.primitive.clone(),
+            args: action.args.iter().map(arg_string).collect(),
+            start_tick: tick,
+        });
+    }
+
+    /// Writes `primitive_finished` once for the primitive the runner owned.
+    /// `forced` supplies the outcome when the driver itself ended it
+    /// (`Preempted`); otherwise the runner's own outcome is used.
+    fn finish_active_primitive(&mut self, tick: u64, ts_ns: u64, forced: Option<Outcome>) {
+        if self.runner.is_active() {
+            return;
+        }
+        let Some(active) = self.active_primitive.take() else {
+            return;
+        };
+        let outcome = forced
+            .or_else(|| self.runner.outcome().cloned())
+            .unwrap_or(Outcome::Preempted);
+        let (name, kind) = match &outcome {
+            Outcome::Confirmed => ("confirmed", None),
+            Outcome::Timeout => ("timeout", None),
+            Outcome::Preempted => ("preempted", None),
+            Outcome::Failed(kind) => ("failed", Some(kind.clone())),
+        };
+        let _ = self.log.append(
+            tick,
+            ts_ns,
+            EventKind::PrimitiveFinished {
+                primitive: active.primitive,
+                args: active.args,
+                outcome: name.to_owned(),
+                failure_kind: kind,
+                ticks: tick.saturating_sub(active.start_tick),
+            },
+        );
+    }
+
+    fn log_interpreter_events(&mut self, tick: u64, ts_ns: u64) {
+        for event in self.interpreter.take_events() {
+            let event = match event {
+                InterpreterEvent::FramePushed { skill, depth, .. } => {
+                    let _ = self.log.append(
+                        tick,
+                        ts_ns,
+                        EventKind::SkillFrame {
+                            skill,
+                            depth,
+                            outcome: "pushed".to_owned(),
+                            failure_kind: None,
+                        },
+                    );
+                    continue;
+                }
+                InterpreterEvent::FrameDone { skill, depth } => EventKind::SkillFrame {
+                    skill,
+                    depth,
+                    outcome: "done".to_owned(),
+                    failure_kind: None,
+                },
+                InterpreterEvent::FrameFailed { skill, depth, kind } => EventKind::SkillFrame {
+                    skill,
+                    depth,
+                    outcome: "failed".to_owned(),
+                    failure_kind: Some(kind),
+                },
+            };
+            let _ = self.log.append(tick, ts_ns, event);
+        }
+        let changed = match self.interpreter.rule_fired_this_tick() {
+            Some((skill, rule)) => {
+                let pair = (skill.to_owned(), rule);
+                if self.last_rule_logged.as_ref() == Some(&pair) {
+                    None
+                } else {
+                    Some(pair)
+                }
+            }
+            None => None,
+        };
+        if let Some((skill, rule)) = changed {
+            self.last_rule_logged = Some((skill.clone(), rule));
+            let _ = self.log.append(
+                tick,
+                ts_ns,
+                EventKind::RuleSelected {
+                    skill,
+                    rule: rule as u32,
+                },
+            );
         }
     }
 
@@ -342,6 +461,7 @@ impl BodyDriver {
         reflex_view: &View,
         ts_ns: u64,
     ) -> ControlFrame {
+        self.finish_active_primitive(view.tick, ts_ns, None);
         if let Some(action) = self.deferred_start.take()
             && !self.runner.is_active()
         {
@@ -384,8 +504,31 @@ impl BodyDriver {
         if let Some(pending) = result.pending {
             self.pending = Some(pending);
         }
-        if let Some(outcome) = result.outcome {
-            self.bridge.outcome = Some(outcome);
+        for event in result.events {
+            match event {
+                PrimitiveEvent::ExploreFrontier {
+                    cell,
+                    score,
+                    candidates,
+                } => {
+                    let _ = self.log.append(
+                        view.tick,
+                        ts_ns,
+                        EventKind::ExploreFrontier {
+                            cell: format!("{}, {}, {}", cell.x, cell.y, cell.z),
+                            score,
+                            candidates,
+                        },
+                    );
+                }
+            }
+        }
+        if result.outcome.is_some() {
+            // The interpreter polls this through `bridge.outcome` on the next
+            // tick, sourced once from `Runner::outcome` (the runner keeps
+            // returning a finished outcome until the next start). Emitting the
+            // `primitive_finished` event here is enough for this tick.
+            self.finish_active_primitive(view.tick, ts_ns, None);
         }
 
         // An `observe` receipt is confirmed when perception now knows the fact.
@@ -442,6 +585,10 @@ impl BodyDriver {
         // Do not feed this outcome to the interpreter: `preempt`/`cancel`
         // already dropped the flight, and a later flight would poll it as its
         // own. The receipt still settles `preempted` on its own.
+        self.finish_active_primitive(view.tick, now_ns(), Some(Outcome::Preempted));
+        // `preempt` already dropped the flight; this outcome must not reach a
+        // later flight's poll.
+        self.outcome_delivered = true;
         Some(result.frame)
     }
 
@@ -501,11 +648,15 @@ impl Driver for BodyDriver {
             return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns);
         }
 
+        let stage = Instant::now();
         self.observe_packets(view, world, ts_ns);
+        let observe_ns = stage.elapsed().as_nanos() as u64;
+        let stage = Instant::now();
         {
             let mut perception = lock(&self.perception);
             perception.begin_tick(world);
         }
+        let begin_ns = stage.elapsed().as_nanos() as u64;
         if !self.started {
             if view.tick < first_tick.saturating_add(self.options.start_delay_ticks) {
                 return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns);
@@ -516,9 +667,12 @@ impl Driver for BodyDriver {
             }
         }
 
-        // The previous tick's primitive outcome goes to the interpreter.
-        if let Some(outcome) = self.runner.outcome().cloned() {
+        // The previous tick's primitive outcome goes to the interpreter, once.
+        if !self.outcome_delivered
+            && let Some(outcome) = self.runner.outcome().cloned()
+        {
             self.bridge.outcome = Some(outcome);
+            self.outcome_delivered = true;
         }
 
         let reflex_view = {
@@ -526,6 +680,7 @@ impl Driver for BodyDriver {
             View::capture(&mut perception, world, self.arbiter.engine_mut().state_mut())
         };
         let needs = Needs::from_view(&reflex_view);
+        let stage = Instant::now();
 
         let ticked = {
             let perception = Arc::clone(&self.perception);
@@ -550,6 +705,9 @@ impl Driver for BodyDriver {
             )
         };
         self.log_events(view.tick, ts_ns, ticked.events.clone());
+        self.log_interpreter_events(view.tick, ts_ns);
+        let arbiter_ns = stage.elapsed().as_nanos() as u64;
+        let stage = Instant::now();
 
         // The arbiter preempted the skill (a reflex took over). Abandon the
         // in-flight primitive now, not on resume: a craft must close its
@@ -591,13 +749,27 @@ impl Driver for BodyDriver {
             }
             _ => {}
         }
+        let primitive_ns = stage.elapsed().as_nanos() as u64;
+        let stage = Instant::now();
 
         {
             let mut perception = lock(&self.perception);
             perception.sweep(world);
         }
+        let sweep_ns = stage.elapsed().as_nanos() as u64;
+        let stage = Instant::now();
         self.note_world(world, view.tick, ts_ns);
         let _ = self.log.flush();
+        let log_ns = stage.elapsed().as_nanos() as u64;
+        {
+            let mut shared = lock(&self.shared);
+            shared.record_stage("observe", observe_ns);
+            shared.record_stage("begin_tick", begin_ns);
+            shared.record_stage("arbiter", arbiter_ns);
+            shared.record_stage("primitive", primitive_ns);
+            shared.record_stage("sweep", sweep_ns);
+            shared.record_stage("log", log_ns);
+        }
 
         // The mirror's generation can move (a reflex start or resume); the
         // session's body is the one that will validate the frame.
@@ -705,6 +877,9 @@ struct BridgeActuator {
 
 impl Actuator for BridgeActuator {
     fn start(&mut self, action: &StartAction, _tick: u64) -> u32 {
+        // A terminal outcome of a previous primitive must never be polled as
+        // this flight's outcome.
+        self.outcome = None;
         self.start = Some(action.clone());
         1
     }
@@ -727,8 +902,20 @@ impl Actuator for BridgeActuator {
     }
 }
 
-fn outcome_key(outcome: ReceiptOutcome) -> &'static str {
-    match outcome {
+/// A log-only rendering of a resolved primitive argument.
+fn arg_string(arg: &ArgValue) -> String {
+    match arg {
+        ArgValue::Int(value) => value.to_string(),
+        ArgValue::Bool(value) => value.to_string(),
+        ArgValue::Item(name)
+        | ArgValue::Block(name)
+        | ArgValue::EntityKind(name)
+        | ArgValue::Name(name) => name.clone(),
+        ArgValue::Fact(call) => call.to_string(),
+    }
+}
+
+fn outcome_key(outcome: ReceiptOutcome) -> &'static str {    match outcome {
         ReceiptOutcome::Confirmed => "confirmed",
         ReceiptOutcome::Unconfirmed => "unconfirmed",
         ReceiptOutcome::Timeout => "timeout",

@@ -8,6 +8,8 @@
 //! ends with the receipt's outcome, or with its own typed failure.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::time::Duration;
 
 use azalea_core::direction::Direction;
 use azalea_core::position::{BlockPos, Vec3};
@@ -61,6 +63,8 @@ pub enum IntentSpec {
     },
     Movement {
         primitive: String,
+        /// Human-readable arguments, for the intent log.
+        args: Vec<String>,
         window: u64,
     },
     SlotClick {
@@ -85,6 +89,19 @@ pub struct TickResult {
     /// Register this intent if the actuator reported the key it needs.
     pub pending: Option<IntentSpec>,
     pub outcome: Option<Outcome>,
+    /// Bounded diagnostics for the driver's event log.
+    pub events: Vec<PrimitiveEvent>,
+}
+
+/// A primitive transition the driver writes to the event log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimitiveEvent {
+    /// The frontier `explore` chose to walk to.
+    ExploreFrontier {
+        cell: BlockPos,
+        score: i64,
+        candidates: u32,
+    },
 }
 
 /// The primitive runner. It owns at most one active primitive.
@@ -255,6 +272,7 @@ impl Runner {
                 frame: idle(ctx),
                 pending: None,
                 outcome: Some(outcome.clone()),
+                events: Vec::new(),
             };
         }
         // A failed or timed-out receipt ends the primitive. A confirmed one
@@ -282,6 +300,7 @@ impl Runner {
                     frame: idle(ctx),
                     pending: None,
                     outcome: Some(receipt),
+                    events: Vec::new(),
                 };
             }
         }
@@ -290,6 +309,7 @@ impl Runner {
                 frame: idle(ctx),
                 pending: None,
                 outcome: self.outcome.clone(),
+                events: Vec::new(),
             };
         };
         let (frame, pending, outcome) = match active {
@@ -307,10 +327,15 @@ impl Runner {
         if let Some(outcome) = &outcome {
             self.finish(outcome.clone());
         }
+        let events = match &mut self.active {
+            Some(Active::Explore(state)) => std::mem::take(&mut state.events),
+            _ => Vec::new(),
+        };
         TickResult {
             frame,
             pending,
             outcome,
+            events,
         }
     }
 
@@ -328,6 +353,29 @@ fn aim(ctx: &Ctx<'_>, target: Vec3) -> (Look, bool) {
     let eye = ctx.body.eye_position();
     look_towards(ctx.look, ctx.body.look(), eye, target)
 }
+
+/// Aim for an interaction: the client's crosshair must hit the intended cell,
+/// and the general 4-degree walk tolerance can be off by most of a block at
+/// four blocks of reach. The body look is set exactly (bounded only by the
+/// style's speed) until the current angle is within
+/// [`INTERACT_TOLERANCE_DEG`], and only then may the click go out.
+fn aim_precise(ctx: &Ctx<'_>, target: Vec3) -> (Look, bool) {
+    let eye = ctx.body.eye_position();
+    let (yaw, pitch) = praxion_planner::aim(eye, target);
+    let current = ctx.body.look();
+    let aligned = praxion_planner::wrap_degrees(yaw - current.y_rot()).abs()
+        <= INTERACT_TOLERANCE_DEG
+        && (pitch - current.x_rot()).abs() <= INTERACT_TOLERANCE_DEG;
+    if aligned {
+        (Look::None, true)
+    } else {
+        (Look::Aim { yaw, pitch }, false)
+    }
+}
+
+/// The aim error a dig or place accepts before it clicks, in degrees. At four
+/// blocks this is under a tenth of a block of crosshair error.
+const INTERACT_TOLERANCE_DEG: f32 = 0.25;
 
 fn item_name(stack: &ItemStack) -> &str {
     stack.kind().to_str()
@@ -488,7 +536,20 @@ impl Mine {
             }
         }
         let target = self.target.expect("checked above");
-        let (look, aligned) = aim(ctx, center(target));
+        // A known log can sit just outside the interaction range (the search
+        // radius is five, vanilla reach is about 4.5). Walk toward it instead
+        // of aiming forever at a cell the client will never pick.
+        let eye = ctx.body.eye_position();
+        let reach = ctx.body.block_interaction_range() - 0.25;
+        if eye.distance_to(center(target)) > reach {
+            self.waited = self.waited.saturating_add(1);
+            if self.waited > 80 {
+                return (frame, None, Some(Outcome::Failed("no_block".into())));
+            }
+            return (pickup_frame(ctx, center(target)), None, None);
+        }
+        self.waited = 0;
+        let (look, aligned) = aim_precise(ctx, center(target));
         frame.look = look;
         if !aligned {
             return (frame, None, None);
@@ -690,7 +751,7 @@ impl Place {
                 f64::from(direction.y()),
                 f64::from(direction.z()),
             ) * 0.5;
-        let (look, aligned) = aim(ctx, face);
+        let (look, aligned) = aim_precise(ctx, face);
         frame.look = look;
         if !aligned {
             return (frame, None, None);
@@ -773,9 +834,12 @@ pub const EXPLORE_NEAR_RADIUS: u32 = praxion_rules::registry::EXPLORE_NEAR_RADIU
 /// of the known map.
 pub const EXPLORE_SEARCH_RADIUS: u32 = praxion_rules::registry::EXPLORE_SEARCH_RADIUS;
 
-/// The frontier scan radius. A plan is the only time this costs anything, so
-/// it uses the same 32 blocks the sweep fills.
-const EXPLORE_FRONTIER_RADIUS: u32 = 32;
+/// The frontier scan radius. It must reach past the sight range, not stay
+/// inside it: rays record seen cells out to 64 blocks, so a 64-block box on
+/// open ground can be fully known and contain no frontier at all. The known
+/// map keeps 96, so 80 still leaves an unknown ring for the flood to find.
+const EXPLORE_FRONTIER_RADIUS: u32 = 80;
+const EXPLORE_FRONTIER_VERTICAL: i32 = 12;
 
 /// The planner goal radius when `explore` walks to a known target cell. The
 /// call itself ends at [`EXPLORE_NEAR_RADIUS`]. Four blocks leaves room for a
@@ -783,9 +847,10 @@ const EXPLORE_FRONTIER_RADIUS: u32 = 32;
 const TARGET_APPROACH_RADIUS: f32 = 4.0;
 
 /// Ticks one explore path step may take before the follower is considered
-/// stuck and the frontier is rejected. Shorter than the default 200 so a
-/// 1200-tick search can try several directions.
-const EXPLORE_STEP_TICKS: u32 = 100;
+/// stuck and the frontier is rejected. Long enough for the jump nudge to free
+/// a corner; still shorter than the default 200 so a 1200-tick search can try
+/// several directions.
+const EXPLORE_STEP_TICKS: u32 = 160;
 
 /// The `near` fact over the perception known map: a target is near when a cell
 /// this perception has seen inside `radius` holds it. No rays are spent, and
@@ -811,60 +876,46 @@ pub fn nearest_known_block(
     radius: u32,
     exclude: &[BlockPos],
 ) -> Option<(BlockPos, f64)> {
-    let eye = perception.eye(world)?;
-    let eye_cell = eye.to_block_pos_floor();
-    let r = i32::try_from(radius).unwrap_or(i32::MAX);
-    let r2 = i64::from(r) * i64::from(r);
     let tag = wanted.strip_prefix('#');
-    if tag.is_none() && wanted.parse::<BlockKind>().is_err() {
-        return None;
-    }
-    let mut best: Option<(i64, BlockPos)> = None;
-    for dy in -r..=r {
-        for dz in -r..=r {
-            for dx in -r..=r {
-                let distance_sq = i64::from(dx) * i64::from(dx)
-                    + i64::from(dy) * i64::from(dy)
-                    + i64::from(dz) * i64::from(dz);
-                if distance_sq > r2 {
-                    continue;
-                }
-                if best.is_some_and(|(best, _)| distance_sq >= best) {
-                    continue;
-                }
-                let pos = BlockPos::new(
-                    eye_cell.x.saturating_add(dx),
-                    eye_cell.y.saturating_add(dy),
-                    eye_cell.z.saturating_add(dz),
-                );
-                if exclude.contains(&pos) {
-                    continue;
-                }
-                let Some(remembered) = perception.known(pos) else {
-                    continue;
-                };
-                let name = BlockKind::from(remembered.state).to_str();
-                let matches = match tag {
-                    Some(tag) => gamedata::block_in_tag(name, tag),
-                    None => normalize(name) == normalize(wanted),
-                };
-                if matches {
-                    best = Some((distance_sq, pos));
-                }
+    let wanted_kind = if tag.is_none() {
+        Some(wanted.parse::<BlockKind>().ok()?)
+    } else {
+        None
+    };
+    let excluded: HashSet<BlockPos> = exclude.iter().copied().collect();
+    perception.nearest_known(
+        world,
+        radius,
+        |pos| excluded.contains(&pos),
+        |state| {
+            let kind = BlockKind::from(state);
+            match (tag, wanted_kind) {
+                (Some(tag), _) => gamedata::block_in_tag(kind.to_str(), tag),
+                (None, Some(wanted_kind)) => kind == wanted_kind,
+                (None, None) => false,
             }
-        }
-    }
-    best.map(|(_, pos)| (pos, eye.distance_to(center(pos))))
+        },
+    )
 }
 
-/// A known walkable cell next to unknown map cells: where exploring can make
-/// the map bigger. `known` is the known map (`None` is unknown).
-///
-/// The cell must be seen and standable (passable land on a solid floor, or
-/// water), so a cell behind an unseen wall is unknown and never chosen. Cells
-/// already explored or rejected by a failed plan are skipped, a candidate near
-/// an explored one scores worse so a search moves on, and a frontier on the
-/// player's level beats one deep in a cave.
+/// A frontier the explorer could walk to, with the ordering key it was scored
+/// by. The caller may cache a ranked list instead of rescanning the map every
+/// tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrontierChoice {
+    pub cell: BlockPos,
+    /// Squared distance from the start cell. Combined with the avoid and
+    /// off-level flags this is the ordering used below.
+    pub score: i64,
+    /// How many known walkable frontier cells were acceptable.
+    pub candidates: u32,
+    /// The quality flags this candidate was ordered by: avoided, off level,
+    /// wet, uphill. A caller that re-orders the list keeps the best tier
+    /// together.
+    pub tier: (bool, bool, bool, bool),
+}
+
+/// The best frontier, for callers that do not need the score.
 pub fn choose_frontier(
     start: BlockPos,
     horizontal: i32,
@@ -872,10 +923,66 @@ pub fn choose_frontier(
     explored: &[BlockPos],
     rejected: &[BlockPos],
     known: impl Fn(BlockPos) -> Option<BlockState>,
+    allow_water: bool,
 ) -> Option<BlockPos> {
+    rank_frontiers(start, horizontal, vertical, explored, rejected, known, allow_water)
+        .first()
+        .map(|choice| choice.cell)
+}
+
+/// Ranks the known walkable frontier cells once. The returned list is sorted
+/// best first and capped; the cost is the reachability flood plus one pass over
+/// its cells, never the full `(2r+1)^3` cube and never a linear scan of the
+/// explored list for every cell in it.
+pub fn rank_frontiers(
+    start: BlockPos,
+    horizontal: i32,
+    vertical: i32,
+    explored: &[BlockPos],
+    rejected: &[BlockPos],
+    known: impl Fn(BlockPos) -> Option<BlockState>,
+    allow_water: bool,
+) -> Vec<FrontierChoice> {
+    rank_frontiers_inner(
+        None, start, horizontal, vertical, explored, rejected, known, allow_water,
+    )
+}
+
+/// Like [`rank_frontiers`], but orders by distance from `origin` (the first
+/// cell this run explored) so a call walks outward instead of circling the
+/// nearest ring of the known map. Seed 202's spawn is plains and the nearest
+/// forest is 160 blocks away; nearest-first walked a ring at the sight radius
+/// for 4,000 ticks and never reached it.
+pub fn rank_frontiers_from(
+    origin: BlockPos,
+    start: BlockPos,
+    horizontal: i32,
+    vertical: i32,
+    explored: &[BlockPos],
+    rejected: &[BlockPos],
+    known: impl Fn(BlockPos) -> Option<BlockState>,
+    allow_water: bool,
+) -> Vec<FrontierChoice> {
+    rank_frontiers_inner(
+        Some(origin), start, horizontal, vertical, explored, rejected, known, allow_water,
+    )
+}
+
+fn rank_frontiers_inner(
+    origin: Option<BlockPos>,
+    start: BlockPos,
+    horizontal: i32,
+    vertical: i32,
+    explored: &[BlockPos],
+    rejected: &[BlockPos],
+    known: impl Fn(BlockPos) -> Option<BlockState>,
+    allow_water: bool,
+) -> Vec<FrontierChoice> {
     // Eight blocks: enough that a second pass over the same edge is avoided,
     // small enough that a genuinely new direction still wins.
     const AVOID_RADIUS_SQ: i64 = 8 * 8;
+    /// More candidates than an explore budget can try; bounds the allocation.
+    const MAX_CHOICES: usize = 64;
     let horizontal_sq_limit = i64::from(horizontal) * i64::from(horizontal);
     let in_box = |pos: BlockPos| {
         let dx = i64::from(pos.x) - i64::from(start.x);
@@ -902,7 +1009,7 @@ pub fn choose_frontier(
             let Some(state) = known(neighbor) else {
                 continue;
             };
-            if !standable(neighbor, state, &known) {
+            if !standable(neighbor, state, &known, allow_water) {
                 continue;
             }
             reachable.insert(neighbor);
@@ -910,56 +1017,96 @@ pub fn choose_frontier(
         }
     }
 
-    let mut best: Option<(bool, bool, i64, i32, i32, i32)> = None;
-    for dy in -vertical..=vertical {
-        for dz in -horizontal..=horizontal {
-            for dx in -horizontal..=horizontal {
-                let horizontal_sq = i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz);
-                if horizontal_sq > horizontal_sq_limit {
-                    continue;
-                }
-                let pos = BlockPos::new(
-                    start.x.saturating_add(dx),
-                    start.y.saturating_add(dy),
-                    start.z.saturating_add(dz),
-                );
-                if explored.contains(&pos) || rejected.contains(&pos) || !reachable.contains(&pos) {
-                    continue;
-                }
-                let Some(state) = known(pos) else {
-                    continue;
-                };
-                if !standable(pos, state, &known) {
-                    continue;
-                }
-                if !touches_unknown(pos, &known) {
-                    continue;
-                }
-                let avoid = explored.iter().any(|explored| {
-                    let ax = i64::from(explored.x) - i64::from(pos.x);
-                    let az = i64::from(explored.z) - i64::from(pos.z);
-                    ax * ax + az * az <= AVOID_RADIUS_SQ
-                });
-                // Stay on the player's level: a frontier more than two blocks
-                // below (a cave) or four above scores worse than any level
-                // one, so exploring does not dive into a ravine by accident.
-                let off_level = !(-2..=4).contains(&dy);
-                let distance_sq = i64::from(dx) * i64::from(dx)
-                    + i64::from(dy) * i64::from(dy)
-                    + i64::from(dz) * i64::from(dz);
-                let candidate = (avoid, off_level, distance_sq, pos.x, pos.z, pos.y);
-                if best.is_none_or(|best| candidate < best) {
-                    best = Some(candidate);
-                }
-            }
+    let explored_set: HashSet<BlockPos> = explored.iter().copied().collect();
+    let rejected_set: HashSet<BlockPos> = rejected.iter().copied().collect();
+    let mut ranked: Vec<((bool, bool, bool, bool, i64, i64, i32, i32, i32), FrontierChoice)> =
+        Vec::new();
+    let mut candidates = 0u32;
+    for pos in &reachable {
+        let pos = *pos;
+        if explored_set.contains(&pos) || rejected_set.contains(&pos) {
+            continue;
         }
+        let Some(state) = known(pos) else {
+            continue;
+        };
+        if !standable(pos, state, &known, allow_water) || !touches_unknown(pos, &known) {
+            continue;
+        }
+        let dx = i64::from(pos.x) - i64::from(start.x);
+        let dy = i64::from(pos.y) - i64::from(start.y);
+        let dz = i64::from(pos.z) - i64::from(start.z);
+        let avoid = explored.iter().any(|explored| {
+            let ax = i64::from(explored.x) - i64::from(pos.x);
+            let az = i64::from(explored.z) - i64::from(pos.z);
+            ax * ax + az * az <= AVOID_RADIUS_SQ
+        });
+        // Stay on the player's level: a frontier more than two blocks below (a
+        // cave) or four above scores worse than any level one, so exploring
+        // does not dive into a ravine by accident.
+        let off_level = !(-2..=4).contains(&dy);
+        // Water is walkable, but a land edge is a better place to look for
+        // trees: crossing an ocean with a 1200-tick budget is how a doomed
+        // search spends it.
+        let wet = praxion_planner::blocks::is_water(state);
+        // Do not climb a mountain looking for wood: plains and valleys hold
+        // the trees, and an uphill frontier is how a search ended at y=117
+        // with the forest still 160 blocks away.
+        let uphill = dy > 0;
+        let distance_sq = dx * dx + dy * dy + dz * dz;
+        // Walk outward from the origin, not around the nearest ring of the
+        // known map: a farther frontier wins over a nearer one at the same
+        // quality. Without this, seed 202 circled at the sight edge for 4,000
+        // ticks while its forest sat 160 blocks away. The plain ranking keeps
+        // nearest-first, for callers that want the closest edge.
+        let away = origin
+            .map(|origin| {
+                let ox = i64::from(pos.x) - i64::from(origin.x);
+                let oz = i64::from(pos.z) - i64::from(origin.z);
+                ox * ox + oz * oz
+            })
+            .unwrap_or(0);
+        candidates = candidates.saturating_add(1);
+        let tier = (avoid, off_level, wet, uphill);
+        ranked.push((
+            (
+                avoid,
+                off_level,
+                wet,
+                uphill,
+                -away,
+                distance_sq,
+                pos.x,
+                pos.z,
+                pos.y,
+            ),
+            FrontierChoice {
+                cell: pos,
+                score: distance_sq,
+                candidates: 0,
+                tier,
+            },
+        ));
     }
-    best.map(|(_, _, _, x, z, y)| BlockPos::new(x, y, z))
+    ranked.sort_by_key(|(key, _)| *key);
+    ranked.truncate(MAX_CHOICES);
+    ranked
+        .into_iter()
+        .map(|(_, mut choice)| {
+            choice.candidates = candidates;
+            choice
+        })
+        .collect()
 }
 
-fn standable(pos: BlockPos, state: BlockState, known: &impl Fn(BlockPos) -> Option<BlockState>) -> bool {
+fn standable(
+    pos: BlockPos,
+    state: BlockState,
+    known: &impl Fn(BlockPos) -> Option<BlockState>,
+    allow_water: bool,
+) -> bool {
     if praxion_planner::blocks::is_water(state) {
-        return true;
+        return allow_water;
     }
     if !praxion_planner::blocks::is_passable(state) {
         return false;
@@ -1015,9 +1162,134 @@ struct Explore {
     /// Cells the follower stalled in; plans treat them as blocked so the next
     /// route does not repeat the same obstacle.
     blocked: Vec<BlockPos>,
+    /// A ranked set of frontier candidates computed once, consumed by plan
+    /// attempts instead of rescanning the whole map every tick.
+    candidates: VecDeque<FrontierChoice>,
+    /// Next tick at which the known map may be rescanned for a target or a
+    /// frontier. The known map changes continuously, so this is a small,
+    /// bounded refresh period rather than a cache invalidation storm.
+    target_search_tick: u64,
+    frontier_scan_tick: u64,
+    /// How many `explore` calls this process has made, so a retry starts from a
+    /// different frontier instead of repeating the same walk.
+    rotation: usize,
+    /// Ticks with nowhere to go. A closed or fully known pocket fails early so
+    /// the skill's bounded retries can try another direction instead of
+    /// sleeping through the whole 1200-tick budget.
+    idle_ticks: u32,
+    /// A plan attempt may not start before this tick. Failed A* calls are the
+    /// most expensive thing explore does, so a doomed candidate list is
+    /// consumed a few ticks apart, not one per tick.
+    next_plan_tick: u64,
+    /// How many goals this call has reached. The first few stay nearest-first,
+    /// so a nearby forest is found quickly; after that the ranking heads away
+    /// from the origin instead of circling the sight ring (seed 202).
+    goals: u32,
+    /// Bounded diagnostics for the driver's event log.
+    events: Vec<PrimitiveEvent>,
     waited: u32,
     budget: u32,
     path_ticks: u64,
+}
+
+/// How often `explore` refreshes its target and frontier searches. The
+/// completion check runs every tick; these wider scans are the expensive part
+/// and the map does not move far in a few ticks.
+const EXPLORE_SEARCH_PERIOD_TICKS: u64 = 20;
+
+/// Ticks `explore` may have no target, no ranked candidate and no follower
+/// before it fails `not_found`. A closed pocket fails early instead of
+/// sleeping through the 1200-tick budget.
+const EXPLORE_IDLE_TICKS: u32 = 120;
+
+/// Plan attempts per tick when consuming a ranked frontier list. One keeps a
+/// slow A* out of the tick's tail; the remaining candidates wait for the next
+/// tick.
+const EXPLORE_PLAN_ATTEMPTS: usize = 1;
+
+/// The planner budget one body primitive may spend inside a tick. The
+/// planner's default 100 ms is a standalone-search limit; a 20 Hz body tick
+/// cannot spend it, so a route that needs longer is tried again next tick.
+const BODY_PLAN_BUDGET: praxion_planner::Budget =
+    praxion_planner::Budget::new(Duration::from_millis(6), 30_000);
+
+fn body_planner() -> Planner {
+    Planner::with_budget(BODY_PLAN_BUDGET)
+}
+
+/// Explored, rejected and blocked cells kept per `explore` call. Old cells are
+/// behind the search and no longer influence it; keeping the list bounded is
+/// what makes the per-tick cost independent of how long the run has walked.
+const EXPLORE_MEMORY_CELLS: usize = 64;
+
+fn remember(cells: &mut Vec<BlockPos>, pos: BlockPos) {
+    if cells.contains(&pos) {
+        return;
+    }
+    if cells.len() >= EXPLORE_MEMORY_CELLS {
+        cells.remove(0);
+    }
+    cells.push(pos);
+}
+
+/// A per-process counter so consecutive `explore` calls (a failed call and its
+/// retry, or a new skill after a failure) start from a different frontier in
+/// the ranked list. Without it, a retry repeated the same walk from an empty
+/// explored set and could burn every 1200-tick budget in the same direction.
+fn explore_rotation() -> usize {
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    (CALLS.fetch_add(1, Ordering::Relaxed) % 8) as usize
+}
+
+/// Cells recent `explore` calls reached or rejected. A call used to forget its
+/// explored set when it ended, so the next 1200-tick retry walked the same way.
+/// The set is shared for the process (one run), newest first, and bounded.
+const RECENT_EXPLORED_CELLS: usize = 128;
+
+static RECENT_EXPLORED: std::sync::Mutex<VecDeque<BlockPos>> =
+    std::sync::Mutex::new(VecDeque::new());
+
+fn recent_explored() -> Vec<BlockPos> {
+    let recent = RECENT_EXPLORED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    recent.iter().copied().collect()
+}
+
+fn remember_recent(pos: BlockPos) {
+    let mut recent = RECENT_EXPLORED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !recent.contains(&pos) {
+        if recent.len() >= RECENT_EXPLORED_CELLS {
+            recent.pop_front();
+        }
+        recent.push_back(pos);
+    }
+}
+
+/// The highest surface altitude recent `explore` calls stood at. Wood grows on
+/// the surface; an explore that follows one-block descents into a cave can burn
+/// every budget underground, so a candidate much below this line is refused.
+static EXPLORE_HOME_Y: AtomicI32 = AtomicI32::new(i32::MIN);
+
+fn explore_home_y(start: i32) -> i32 {
+    EXPLORE_HOME_Y
+        .fetch_max(start, Ordering::Relaxed)
+        .max(start)
+}
+
+/// The first cell this body explored, as (x, z). Frontier ranking pushes away
+/// from it, so a call heads outward instead of circling the nearest ring of
+/// the known map. One process is one run, so a process-wide origin is exact.
+static EXPLORE_ORIGIN: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+fn explore_origin(start: BlockPos) -> BlockPos {
+    let mut origin = EXPLORE_ORIGIN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (x, z) = *origin.get_or_insert((start.x, start.z));
+    BlockPos::new(x, start.y, z)
 }
 
 impl Explore {
@@ -1036,15 +1308,38 @@ impl Explore {
                 // needs a world change is rejected and another one is chosen,
                 // so the follower never stalls on a dig/place step it cannot
                 // execute (the layer above owns those primitives).
-                let mut planner = Planner::new();
+                //
+                // Descending uses the planner's default, safe drop (three
+                // blocks, no fall damage). An eight-block drop is survivable
+                // but can land in a one-cell pit with no route back up: on
+                // seed 303 that ended every later explore in the 120-tick
+                // idle (runs/s9d-f11-3-seed303, seq 75 then 86+). A peak is
+                // left by walking its slopes, not by dropping off a cliff.
+                let mut planner = body_planner();
                 planner.set_allow_world_changes(false);
                 planner
             },
             follower: None,
             goal: None,
-            explored: Vec::new(),
+            explored: {
+                // Continue from where recent calls walked, so a retry does not
+                // repeat the same direction from an empty set.
+                let mut explored = recent_explored();
+                if explored.len() > EXPLORE_MEMORY_CELLS {
+                    explored.drain(..explored.len() - EXPLORE_MEMORY_CELLS);
+                }
+                explored
+            },
             rejected: Vec::new(),
             blocked: Vec::new(),
+            candidates: VecDeque::new(),
+            target_search_tick: 0,
+            frontier_scan_tick: 5,
+            rotation: explore_rotation(),
+            idle_ticks: 0,
+            next_plan_tick: 0,
+            goals: 0,
+            events: Vec::new(),
             waited: 0,
             budget: praxion_rules::registry::EXPLORE_MAX_TICKS,
             path_ticks: 0,
@@ -1059,6 +1354,7 @@ impl Explore {
         let frame = idle(ctx);
         self.waited += 1;
         let start = ctx.body.position().to_block_pos_floor();
+        let home = explore_home_y(start.y);
         // The completion check is cheap: a 5-block scan. The wider 32-block
         // target search runs only when a new plan is needed, never while a
         // follower is walking, so exploring keeps the 20 TPS tick rate.
@@ -1072,34 +1368,73 @@ impl Explore {
         if let Some(follower) = &mut self.follower {
             if follower.is_done() {
                 self.follower = None;
+                self.target_search_tick = 0;
+                self.frontier_scan_tick = ctx.tick.saturating_add(5);
+                self.idle_ticks = 0;
+                self.candidates.clear();
                 if let Some(goal) = self.goal.take() {
-                    self.explored.push(goal);
+                    remember_recent(goal);
+                    remember(&mut self.explored, goal);
+                    self.goals = self.goals.saturating_add(1);
                 }
             } else if follower.is_stalled() {
                 let progress = follower.progress(ctx.body);
                 eprintln!(
-                    "explore stalled step={}/{} pos={:?} deviation={:.3} ticks={}",
+                    "explore stalled step={}/{} pos={:?} deviation={:.3} ticks={} goal={:?} on_ground={} in_water={}",
                     progress.step,
                     progress.total,
                     ctx.body.position(),
                     progress.deviation,
-                    progress.ticks_on_step
+                    progress.ticks_on_step,
+                    self.goal,
+                    ctx.body.on_ground(),
+                    ctx.body.is_in_water(),
+                );
+                let feet = ctx.body.position().to_block_pos_floor();
+                let cell = |pos| {
+                    ctx.perception
+                        .known(pos)
+                        .map(|known| block_name(known.state))
+                        .unwrap_or_else(|| "unknown".to_owned())
+                };
+                eprintln!(
+                    "explore stall cells feet={} below={} head={} next={:?} next_cell={} next_below={}",
+                    cell(feet),
+                    cell(BlockPos::new(feet.x, feet.y - 1, feet.z)),
+                    cell(BlockPos::new(feet.x, feet.y + 1, feet.z)),
+                    follower.next_cell(),
+                    follower
+                        .next_cell()
+                        .map(&cell)
+                        .unwrap_or_else(|| "-".to_owned()),
+                    follower
+                        .next_cell()
+                        .map(|next| cell(BlockPos::new(next.x, next.y - 1, next.z)))
+                        .unwrap_or_else(|| "-".to_owned()),
                 );
                 self.follower = None;
+                self.target_search_tick = 0;
+                self.frontier_scan_tick = 0;
+                self.idle_ticks = 0;
+                // Drop the rest of the old ranked list: its first entry is
+                // usually the same corner, and replanning to it one tick later
+                // is how the body sat at an edge for 160 ticks.
+                self.candidates.clear();
                 if let Some(goal) = self.goal.take() {
-                    self.rejected.push(goal);
+                    remember_recent(goal);
+                    remember(&mut self.rejected, goal);
                 }
                 let stuck = ctx.body.position().to_block_pos_floor();
-                if !self.blocked.contains(&stuck) {
-                    self.blocked.push(stuck);
-                }
+                remember(&mut self.blocked, stuck);
             } else {
+                self.idle_ticks = 0;
                 let built = follower.step(ctx.tick, ctx.body.generation(), ctx.body);
                 let pending = if started {
                     None
                 } else {
                     Some(IntentSpec::Movement {
                         primitive: "explore".to_owned(),
+                        args: vec![self.target.clone()],
                         window: self.path_ticks + 40,
                     })
                 };
@@ -1107,82 +1442,177 @@ impl Explore {
             }
         }
 
-        // A target the known map already holds is approached directly; the
-        // search radius is the same 32 blocks the skills use.
-        let target = nearest_known_block(
-            ctx.perception,
-            ctx.world,
-            &self.target,
-            EXPLORE_SEARCH_RADIUS,
-            &self.rejected,
-        );
-        // The target is in sight but not yet in reach: walk to it.
-        if let Some((cell, _)) = target
-            && !self.rejected.contains(&cell)
-        {
-            let plan = self.plan_to(ctx, start, Goal::Near {
-                pos: cell,
-                radius: TARGET_APPROACH_RADIUS,
-            });
-            match plan.status {
-                praxion_planner::PlanStatus::Success => {
-                    self.path_ticks = plan.cost.ceil().max(0.) as u64;
-                    eprintln!(
-                        "explore approach target={:?} cell={:?} cost={} steps={}",
-                        self.target,
-                        cell,
-                        plan.cost,
-                        plan.steps.len()
-                    );
-                    self.goal = Some(cell);
-                    self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
-                    return (frame, None, None);
-                }
-                _ => {
-                    self.rejected.push(cell);
+        // A target the known map already holds is approached directly. The
+        // search is the expensive wide scan, so it refreshes on a bounded
+        // period instead of every tick.
+        if ctx.tick >= self.target_search_tick {
+            self.target_search_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
+            let target = nearest_known_block(
+                ctx.perception,
+                ctx.world,
+                &self.target,
+                EXPLORE_SEARCH_RADIUS,
+                &self.rejected,
+            );
+            // The target is in sight but not yet in reach: walk to it.
+            if let Some((cell, _)) = target
+                && !self.rejected.contains(&cell)
+            {
+                let plan = self.plan_to(ctx, start, Goal::Near {
+                    pos: cell,
+                    radius: TARGET_APPROACH_RADIUS,
+                });
+                match plan.status {
+                    praxion_planner::PlanStatus::Success if !plan_crosses_water(&plan) => {
+                        self.path_ticks = plan.cost.ceil().max(0.) as u64;
+                        eprintln!(
+                            "explore approach target={:?} cell={:?} cost={} steps={}",
+                            self.target,
+                            cell,
+                            plan.cost,
+                            plan.steps.len()
+                        );
+                        self.goal = Some(cell);
+                        self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
+                        self.idle_ticks = 0;
+                        return (frame, None, None);
+                    }
+                    _ => {
+                        remember(&mut self.rejected, cell);
+                    }
                 }
             }
         }
 
-        // No target in sight: a few plan attempts per tick, so an unreachable
-        // frontier is rejected and the next candidate is tried. A closed room
+        // No target in sight: rank the frontiers once per refresh period and
+        // consume the list with a few plan attempts per tick. An unreachable
+        // frontier is rejected and the next candidate is tried; a closed room
         // simply has none and waits for its budget.
-        let radius = (ctx.perception.config().sweep_radius.min(EXPLORE_FRONTIER_RADIUS))
-            .max(8) as i32;
-        for _ in 0..8 {
-            let goal = {
-                let known = |pos: BlockPos| ctx.perception.known(pos).map(|cell| cell.state);
-                choose_frontier(
+        if self.candidates.is_empty() && ctx.tick >= self.frontier_scan_tick {
+            let horizontal = EXPLORE_FRONTIER_RADIUS
+                .min(ctx.perception.config().known_radius)
+                .max(8) as i32;
+            let known = |pos: BlockPos| ctx.perception.known(pos).map(|cell| cell.state);
+            // Stay nearest-first while a nearby target may still be close, then
+            // walk outward from the origin rather than around the sight ring.
+            const OUTWARD_AFTER_GOALS: u32 = 8;
+            let ranked = if self.goals < OUTWARD_AFTER_GOALS {
+                rank_frontiers(
                     start,
-                    radius,
-                    radius,
+                    horizontal,
+                    EXPLORE_FRONTIER_VERTICAL,
                     &self.explored,
                     &self.rejected,
                     known,
+                    false,
+                )
+            } else {
+                rank_frontiers_from(
+                    explore_origin(start),
+                    start,
+                    horizontal,
+                    EXPLORE_FRONTIER_VERTICAL,
+                    &self.explored,
+                    &self.rejected,
+                    known,
+                    false,
                 )
             };
-            let Some(goal) = goal else {
-                break;
-            };
-            let plan = self.plan_to(ctx, start, Goal::Block(goal));
-            match plan.status {
-                praxion_planner::PlanStatus::Success => {
-                    self.path_ticks = plan.cost.ceil().max(0.) as u64;
-                    eprintln!(
-                        "explore plan target={:?} frontier={:?} cost={} steps={}",
-                        self.target,
-                        goal,
-                        plan.cost,
-                        plan.steps.len()
-                    );
-                    self.goal = Some(goal);
-                    self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
-                    return (frame, None, None);
-                }
-                _ => {
-                    self.rejected.push(goal);
+            self.candidates = ranked.into();
+            self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
+            self.candidates.retain(|choice| !self.rejected.contains(&choice.cell));
+            // Keep the best quality tier (not avoided, on level, dry) before
+            // fanning out or preferring a longer leg; distance never overrides
+            // a cliff or an explored edge.
+            if let Some(tier) = self.candidates.front().map(|choice| choice.tier) {
+                self.candidates.retain(|choice| choice.tier == tier);
+            }
+            if self.rotation > 0 && self.candidates.len() > 1 {
+                // Start at a different eighth of the ranked ring per call, so
+                // bounded retries fan out around the player instead of all
+                // walking the same nearest edge.
+                let shift = self.rotation * self.candidates.len() / 8;
+                self.candidates.rotate_left(shift.min(self.candidates.len() - 1));
+            }
+            // The candidate list is already nearest-first (after the
+            // rotation); hopping is fine because the follower walks a whole
+            // path. Long legs were tried and made the follower stall on
+            // terrain, so the score is not inflated here.
+            // Stay near the surface: wood does not grow in the cave a chain of
+            // one-block descents leads to. Twelve blocks below the highest
+            // recent surface still reaches a valley forest but not a cave.
+            self.candidates
+                .retain(|choice| choice.cell.y >= home - 12 && choice.cell.y <= home + 32);
+        }
+        if ctx.tick >= self.next_plan_tick {
+            for _ in 0..EXPLORE_PLAN_ATTEMPTS {
+                let Some(choice) = self.candidates.pop_front() else {
+                    break;
+                };
+                let goal = choice.cell;
+                let plan = self.plan_to(ctx, start, Goal::Block(goal));
+                match plan.status {
+                    praxion_planner::PlanStatus::Success if !plan_crosses_water(&plan) => {
+                        self.path_ticks = plan.cost.ceil().max(0.) as u64;
+                        eprintln!(
+                            "explore plan target={:?} frontier={:?} cost={} steps={} candidates={}",
+                            self.target,
+                            goal,
+                            plan.cost,
+                            plan.steps.len(),
+                            choice.candidates
+                        );
+                        self.goal = Some(goal);
+                        self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
+                        self.idle_ticks = 0;
+                        self.next_plan_tick = 0;
+                        self.events.push(PrimitiveEvent::ExploreFrontier {
+                            cell: goal,
+                            score: choice.score,
+                            candidates: choice.candidates,
+                        });
+                        return (frame, None, None);
+                    }
+                    _ => {
+                        remember_recent(goal);
+                        remember(&mut self.rejected, goal);
+                        self.next_plan_tick = ctx.tick.saturating_add(5);
+                    }
                 }
             }
+        }
+        self.idle_ticks = self.idle_ticks.saturating_add(1);
+        // A pit with no reachable frontier is not a dead end: walk back to a
+        // cell a previous leg reached and scan from there. Without this the
+        // body sits at the bottom of the same hole for every retry.
+        if self.idle_ticks >= 10
+            && !self.explored.is_empty()
+            && ctx.tick >= self.next_plan_tick
+        {
+            for _ in 0..2 {
+                if self.explored.is_empty() {
+                    break;
+                }
+                let cell = self.explored.remove(0);
+                let plan = self.plan_to(ctx, start, Goal::Near {
+                    pos: cell,
+                    radius: TARGET_APPROACH_RADIUS,
+                });
+                if plan.status == praxion_planner::PlanStatus::Success
+                    && !plan_crosses_water(&plan)
+                {
+                    self.path_ticks = plan.cost.ceil().max(0.) as u64;
+                    self.goal = Some(cell);
+                    self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
+                    self.idle_ticks = 0;
+                    self.next_plan_tick = 0;
+                    return (frame, None, None);
+                }
+                self.next_plan_tick = ctx.tick.saturating_add(5);
+            }
+        }
+        if self.idle_ticks > EXPLORE_IDLE_TICKS {
+            return (frame, None, Some(Outcome::Failed("not_found".into())));
         }
         (frame, None, None)
     }
@@ -1199,6 +1629,20 @@ impl Explore {
     }
 }
 
+/// Whether a walking plan enters water. `explore` for wood stays on land: a
+/// swim can drown the body, and the skill layer has no safe water handling.
+fn plan_crosses_water(plan: &praxion_planner::Plan) -> bool {
+    plan.steps.iter().any(|step| {
+        matches!(
+            step.kind,
+            praxion_planner::MoveKind::EnterWater
+                | praxion_planner::MoveKind::Swim
+                | praxion_planner::MoveKind::SwimUp
+                | praxion_planner::MoveKind::ExitWater { .. }
+        )
+    })
+}
+
 // ----------------------------------------------------------------------
 // craft
 // ----------------------------------------------------------------------
@@ -1211,7 +1655,6 @@ struct Craft {
     clicks: VecDeque<MenuAction>,
     wait: u32,
     table: Option<BlockPos>,
-    table_used: bool,
     close_sent: bool,
     /// The receipt settled while the table is still open. The craft sends its
     /// close next tick and only then finishes, so the menu does not outlive the
@@ -1236,7 +1679,6 @@ impl Craft {
             clicks: VecDeque::new(),
             wait: 0,
             table: None,
-            table_used: false,
             close_sent: false,
             close_outcome: None,
         })
@@ -1281,7 +1723,13 @@ impl Craft {
         let open = ctx.world.open_container().map(|c| (c.id(), c.kind()));
         if recipe.needs_table && open.is_none() && self.stage == CraftStage::Open {
             if self.table.is_none() {
-                self.table = block_target(ctx, "crafting_table", 4);
+                // Prefer the block the crosshair can actually pick; fall back
+                // to the known map so a remembered table beside the body is
+                // still approached and clicked.
+                self.table = block_target(ctx, "crafting_table", 4).or_else(|| {
+                    nearest_known_block(ctx.perception, ctx.world, "crafting_table", 4, &[])
+                        .map(|(cell, _)| cell)
+                });
                 if self.table.is_none() {
                     return (
                         frame,
@@ -1291,11 +1739,13 @@ impl Craft {
                 }
             }
             let table = self.table.expect("checked above");
-            let (look, aligned) = aim(ctx, center(table));
+            let (look, aligned) = aim_precise(ctx, center(table));
             frame.look = look;
-            if aligned && !self.table_used {
+            // Retry the use click while no menu has opened: one missed click
+            // (a block update in the same tick, a slightly early aim) used to
+            // doom the whole craft after the single attempt.
+            if aligned && (self.wait <= 1 || self.wait % 10 == 0) {
                 frame.clicks.push(praxion_headless::Click::Use);
-                self.table_used = true;
             }
             if self.wait > 60 {
                 return (
@@ -1726,6 +2176,7 @@ impl Wait {
         let pending = if self.remaining + 1 == self.total {
             Some(IntentSpec::Movement {
                 primitive: "wait".to_owned(),
+                args: vec![self.total.to_string()],
                 window: u64::from(self.total) + 20,
             })
         } else {
@@ -1868,7 +2319,7 @@ impl Move {
     fn new(target: String) -> Self {
         Self {
             target,
-            planner: Planner::new(),
+            planner: body_planner(),
             follower: None,
             observe: None,
             tries: 0,
@@ -1918,6 +2369,7 @@ impl Move {
                 } else {
                     Some(IntentSpec::Movement {
                         primitive: "move_to".to_owned(),
+                        args: vec![self.target.clone()],
                         window: self.path_ticks + 40,
                     })
                 };
@@ -2077,10 +2529,41 @@ mod tests {
     }
 
     #[test]
+    fn explore_descends_only_within_the_safe_drop() {
+        // Seed 303's peak: explore used an eight-block drop, landed in a
+        // one-cell pit and every later call idled 120 ticks. Descending must
+        // stay within the planner's safe (damage-free) three-block drop; a peak
+        // is left along its slopes.
+        let explore = Explore::new("#logs".into()).expect("a known block tag");
+        assert_eq!(explore.planner.max_drop(), 3);
+    }
+
+    #[test]
+    fn a_far_frontier_outranks_the_nearest_ring_cell() {
+        // Seed 202 is plains with its forest 160 blocks away. Ranking by
+        // distance from the start walks the sight-radius ring; ranking away
+        // from the origin heads outward instead.
+        let mut map = HashMap::new();
+        platform(&mut map, -30, 30, -2, 2, 64);
+        let ranked = rank_frontiers_from(
+            at(0, 64, 0),
+            at(0, 64, 0),
+            32,
+            8,
+            &[],
+            &[],
+            known(&map),
+            true,
+        );
+        let best = ranked[0];
+        assert_eq!(best.cell.x, -30, "the far edge wins: {best:?}");
+    }
+
+    #[test]
     fn the_nearest_reachable_frontier_is_chosen() {
         let mut map = HashMap::new();
         platform(&mut map, -1, 1, -1, 1, 64);
-        let chosen = choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map))
+        let chosen = choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map), true)
             .expect("a frontier on the platform edge");
         // All four edge cells are one block away; the deterministic tie-break
         // picks the smallest x, then z.
@@ -2105,7 +2588,7 @@ mod tests {
             }
         }
         assert_eq!(
-            choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map)),
+            choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map), true),
             None,
             "a sealed room offers nothing to explore"
         );
@@ -2131,11 +2614,11 @@ mod tests {
             map.insert(at(x, 64, 1), stone());
         }
         // x = 2 is unknown: an unseen wall. The near frontier is x = 1.
-        let chosen = choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map));
+        let chosen = choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map), true);
         assert_eq!(chosen, Some(at(1, 64, 0)));
         // Once that one is explored, the island behind the unseen wall must
         // stay unreachable rather than become the next target.
-        let chosen = choose_frontier(at(0, 64, 0), 8, 8, &[at(1, 64, 0)], &[], known(&map));
+        let chosen = choose_frontier(at(0, 64, 0), 8, 8, &[at(1, 64, 0)], &[], known(&map), true);
         assert_eq!(chosen, None, "the unseen wall blocks the island");
     }
 
@@ -2152,14 +2635,14 @@ mod tests {
         }
         map.insert(at(-1, 64, 0), stone());
         assert_eq!(
-            choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map)),
+            choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map), true),
             Some(at(1, 64, 0)),
             "a swimmable water cell is a frontier"
         );
 
         map.insert(at(1, 64, 0), lava());
         assert_eq!(
-            choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map)),
+            choose_frontier(at(0, 64, 0), 8, 8, &[], &[], known(&map), true),
             None,
             "lava is a hazard, not walkable"
         );
@@ -2176,10 +2659,64 @@ mod tests {
             &[at(15, 64, 2)],
             &[],
             known(&map),
+            true,
         )
         .expect("a frontier far from the explored one");
         assert_ne!(chosen, at(15, 64, -2), "the nearest side is avoided");
         assert!(chosen.x < 15, "a new direction wins: {chosen:?}");
+    }
+
+    #[test]
+    fn ranked_frontiers_carry_their_score_and_candidate_count() {
+        let mut map = HashMap::new();
+        platform(&mut map, -1, 1, -1, 1, 64);
+        let ranked = rank_frontiers(at(0, 64, 0), 8, 8, &[], &[], known(&map), true);
+        assert!(!ranked.is_empty(), "an open platform edge is a frontier");
+        let best = ranked[0];
+        assert_eq!(best.cell, at(-1, 64, 0));
+        assert_eq!(best.score, 1, "the score is the squared distance");
+        assert!(
+            best.candidates >= ranked.len() as u32,
+            "the count covers the ranked candidates"
+        );
+        assert!(ranked.len() <= 64, "the list is bounded");
+    }
+
+    #[test]
+    fn rank_frontiers_does_not_grow_with_the_explored_list() {
+        // The old scan tested every explored cell for every cell of a 65^3
+        // cube. Now the explored set is a hash set and the candidates come
+        // from the reachability flood, so a long rejected list cannot turn
+        // the scan into quadratic work. This pins the result, not a timer.
+        let mut map = HashMap::new();
+        platform(&mut map, -8, 8, -8, 8, 64);
+        let rejected: Vec<BlockPos> = (0..500)
+            .map(|i| at(i % 16 - 8, 64, i / 16 - 8))
+            .collect();
+        let ranked = rank_frontiers(at(0, 64, 0), 8, 8, &[], &rejected, known(&map), true);
+        assert!(ranked.iter().all(|choice| !rejected.contains(&choice.cell)));
+    }
+
+    #[test]
+    fn explore_memory_is_bounded() {
+        let mut cells = Vec::new();
+        for i in 0..(EXPLORE_MEMORY_CELLS as i32 * 2) {
+            remember(&mut cells, at(i, 64, 0));
+        }
+        assert_eq!(cells.len(), EXPLORE_MEMORY_CELLS);
+        assert!(cells.contains(&at(EXPLORE_MEMORY_CELLS as i32 * 2 - 1, 64, 0)));
+        // Re-remembering an existing cell never grows the list.
+        let before = cells.len();
+        let first = cells[0];
+        remember(&mut cells, first);
+        assert_eq!(cells.len(), before);
+    }
+
+    #[test]
+    fn consecutive_explore_calls_rotate() {
+        let first = explore_rotation();
+        let second = explore_rotation();
+        assert_ne!(first, second, "a retry starts from a different frontier");
     }
 
     #[test]

@@ -171,10 +171,11 @@ finishes the skill; `fail(kind)` fails it.
   (`last_failure()`), but the world did not change, so the same rule is still
   the highest true one. A retry does not start a second action in the same
   tick. Three consecutive failures of the same rule, primitive or child skill,
-  with no other rule firing in between, fail that skill with the last kind
-  (`MAX_PRIMITIVE_FAILURES` = 3). The child's kind is the parent's failure
-  kind. A success (a primitive or a child's `done`) or a different rule firing
-  resets the count.
+  fail that skill with the last kind (`MAX_PRIMITIVE_FAILURES` = 3). Each rule
+  in a frame keeps its own count: a rule's own success (its primitive settling
+  confirmed, or its child's `done`) clears only that rule's count, and another
+  rule firing leaves it untouched, so A-B-A alternation still fails A on A's
+  third failure. The child's kind is the parent's failure kind.
 - **Preemption** is not a failure. The skill keeps its stack and continues.
 
 Limits, checked at load with a line and column: at most 30 rules per skill,

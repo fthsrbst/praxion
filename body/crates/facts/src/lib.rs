@@ -18,9 +18,7 @@
 
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_interpreter::{Facts as InterpreterFacts, IntValue, Truth};
-use praxion_perception::{
-    Answer, BlockFilter, BlockRegion, Caller, Perception,
-};
+use praxion_perception::{Answer, Caller, Perception};
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::{ItemStack, World};
 
@@ -158,10 +156,16 @@ pub fn has_item(perception: &mut Perception, world: &World, wanted: &str) -> Opt
     item_count(perception, world, wanted).map(|count| count > 0)
 }
 
-/// A block or block tag within `radius`, or `None` when perception cannot say.
+/// A block or block tag within `radius`, or `None` when the eye cell is not
+/// known yet.
 ///
-/// A tagged query is answered from [`Perception::blocks_in`]: a known, empty
-/// result is `Some(false)`; an unknown region is `None`.
+/// The answer comes from the perception known map, exactly like `explore`'s
+/// completion check (docs/rule-lists.md): a target is near when a cell this
+/// perception has seen inside `radius` holds it. It spends no rays, and it
+/// answers `Some(false)` when the map knows of none, so `not near(T, R)` can
+/// start an exploration. A ray-based answer would disagree with `explore` when
+/// a remembered cell is out of sight, which made a skill restart an explore
+/// that finished instantly, forever.
 pub fn near_block(
     perception: &mut Perception,
     world: &World,
@@ -169,24 +173,22 @@ pub fn near_block(
 ) -> Option<bool> {
     let wanted = first_name(call)?;
     let radius = radius_arg(call)?;
-    if let Some(tag) = wanted.strip_prefix('#') {
-        let eye = perception.eye_cell(world)?;
-        let region = BlockRegion::around(eye, radius);
-        match perception.blocks_in(Caller::Other, world, region, BlockFilter::Any) {
-            Answer::Known { value, .. } => Some(
-                value
-                    .iter()
-                    .any(|fact| praxion_gamedata::block_in_tag(fact.kind.to_str(), tag)),
-            ),
-            Answer::Unknown(_) => None,
-        }
+    perception.eye_cell(world)?;
+    let tag = wanted.strip_prefix('#');
+    let wanted_kind = if tag.is_none() {
+        Some(wanted.parse::<BlockKind>().ok()?)
     } else {
-        let kind = wanted.parse::<BlockKind>().ok()?;
-        match perception.nearest_block(Caller::Other, world, kind, radius) {
-            Answer::Known { .. } => Some(true),
-            Answer::Unknown(_) => None,
+        None
+    };
+    let found = perception.nearest_known(world, radius, |_| false, |state| {
+        let kind = BlockKind::from(state);
+        match (tag, wanted_kind) {
+            (Some(tag), _) => praxion_gamedata::block_in_tag(kind.to_str(), tag),
+            (None, Some(wanted_kind)) => kind == wanted_kind,
+            (None, None) => false,
         }
-    }
+    });
+    Some(found.is_some())
 }
 
 /// An entity kind within `radius`, or `None` when perception cannot say.

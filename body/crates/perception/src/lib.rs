@@ -191,6 +191,11 @@ type EntityCacheKey = (BlockPos, i32, BlockPos);
 /// costs rays the next time the same blocks are asked for.
 const MAX_CACHE_ENTRIES: usize = 8_192;
 
+/// Rays the background sweep may spend per tick. The configured ray budget is
+/// an upper bound shared with queries; the sweep takes a slice so one tick
+/// never pays the whole map fill.
+const SWEEP_RAYS_PER_TICK: u32 = 900;
+
 /// The perception API for one world.
 pub struct Perception {
     config: Config,
@@ -377,6 +382,62 @@ impl Perception {
     /// no ray: this is what the planner reads.
     pub fn known(&self, pos: BlockPos) -> Option<Remembered> {
         self.known.get(pos)
+    }
+
+    /// The nearest cell of the known map within `radius` of the eye whose
+    /// remembered state `accept` returns true for, with the eye distance.
+    ///
+    /// This is the one query behind both `near(block, r)` and `explore`: they
+    /// must agree, or a skill would think nothing is near while `explore`
+    /// returns instantly, or the reverse. It spends no rays, so its cost is a
+    /// bounded cube scan, and `exclude` lets a caller skip cells a failed plan
+    /// already rejected.
+    pub fn nearest_known(
+        &self,
+        world: &World,
+        radius: u32,
+        exclude: impl Fn(BlockPos) -> bool,
+        mut accept: impl FnMut(BlockState) -> bool,
+    ) -> Option<(BlockPos, f64)> {
+        let eye = self.eye(world)?;
+        let eye_cell = eye.to_block_pos_floor();
+        let r = i32::try_from(radius).unwrap_or(i32::MAX);
+        let r2 = i64::from(r) * i64::from(r);
+        // Visit Chebyshev shells from the eye outwards and return the first
+        // match. A tree at eight blocks costs 17^3 cells, not the whole 65^3
+        // cube; only a genuinely empty radius pays the full scan.
+        for shell in 0..=r {
+            for dy in -shell..=shell {
+                for dz in -shell..=shell {
+                    for dx in -shell..=shell {
+                        if dx.abs().max(dy.abs()).max(dz.abs()) != shell {
+                            continue;
+                        }
+                        let distance_sq = i64::from(dx) * i64::from(dx)
+                            + i64::from(dy) * i64::from(dy)
+                            + i64::from(dz) * i64::from(dz);
+                        if distance_sq > r2 {
+                            continue;
+                        }
+                        let pos = BlockPos::new(
+                            eye_cell.x.saturating_add(dx),
+                            eye_cell.y.saturating_add(dy),
+                            eye_cell.z.saturating_add(dz),
+                        );
+                        if exclude(pos) {
+                            continue;
+                        }
+                        let Some(remembered) = self.known.get(pos) else {
+                            continue;
+                        };
+                        if accept(remembered.state) {
+                            return Some((pos, eye.distance_to(pos.center())));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// The world's eye position: player position plus the current eye height.
@@ -961,7 +1022,13 @@ impl Perception {
                 let cells = 16 * 16 * 16;
                 let start = (self.tick as usize).wrapping_add(section_seed(key)) % cells;
                 for offset in 0..cells {
-                    if self.remaining_rays(Caller::Other) == 0 {
+                    // Spend a bounded slice per tick. The sweep is background
+                    // map filling, not an action: a smaller slice keeps a tick
+                    // under the 25 ms budget while the same cells are covered
+                    // over the next few ticks.
+                    if self.remaining_rays(Caller::Other) == 0
+                        || self.rays_other.saturating_sub(rays_before) >= SWEEP_RAYS_PER_TICK
+                    {
                         break 'outer;
                     }
                     let index = (start + offset) % cells;

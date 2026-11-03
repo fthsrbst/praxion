@@ -30,9 +30,10 @@ pub const EXPLORE_MAX_TICKS: u32 = 1200;
 pub const EXPLORE_NEAR_RADIUS: u32 = 5;
 
 /// How far `explore` looks for its target in the perception known map before
-/// it falls back to walking to a frontier. The sweep fills the same radius, so
-/// a tree seen at 20 blocks is approached instead of wandered past.
-pub const EXPLORE_SEARCH_RADIUS: u32 = 32;
+/// it falls back to walking to a frontier. Forty blocks reaches trees a
+/// mountain peak can see below, while an 80-block frontier box still finds the
+/// unknown edge. The scan is shell-ordered, so a near target stays cheap.
+pub const EXPLORE_SEARCH_RADIUS: u32 = 40;
 
 /// The signature of one fact.
 #[derive(Clone, Debug, PartialEq, Eq)]

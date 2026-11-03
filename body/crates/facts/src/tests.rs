@@ -269,10 +269,11 @@ fn known_inventory_facts_count_items_and_tags() {
 }
 
 #[test]
-fn known_block_facts_use_perception() {
+fn known_block_facts_use_the_known_map() {
     let world = with_zombie(world());
     let mut perception = Perception::new(Config::default());
     perception.begin_tick(&world);
+    perception.sweep(&world);
     let mut facts = Facts::new(&mut perception, &world);
 
     assert_eq!(
@@ -287,11 +288,8 @@ fn known_block_facts_use_perception() {
             "near",
             vec![ArgValue::Block("diamond_ore".into()), ArgValue::Int(4)]
         )),
-        Truth::Unknown(call(
-            "near",
-            vec![ArgValue::Block("diamond_ore".into()), ArgValue::Int(4)]
-        )),
-        "nothing seen is unknown, not absent"
+        Truth::False,
+        "a block the known map holds none of is absent, not unknown"
     );
     assert_eq!(
         facts.bool_fact(&call(
@@ -299,7 +297,19 @@ fn known_block_facts_use_perception() {
             vec![ArgValue::Block("#logs".into()), ArgValue::Int(4)]
         )),
         Truth::False,
-        "a tagged region query that saw everything answers false"
+        "a tagged known-map query that holds no member answers false"
+    );
+    // No sweep at all: the map is empty, so the same answer as an empty map.
+    let mut empty = Perception::new(Config::default());
+    empty.begin_tick(&world);
+    let mut facts = Facts::new(&mut empty, &world);
+    assert_eq!(
+        facts.bool_fact(&call(
+            "near",
+            vec![ArgValue::Block("stone".into()), ArgValue::Int(4)]
+        )),
+        Truth::False,
+        "an unseen world has no known target, which starts exploration"
     );
     assert_eq!(
         facts.bool_fact(&call(

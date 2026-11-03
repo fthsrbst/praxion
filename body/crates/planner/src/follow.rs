@@ -27,6 +27,10 @@ pub struct Follower {
     max_ticks_per_step: u32,
     ticks_on_step: u32,
     stalled: bool,
+    /// Keep holding forward while airborne after a planned jump. A fall (a
+    /// descent or an unmodelled ledge) does not set it, so the body lands on
+    /// the planned cell instead of drifting into the next one.
+    air_forward: bool,
 }
 
 /// What the follower reports for the caller's progress check.
@@ -49,6 +53,7 @@ impl Follower {
             max_ticks_per_step: 200,
             ticks_on_step: 0,
             stalled: false,
+            air_forward: false,
         }
     }
 
@@ -68,6 +73,11 @@ impl Follower {
     /// The step index the follower is walking to, `steps.len()` when done.
     pub fn next_step(&self) -> usize {
         self.next
+    }
+
+    /// The cell the follower is walking to, if any.
+    pub fn next_cell(&self) -> Option<BlockPos> {
+        self.steps.get(self.next).map(|step| step.to)
     }
 
     /// Build this tick's frame. The caller validates and applies it, then
@@ -94,12 +104,37 @@ impl Follower {
         frame.look = look;
 
         if aligned {
-            frame.held.forward = true;
+            // A planned jump or a swim keeps forward control while airborne.
+            // A fall does not: holding forward through a descent carried the
+            // body past its landing cell into the next ledge (seed 303: the
+            // plan to y74 left the body at y67, stalled and unable to climb
+            // back). Once the ground is gone, gravity should finish the step.
+            let air_control = matches!(
+                step.kind,
+                MoveKind::StepUp
+                    | MoveKind::Pillar { .. }
+                    | MoveKind::Bridge { .. }
+                    | MoveKind::Swim
+                    | MoveKind::SwimUp
+                    | MoveKind::EnterWater
+                    | MoveKind::ExitWater { .. }
+            );
+            if body.on_ground() {
+                self.air_forward = air_control;
+            }
+            // A step's own air control (a jump, a swim) applies whether or
+            // not it started on the ground. A body in water always swims:
+            // stopping forward there leaves it floating, short of the step.
+            self.air_forward |= air_control;
+            if body.on_ground() || self.air_forward || body.is_in_water() {
+                frame.held.forward = true;
+            }
             let horizontal = horizontal_distance(position, target);
             match step.kind {
                 MoveKind::StepUp | MoveKind::Pillar { .. } => {
                     if body.on_ground() && horizontal < 1.6 && position.y < target.y + 0.1 {
                         frame.held.jump = true;
+                        self.air_forward = true;
                     }
                 }
                 MoveKind::Bridge { .. } => frame.held.sneak = true,
@@ -114,6 +149,31 @@ impl Follower {
                 }
                 MoveKind::EnterWater | MoveKind::Swim => {}
                 _ => {}
+            }
+            // A body in water needs jump to rise and clear the bank; explore
+            // avoids water paths, so this only recovers an unexpected dip.
+            if body.is_in_water()
+                && horizontal < 1.6
+                && position.y < target.y + 0.1
+            {
+                frame.held.jump = true;
+            }
+            // A diagonal corner or a lip the path did not model can hold the
+            // body at a constant offset. Jumping while forward clears most of
+            // them; without it the follower stalls on step 0 forever.
+            if self.ticks_on_step > 15
+                && body.on_ground()
+                && !matches!(
+                    step.kind,
+                    MoveKind::Bridge { .. }
+                        | MoveKind::Swim
+                        | MoveKind::SwimUp
+                        | MoveKind::EnterWater
+                        | MoveKind::ExitWater { .. }
+                )
+            {
+                frame.held.jump = true;
+                self.air_forward = true;
             }
         }
 
@@ -188,11 +248,13 @@ mod tests {
     #[test]
     fn the_follower_aims_before_it_moves() {
         let mut body = body();
-        // South is already yaw 0, so no turn is needed.
+        // South is already yaw 0, so no turn is needed. This body is airborne
+        // (there is no world here), so use a StepUp: a Walk would wait for the
+        // ground before moving forward.
         let path = vec![step(
             BlockPos::new(0, 64, 0),
-            BlockPos::new(0, 64, 1),
-            MoveKind::Walk,
+            BlockPos::new(0, 65, 1),
+            MoveKind::StepUp,
         )];
         let mut follower = Follower::new(path, LookStyle::default());
         let frame = follower.step(0, body.generation(), &body);
@@ -216,6 +278,39 @@ mod tests {
             Look::Aim { yaw, .. } => assert!(yaw < 0., "east needs a negative yaw turn"),
             other => panic!("expected an aim, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_descend_does_not_hold_forward_through_the_fall() {
+        // Airborne after walking off the ledge: forward must be released so
+        // the body drops onto the planned cell instead of drifting into the
+        // next ledge (seed 303 ended 7 blocks below its plan this way).
+        let body = Body::new(Vec3::new(0.5, 64., 0.5));
+        assert!(!body.on_ground());
+        let path = vec![step(
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(0, 63, 1),
+            MoveKind::Descend { drop: 1 },
+        )];
+        let mut follower = Follower::new(path, LookStyle::default());
+        let frame = follower.step(0, body.generation(), &body);
+        assert!(
+            !frame.held.forward,
+            "a falling body must not keep pushing forward"
+        );
+    }
+
+    #[test]
+    fn a_step_up_keeps_forward_while_airborne() {
+        let body = Body::new(Vec3::new(0.5, 64., 0.5));
+        let path = vec![step(
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(0, 65, 1),
+            MoveKind::StepUp,
+        )];
+        let mut follower = Follower::new(path, LookStyle::default());
+        let frame = follower.step(0, body.generation(), &body);
+        assert!(frame.held.forward, "a jump needs its forward momentum");
     }
 
     #[test]

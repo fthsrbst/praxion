@@ -30,6 +30,27 @@ use praxion_rules::{ArgValue, FactCall, PrimitiveKind};
 
 pub use interp::{DEFAULT_MAX_TICKS, Interpreter, MAX_PRIMITIVE_FAILURES};
 
+/// A bounded, observable interpreter transition. The driver drains these once
+/// per tick and writes them to the event log; the interpreter itself never
+/// logs and never grows an unbounded buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InterpreterEvent {
+    /// A skill frame was pushed; `depth` is one-based.
+    FramePushed {
+        skill: String,
+        depth: u32,
+        args: Vec<String>,
+    },
+    /// A skill frame completed (`done`).
+    FrameDone { skill: String, depth: u32 },
+    /// A skill frame failed with `kind`.
+    FrameFailed {
+        skill: String,
+        depth: u32,
+        kind: String,
+    },
+}
+
 /// A fact's three-valued truth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Truth {

@@ -1,13 +1,15 @@
 //! The interpreter state machine.
 
+use std::collections::BTreeMap;
+
 use praxion_rules::{
     ActionKind, ArgType, ArgValue, CmpOp, Expr, ExprKind, FactCall, PrimitiveKind, Program,
     ValueType,
 };
 
 use crate::{
-    Actuator, Decision, Facts, FrameRef, IntValue, Outcome, RunAction, StartAction, Truth,
-    kleene_and, kleene_not, kleene_or,
+    Actuator, Decision, Facts, FrameRef, IntValue, InterpreterEvent, Outcome, RunAction, StartAction,
+    Truth, kleene_and, kleene_not, kleene_or,
 };
 
 /// `max_ticks` used when a rule has none and its action is not a primitive
@@ -15,8 +17,8 @@ use crate::{
 pub const DEFAULT_MAX_TICKS: u32 = 1200;
 
 /// Consecutive failures of the same rule, primitive or child skill, before that
-/// skill fails with the last failure kind. A different rule firing or a success
-/// resets the count.
+/// skill fails with the last failure kind. Each rule in a frame keeps its own
+/// count, and only that rule's own success clears it.
 pub const MAX_PRIMITIVE_FAILURES: u32 = 3;
 
 /// Guards a selection loop against a pathological ruleset. The load-time
@@ -36,15 +38,9 @@ struct Frame {
     /// A primitive of this rule failed this tick; the rule retries next tick
     /// instead of the skill failing.
     retry: Option<usize>,
-    /// Consecutive primitive failures of one rule, reset when another rule
-    /// fires or the same rule succeeds.
-    streak: Option<FailureStreak>,
-}
-
-#[derive(Clone, Debug)]
-struct FailureStreak {
-    rule: usize,
-    count: u32,
+    /// Consecutive failures per rule index, primitive or child skill. A rule's
+    /// own success clears only its entry; another rule firing leaves it alone.
+    failures: BTreeMap<usize, u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +49,16 @@ struct InFlight {
     rule: usize,
     primitive: String,
     deadline: u64,
+}
+
+/// The continuous primitive currently selected. Continuous primitives report
+/// only their terminal outcome (the movement receipt in between is not an
+/// outcome), so the interpreter keeps the rule and depth to attribute a
+/// failure to the same per-rule count a discrete action uses.
+#[derive(Clone, Debug)]
+struct Continuous {
+    depth: usize,
+    rule: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,9 +78,18 @@ pub struct Interpreter {
     suspended: bool,
     finished: bool,
     continuous: bool,
+    /// The selected continuous primitive, for terminal-outcome attribution.
+    continuous_action: Option<Continuous>,
     tick: u64,
     max_primitive_failures: u32,
     last_failure: Option<String>,
+    /// The last rule that fired, for the driver's change-only `rule_selected`.
+    last_rule: Option<(String, usize)>,
+    /// Whether a rule fired during the current `tick` call. A frame pop or a
+    /// waiting tick does not re-report an old selection.
+    rule_fired_this_tick: bool,
+    /// Bounded transitions since the driver last drained them.
+    events: Vec<InterpreterEvent>,
 }
 
 impl Interpreter {
@@ -87,9 +102,13 @@ impl Interpreter {
             suspended: false,
             finished: false,
             continuous: false,
+            continuous_action: None,
             tick: 0,
             max_primitive_failures: MAX_PRIMITIVE_FAILURES,
             last_failure: None,
+            last_rule: None,
+            rule_fired_this_tick: false,
+            events: Vec::new(),
         }
     }
 
@@ -131,16 +150,45 @@ impl Interpreter {
             call_rule: None,
             ineligible: None,
             retry: None,
-            streak: None,
+            failures: BTreeMap::new(),
         });
         self.in_flight = None;
         self.until = None;
         self.suspended = false;
         self.finished = false;
         self.continuous = false;
+        self.continuous_action = None;
         self.tick = 0;
         self.last_failure = None;
+        self.last_rule = None;
+        self.events.clear();
+        let args = self.stack[0].args.iter().map(log_arg).collect();
+        self.events.push(InterpreterEvent::FramePushed {
+            skill: name.to_string(),
+            depth: 1,
+            args,
+        });
         Ok(())
+    }
+
+    /// Drains the transitions since the last call. The buffer is bounded by
+    /// the per-tick selection cap and the stack depth.
+    pub fn take_events(&mut self) -> Vec<InterpreterEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// The rule that fired last, for the driver's change-only `rule_selected`.
+    pub fn last_rule(&self) -> Option<(&str, usize)> {
+        self.last_rule
+            .as_ref()
+            .map(|(skill, rule)| (skill.as_str(), *rule))
+    }
+
+    /// The rule that fired in this tick, if any. The driver logs a change only
+    /// from this, so a waiting or frame-pop tick never re-announces an old
+    /// selection.
+    pub fn rule_fired_this_tick(&self) -> Option<(&str, usize)> {
+        self.rule_fired_this_tick.then(|| self.last_rule()).flatten()
     }
 
     /// Runs one tick (§6.1 steps 2 to 5, plus composition and preemption).
@@ -152,6 +200,7 @@ impl Interpreter {
             return Decision::Waiting("not started".into());
         }
         self.tick += 1;
+        self.rule_fired_this_tick = false;
         // A failure or a child failure only blocks its own tick.
         for frame in &mut self.stack {
             frame.ineligible = None;
@@ -159,6 +208,48 @@ impl Interpreter {
         }
         if self.suspended {
             return Decision::Waiting("suspended".into());
+        }
+
+        // A continuous primitive reports only when it actually ends. Before
+        // this, its movement receipt settled `confirmed` (no correction), which
+        // is not the primitive's outcome: an `explore` that has walked 300 of
+        // its 1200 ticks is still running. Attribute the terminal outcome to
+        // the rule that selected it, exactly like a discrete action.
+        if self.in_flight.is_none()
+            && let Some(selected) = self.continuous_action.clone()
+            && let Some(outcome) = actuator.poll(self.tick)
+        {
+            self.continuous = false;
+            self.continuous_action = None;
+            match outcome {
+                Outcome::Confirmed => self.succeeded_rule(selected.depth, selected.rule),
+                Outcome::Failed(kind) => {
+                    if let Some(kind) = self.fail_rule(selected.depth, selected.rule, kind)
+                        && let Some(decision) =
+                            self.fail_skill(selected.depth, kind, actuator)
+                    {
+                        return decision;
+                    }
+                }
+                Outcome::Timeout => {
+                    if let Some(kind) =
+                        self.fail_rule(selected.depth, selected.rule, "timeout".into())
+                        && let Some(decision) =
+                            self.fail_skill(selected.depth, kind, actuator)
+                    {
+                        return decision;
+                    }
+                }
+                Outcome::Preempted => {
+                    if let Some(kind) =
+                        self.fail_rule(selected.depth, selected.rule, "preempted".into())
+                        && let Some(decision) =
+                            self.fail_skill(selected.depth, kind, actuator)
+                    {
+                        return decision;
+                    }
+                }
+            }
         }
 
         // Step 2: a discrete action in flight blocks switching until it
@@ -242,7 +333,7 @@ impl Interpreter {
         for frame in &mut self.stack {
             frame.ineligible = None;
             frame.retry = None;
-            frame.streak = None;
+            frame.failures.clear();
         }
     }
 
@@ -382,14 +473,9 @@ impl Interpreter {
                 continue;
             };
 
-            // A different rule firing ends the previous rule's failure streak.
-            if self.stack[depth]
-                .streak
-                .as_ref()
-                .is_some_and(|streak| streak.rule != index)
-            {
-                self.stack[depth].streak = None;
-            }
+            let selected_skill = self.stack[depth].skill.clone();
+            self.last_rule = Some((selected_skill, index));
+            self.rule_fired_this_tick = true;
 
             let (action, rule_max_ticks, has_until) = {
                 let frame = &self.stack[depth];
@@ -417,19 +503,22 @@ impl Interpreter {
                     self.stop_continuous(actuator);
                     if depth == 0 {
                         self.finished = true;
+                        self.events.push(InterpreterEvent::FrameDone {
+                            skill: self.stack[0].skill.clone(),
+                            depth: 1,
+                        });
                         return Decision::Done;
                     }
                     let call_rule = self.stack[depth].call_rule.unwrap_or(0);
+                    self.events.push(InterpreterEvent::FrameDone {
+                        skill: self.stack[depth].skill.clone(),
+                        depth: (depth + 1) as u32,
+                    });
                     self.stack.pop();
-                    // A completed child is a success of the calling rule, so it
-                    // ends that rule's failure streak.
-                    if let Some(parent) = self.stack.get_mut(depth - 1)
-                        && parent
-                            .streak
-                            .as_ref()
-                            .is_some_and(|streak| streak.rule == call_rule)
-                    {
-                        parent.streak = None;
+                    // A completed child is a success of the calling rule, so
+                    // it clears only that rule's failure count.
+                    if let Some(parent) = self.stack.get_mut(depth - 1) {
+                        parent.failures.remove(&call_rule);
                     }
                     // A commitment owned by this frame ends with it; a parent's
                     // commitment survives a child completing.
@@ -465,13 +554,18 @@ impl Interpreter {
                         self.stop_continuous(actuator);
                         return Decision::Failed("depth".into());
                     }
+                    self.events.push(InterpreterEvent::FramePushed {
+                        skill: callee.clone(),
+                        depth: (self.stack.len() + 1) as u32,
+                        args: values.iter().map(log_arg).collect(),
+                    });
                     self.stack.push(Frame {
                         skill: callee,
                         args: values,
                         call_rule: Some(index),
                         ineligible: None,
                         retry: None,
-                        streak: None,
+                        failures: BTreeMap::new(),
                     });
                     continue;
                 }
@@ -516,6 +610,10 @@ impl Interpreter {
                     }
                     actuator.apply(&start, self.tick);
                     self.continuous = true;
+                    self.continuous_action = Some(Continuous {
+                        depth,
+                        rule: index,
+                    });
                     return Decision::Run {
                         action: run,
                         frame_path,
@@ -525,17 +623,14 @@ impl Interpreter {
         }
     }
 
-    /// Records a successful discrete action and clears its rule's streak.
+    /// Records a successful discrete action and clears its rule's count.
     fn succeeded(&mut self, flight: &InFlight) {
-        if flight.depth < self.stack.len() {
-            let frame = &mut self.stack[flight.depth];
-            if frame
-                .streak
-                .as_ref()
-                .is_some_and(|streak| streak.rule == flight.rule)
-            {
-                frame.streak = None;
-            }
+        self.succeeded_rule(flight.depth, flight.rule);
+    }
+
+    fn succeeded_rule(&mut self, depth: usize, rule: usize) {
+        if depth < self.stack.len() {
+            self.stack[depth].failures.remove(&rule);
         }
     }
 
@@ -543,36 +638,29 @@ impl Interpreter {
     /// failed [`MAX_PRIMITIVE_FAILURES`] times in a row, meaning its skill
     /// fails; otherwise marks the rule to retry next tick.
     fn fail_flight(&mut self, flight: &InFlight, kind: String) -> Option<String> {
+        self.fail_rule(flight.depth, flight.rule, kind)
+    }
+
+    fn fail_rule(&mut self, depth: usize, rule: usize, kind: String) -> Option<String> {
         self.last_failure = Some(kind.clone());
         let mut failed = false;
-        if flight.depth < self.stack.len() {
+        if depth < self.stack.len() {
             let max = self.max_primitive_failures;
-            let frame = &mut self.stack[flight.depth];
-            let count = match &mut frame.streak {
-                Some(streak) if streak.rule == flight.rule => {
-                    streak.count += 1;
-                    streak.count
-                }
-                _ => {
-                    frame.streak = Some(FailureStreak {
-                        rule: flight.rule,
-                        count: 1,
-                    });
-                    1
-                }
-            };
-            if count >= max {
+            let frame = &mut self.stack[depth];
+            let count = frame.failures.entry(rule).or_insert(0);
+            *count += 1;
+            if *count >= max {
                 // The skill fails; do not retry this rule.
-                frame.streak = None;
+                frame.failures.clear();
                 failed = true;
             } else {
                 // A primitive failure is retried on the next tick: the world
                 // did not change, so the same rule is still the highest true
                 // one.
-                frame.retry = Some(flight.rule);
+                frame.retry = Some(rule);
             }
         }
-        self.clear_until_at(flight.depth, flight.rule);
+        self.clear_until_at(depth, rule);
         if failed { Some(kind) } else { None }
     }
 
@@ -589,8 +677,20 @@ impl Interpreter {
         if depth == 0 || depth >= self.stack.len() {
             self.finished = true;
             self.stop_continuous(actuator);
+            if let Some(frame) = self.stack.first() {
+                self.events.push(InterpreterEvent::FrameFailed {
+                    skill: frame.skill.clone(),
+                    depth: 1,
+                    kind: kind.clone(),
+                });
+            }
             return Some(Decision::Failed(kind));
         }
+        self.events.push(InterpreterEvent::FrameFailed {
+            skill: self.stack[depth].skill.clone(),
+            depth: (depth + 1) as u32,
+            kind: kind.clone(),
+        });
         let call_rule = self.stack[depth].call_rule.unwrap_or(0);
         self.stack.truncate(depth);
         let parent = depth - 1;
@@ -598,8 +698,8 @@ impl Interpreter {
         self.note_child_failure(parent, call_rule, kind, actuator)
     }
 
-    /// Counts one failure of `rule` in the frame at `depth`, the same streak a
-    /// failed primitive of that rule uses. Below the limit the rule is
+    /// Counts one failure of `rule` in the frame at `depth`, the same per-rule
+    /// count a failed primitive of that rule uses. Below the limit the rule is
     /// ineligible for this tick and retried on the next one; at the limit the
     /// frame's skill fails and the failure propagates to its caller.
     fn note_child_failure(
@@ -611,21 +711,13 @@ impl Interpreter {
     ) -> Option<Decision> {
         let max = self.max_primitive_failures;
         let count = {
-            let frame = &mut self.stack[depth];
-            match &mut frame.streak {
-                Some(streak) if streak.rule == rule => {
-                    streak.count += 1;
-                    streak.count
-                }
-                _ => {
-                    frame.streak = Some(FailureStreak { rule, count: 1 });
-                    1
-                }
-            }
+            let count = self.stack[depth].failures.entry(rule).or_insert(0);
+            *count += 1;
+            *count
         };
         if count >= max {
             // The skill fails; do not retry this rule.
-            self.stack[depth].streak = None;
+            self.stack[depth].failures.clear();
             return self.fail_skill(depth, kind, actuator);
         }
         self.stack[depth].ineligible = Some(rule);
@@ -666,6 +758,7 @@ impl Interpreter {
     }
 
     fn stop_continuous(&mut self, actuator: &mut dyn Actuator) {
+        self.continuous_action = None;
         if self.continuous {
             actuator.release();
             self.continuous = false;
@@ -804,8 +897,20 @@ impl Interpreter {
     }
 }
 
-fn compare(op: CmpOp, left: IntValue, right: IntValue) -> Truth {
-    let (left, right) = match (left, right) {
+/// A log-only rendering of a resolved argument.
+fn log_arg(arg: &ArgValue) -> String {
+    match arg {
+        ArgValue::Int(value) => value.to_string(),
+        ArgValue::Bool(value) => value.to_string(),
+        ArgValue::Item(name)
+        | ArgValue::Block(name)
+        | ArgValue::EntityKind(name)
+        | ArgValue::Name(name) => name.clone(),
+        ArgValue::Fact(call) => call.to_string(),
+    }
+}
+
+fn compare(op: CmpOp, left: IntValue, right: IntValue) -> Truth {    let (left, right) = match (left, right) {
         (IntValue::Known(left), IntValue::Known(right)) => (left, right),
         (IntValue::Unknown(fact), _) => return Truth::Unknown(fact),
         (_, IntValue::Unknown(fact)) => return Truth::Unknown(fact),

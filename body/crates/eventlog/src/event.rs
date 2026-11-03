@@ -125,6 +125,34 @@ pub enum EventKind {
     /// A preempted or suspended intent must be replanned before it resumes
     /// (architecture §5.4).
     ReplanNeeded { intent_id: u64 },
+    /// A primitive ended and will not tick again. `outcome` is `confirmed`,
+    /// `timeout`, `preempted` or `failed`; `failure_kind` carries the typed
+    /// reason of a failure. `ticks` is how long the primitive ran.
+    PrimitiveFinished {
+        primitive: String,
+        args: Vec<String>,
+        outcome: String,
+        #[serde(default)]
+        failure_kind: Option<String>,
+        ticks: u64,
+    },
+    /// A skill frame was pushed, completed or failed. `depth` is one-based
+    /// (the root skill is depth 1) and `outcome` is `pushed`, `done` or
+    /// `failed`.
+    SkillFrame {
+        skill: String,
+        depth: u32,
+        outcome: String,
+        #[serde(default)]
+        failure_kind: Option<String>,
+    },
+    /// The highest true rule of a skill changed. Emitted only on a change, so
+    /// a steady skill costs one line, not one per tick.
+    RuleSelected { skill: String, rule: u32 },
+    /// The frontier `explore` chose to walk to, with its score (the squared
+    /// distance used by the ordering) and how many frontier cells were
+    /// candidates.
+    ExploreFrontier { cell: String, score: i64, candidates: u32 },
     /// The brain should wake. Demo-0 has no brain yet, so this is only logged.
     WakeBrain { cause: String, detail: String },
     /// Free-form operator or test note.
@@ -178,6 +206,28 @@ mod tests {
                 owner: "reflex:creeper".to_owned(),
             },
             EventKind::ReplanNeeded { intent_id: 3 },
+            EventKind::PrimitiveFinished {
+                primitive: "mine".to_owned(),
+                args: vec!["oak_log".to_owned()],
+                outcome: "failed".to_owned(),
+                failure_kind: Some("no_block".to_owned()),
+                ticks: 41,
+            },
+            EventKind::SkillFrame {
+                skill: "get_wood".to_owned(),
+                depth: 2,
+                outcome: "failed".to_owned(),
+                failure_kind: Some("no_block".to_owned()),
+            },
+            EventKind::RuleSelected {
+                skill: "get_wood".to_owned(),
+                rule: 2,
+            },
+            EventKind::ExploreFrontier {
+                cell: "4, 64, -9".to_owned(),
+                score: 97,
+                candidates: 12,
+            },
             EventKind::WakeBrain {
                 cause: "reflex".to_owned(),
                 detail: "creeper ran 40 ticks".to_owned(),

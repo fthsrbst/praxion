@@ -11,5 +11,6 @@ mod runner;
 
 pub use live::{LiveDriver, LiveMode, LiveOptions, Summary};
 pub use runner::{
-    Ctx, IntentSpec, Runner, TickResult, answer_is_known, block_name, fact_known,
+    Ctx, FrontierChoice, IntentSpec, PrimitiveEvent, Runner, TickResult, answer_is_known,
+    block_name, choose_frontier, fact_known, rank_frontiers,
 };
