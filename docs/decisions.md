@@ -5,8 +5,13 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-11-03
 
-All on Claude's recommendation, agreed by the user.
+All on Claude's recommendation, agreed by the user, except where marked (user).
 
+- **The movement-style layer is part of Demo-1, not earlier (user, 2026-11-03).** The first demo video
+  (headless body, first-person spectator) looked robotic: one-step exact aims, constant speed and
+  rhythm. That is the movement-style layer's job (session 13), not the brain's: Jev and the LLM decide
+  what to do, not how the body moves. The user kept it in Demo-1, with the real client, and it is now
+  named in the Demo-1 slice (architecture §1.1). Rules out: building it on the headless body first.
 - **The body takes its placed crafting table along before it explores for stone.**
   `get_cobblestone` gains one rule above its `explore(stone)` rule:
   `has(wooden_pickaxe) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table)

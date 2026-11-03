@@ -42,7 +42,7 @@ Engineering principle 3 needs a gate for "first code". Proposed, in dependency o
 | Slice | Contents | Proves |
 |---|---|---|
 | Demo-0 | protocol test body (headless packet actuator), decoder, world model, hand-written rule-list core, reflexes, referee, fake world | the core survives a scripted first night on fresh seeds, with no SendInput and no LLM |
-| Demo-1 | Demo-0 through the real client: SendInput actuator, take-over, command gesture, body-side control verbs, indicator | the first demo, without learning |
+| Demo-1 | Demo-0 through the real client: SendInput actuator, movement style (human camera, speed and timing, session 13), take-over, command gesture, body-side control verbs, indicator | the first demo, without learning, that moves like a person (movement statistics and the blind test, §9) |
 | Demo-2 | brain: Jev and LLM clients, curriculum, skill writer and admission, memory briefing | Praxion writes and admits its own skills |
 
 First product code is gated on the reviewed draft and the passed 2.7 experiments [D], and then
