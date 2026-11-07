@@ -67,14 +67,12 @@ fn shaped_recipes_round_trip() {
             recipe.output
         );
         assert!(recipe.output_count > 0, "zero result count for {}", recipe.output);
-        for cell in grid {
-            if let Some(ingredient) = cell {
-                assert!(
-                    !ingredient.items.is_empty(),
-                    "empty keys for {}",
-                    recipe.output
-                );
-            }
+        for ingredient in grid.iter().flatten() {
+            assert!(
+                !ingredient.items.is_empty(),
+                "empty keys for {}",
+                recipe.output
+            );
         }
     }
     assert!(count > 0, "no shaped recipes");

@@ -73,7 +73,7 @@ impl Framer {
     }
 
     /// Remove and return the next complete frame body, if there is one.
-    pub fn next(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
+    pub fn pop_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
         let available = &self.buffer[self.start..];
         let Some((length, prefix_len)) = read_varint(available)? else {
             return Ok(None);
@@ -168,7 +168,7 @@ mod tests {
                 let end = (offset + chunk).min(stream.len());
                 framer.push(&stream[offset..end]);
                 offset = end;
-                while let Some(body) = framer.next().expect("valid stream") {
+                while let Some(body) = framer.pop_frame().expect("valid stream") {
                     decoded.push(body);
                 }
             }
@@ -182,28 +182,28 @@ mod tests {
         let mut framer = Framer::new();
         framer.push(&frame(b"one"));
         framer.push(&frame(b"two"));
-        assert_eq!(framer.next().unwrap().unwrap(), b"one");
-        assert_eq!(framer.next().unwrap().unwrap(), b"two");
-        assert!(framer.next().unwrap().is_none());
+        assert_eq!(framer.pop_frame().unwrap().unwrap(), b"one");
+        assert_eq!(framer.pop_frame().unwrap().unwrap(), b"two");
+        assert!(framer.pop_frame().unwrap().is_none());
     }
 
     #[test]
     fn incomplete_length_waits() {
         let mut framer = Framer::new();
         framer.push(&[0x80]);
-        assert!(framer.next().unwrap().is_none());
+        assert!(framer.pop_frame().unwrap().is_none());
         // VarInt 128 is [0x80, 0x01]; the first byte already arrived above.
         let mut rest = vec![0x01];
         rest.extend_from_slice(&[0xaa; 128]);
         framer.push(&rest);
-        assert_eq!(framer.next().unwrap().unwrap(), vec![0xaa; 128]);
+        assert_eq!(framer.pop_frame().unwrap().unwrap(), vec![0xaa; 128]);
     }
 
     #[test]
     fn five_continuation_bytes_are_an_error() {
         let mut framer = Framer::new();
         framer.push(&[0x80, 0x80, 0x80, 0x80, 0x80]);
-        assert_eq!(framer.next(), Err(FrameError::VarIntTooLong));
+        assert_eq!(framer.pop_frame(), Err(FrameError::VarIntTooLong));
     }
 
     #[test]
@@ -212,6 +212,6 @@ mod tests {
         let mut bytes = varint(MAX_FRAME_LEN as u32 + 1);
         bytes.extend_from_slice(&[0; 16]);
         framer.push(&bytes);
-        assert!(matches!(framer.next(), Err(FrameError::FrameTooLarge { .. })));
+        assert!(matches!(framer.pop_frame(), Err(FrameError::FrameTooLarge { .. })));
     }
 }

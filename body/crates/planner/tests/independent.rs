@@ -403,10 +403,10 @@ fn validate_step(
         if dx != 1 || dz != 1 || dy != 0 {
             return Err("diagonal geometry".into());
         }
-    } else if !matches!(step.kind, MoveKind::Pillar { .. } | MoveKind::SwimUp) {
-        if dx.max(dz) > 1 || dy > 3 {
-            return Err("move too far".into());
-        }
+    } else if !matches!(step.kind, MoveKind::Pillar { .. } | MoveKind::SwimUp)
+        && (dx.max(dz) > 1 || dy > 3)
+    {
+        return Err("move too far".into());
     }
 
     Ok(())
@@ -455,10 +455,10 @@ fn independent_oracle_path_validity() {
                         paths += 1;
                     }
                     // partial cell should be unknown when present
-                    if let PlanStatus::Partial { cell } = plan.status {
-                        if !world.is_unknown(cell) {
-                            violations.push(format!("w{w} g{g}: partial cell not unknown {cell:?}"));
-                        }
+                    if let PlanStatus::Partial { cell } = plan.status
+                        && !world.is_unknown(cell)
+                    {
+                        violations.push(format!("w{w} g{g}: partial cell not unknown {cell:?}"));
                     }
                 }
                 Err(_) => violations.push(format!("w{w} g{g}: PANIC")),
@@ -539,10 +539,10 @@ fn land_successors(w: &World, pos: BlockPos, max_drop: i32) -> Vec<(BlockPos, f3
             continue;
         }
         for drop in 1..=max_drop {
-            let target = horiz.down(drop as i32);
+            let target = horiz.down(drop);
             let mut clear = true;
             for k in 0..drop {
-                let cell = horiz.down(k as i32);
+                let cell = horiz.down(k);
                 if !land_passable(w, cell) || !land_passable(w, cell.up(1)) {
                     clear = false;
                     break;
@@ -937,7 +937,7 @@ fn independent_follower() {
             if let Look::Delta { .. } = frame.look {
                 panic!("the follower must not emit deltas");
             }
-            if let Err(_) = frame.apply(&mut body, ticks as u64) {
+            if frame.apply(&mut body, ticks as u64).is_err() {
                 break;
             }
             body.step(&frame.held, &pw);
@@ -1046,7 +1046,7 @@ fn independent_stuck_guard() {
     let mut violations: Vec<String> = Vec::new();
     // threshold 2
     let mut guard = StuckGuard::new(2);
-    let plan_cells = vec![
+    let plan_cells = [
         BlockPos::new(0, 64, 0),
         BlockPos::new(0, 64, 1),
         BlockPos::new(0, 64, 2),

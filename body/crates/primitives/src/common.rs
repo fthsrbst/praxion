@@ -45,15 +45,11 @@ pub(crate) fn item_name(stack: &ItemStack) -> &str {
     stack.kind().to_str()
 }
 
-fn normalize(name: &str) -> &str {
-    name.strip_prefix("minecraft:").unwrap_or(name)
-}
-
 fn item_matches(stack: &ItemStack, wanted: &str) -> bool {
     if let Some(tag) = wanted.strip_prefix('#') {
         gamedata::item_in_tag(item_name(stack), tag)
     } else {
-        normalize(item_name(stack)) == normalize(wanted)
+        gamedata::normalize(item_name(stack)) == gamedata::normalize(wanted)
     }
 }
 
@@ -210,7 +206,7 @@ pub(crate) fn choose_tool(
     };
     match best {
         Some((best_rank, stack)) if better(best_rank) => {
-            ToolChoice::Select(normalize(item_name(stack)).to_owned())
+            ToolChoice::Select(gamedata::normalize(item_name(stack)).to_owned())
         }
         _ if !held_rank.0 => ToolChoice::Missing,
         _ => ToolChoice::Keep,
@@ -260,7 +256,7 @@ pub(crate) fn plan_inventory(world: &World) -> PlanInventory {
         .filter_map(|index| world.inventory().get(index))
         .filter(|stack| !stack.is_empty())
         .map(|stack| praxion_planner::HotbarItem {
-            item: normalize(item_name(stack)).to_owned(),
+            item: gamedata::normalize(item_name(stack)).to_owned(),
             count: stack.count().max(0) as u32,
         })
         .collect();

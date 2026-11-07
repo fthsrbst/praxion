@@ -353,32 +353,32 @@ impl Arbiter {
         }
 
         // 5. The soft threshold is served at the command's next safe point.
-        if needs.food <= settings.eat_soft_threshold {
-            if let Some(slot) = view.best_food.map(|food| food.slot) {
-                let from = self.tier();
-                let until = interpreter.until_active();
-                if self.is_safe_point(interpreter)
-                    && self.may_switch(from, Tier::Maintenance, 1.0, 0.0, until, settings, tick)
-                {
-                    self.start_maintenance(
-                        NeedKind::Eat,
-                        slot,
-                        Tier::Maintenance,
-                        interpreter,
-                        actuator,
-                        body,
-                        tick,
-                    );
-                    let run = self.maintenance.as_mut().expect("just started");
-                    let frame = maintenance_frame(tick, body.generation(), run);
-                    let frame = self.guard(frame, body, view);
-                    return self.result(
-                        FrameSource::Maintenance(frame),
-                        None,
-                        Some(NeedKind::Eat),
-                        decision,
-                    );
-                }
+        if needs.food <= settings.eat_soft_threshold
+            && let Some(slot) = view.best_food.map(|food| food.slot)
+        {
+            let from = self.tier();
+            let until = interpreter.until_active();
+            if self.is_safe_point(interpreter)
+                && self.may_switch(from, Tier::Maintenance, 1.0, 0.0, until, settings, tick)
+            {
+                self.start_maintenance(
+                    NeedKind::Eat,
+                    slot,
+                    Tier::Maintenance,
+                    interpreter,
+                    actuator,
+                    body,
+                    tick,
+                );
+                let run = self.maintenance.as_mut().expect("just started");
+                let frame = maintenance_frame(tick, body.generation(), run);
+                let frame = self.guard(frame, body, view);
+                return self.result(
+                    FrameSource::Maintenance(frame),
+                    None,
+                    Some(NeedKind::Eat),
+                    decision,
+                );
             }
         }
 

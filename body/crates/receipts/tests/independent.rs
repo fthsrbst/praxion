@@ -162,9 +162,9 @@ fn property_no_confirmed_without_own_evidence() {
         let mut ack_seqs: Vec<u32> = Vec::new();
         let mut packets: Vec<Packet> = Vec::new();
 
-        for i in 0..n {
+        for (i, observed) in air_observed.iter_mut().enumerate() {
             if rng.chance(70) {
-                air_observed[i] = true;
+                *observed = true;
                 let pos = BlockPos::new(i as i32, 64, 0);
                 packets.push(block_update(pos, air()));
             }

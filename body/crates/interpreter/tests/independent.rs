@@ -84,8 +84,10 @@ fn property_fact_flips_never_panic_or_double_start() {
             "skill s()\n  rules:\n    count(x) >= 2 -> wait(9)\n    count(x) >= 1 -> mine(stone)\n    true -> wait(7)\n",
         );
         let mut facts = Mock::default();
-        let mut act = Mock::default();
-        act.duration = 2;
+        let mut act = Mock {
+            duration: 2,
+            ..Mock::default()
+        };
         let mut interp = Interpreter::new(program);
         interp.start_skill("s", Vec::new()).unwrap();
         let mut rng = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -119,8 +121,10 @@ fn property_random_preemption_no_duplicate() {
     for seed in 0u64..300 {
         let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
         let mut facts = Mock::default();
-        let mut act = Mock::default();
-        act.duration = 3;
+        let mut act = Mock {
+            duration: 3,
+            ..Mock::default()
+        };
         let mut interp = Interpreter::new(program);
         interp.start_skill("s", Vec::new()).unwrap();
         assert!(matches!(interp.tick(&mut facts, &mut act), Decision::Run { .. }));

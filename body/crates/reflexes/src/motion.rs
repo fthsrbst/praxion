@@ -31,7 +31,8 @@ const EAT_TICKS: u64 = 4;
 #[derive(Clone, Debug)]
 pub enum Motion {
     Follow {
-        follower: Follower,
+        /// Boxed because a `Follower` dwarfs the other variants.
+        follower: Box<Follower>,
         /// Give up if the follower has not reached the last step by then.
         deadline: u64,
         /// A flee sprints; a careful step does not.
@@ -129,8 +130,10 @@ impl Motion {
         }
         let ticks = plan.cost.ceil().max(1.0) as u64 + 40;
         Some(Motion::Follow {
-            follower: Follower::new(plan.steps, blocks, &state, Personality::default())
-                .with_max_ticks_per_step(60),
+            follower: Box::new(
+                Follower::new(plan.steps, blocks, &state, Personality::default())
+                    .with_max_ticks_per_step(60),
+            ),
             deadline: tick + ticks,
             sprint,
         })
@@ -162,12 +165,12 @@ impl Motion {
             cost: 1.0,
         };
         Some(Motion::Follow {
-            follower: Follower::new(
+            follower: Box::new(Follower::new(
                 vec![step],
                 blocks,
                 &PlanningState::default(),
                 Personality::default(),
-            ),
+            )),
             deadline: u64::MAX,
             sprint,
         })

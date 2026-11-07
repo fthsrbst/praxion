@@ -73,7 +73,7 @@ fn flee_path_never_enters_lava_or_a_drop_over_three() {
             // fall guard: no moving frame may keep moving off a drop > 3.
             if frame.held.moves() {
                 assert!(
-                    sim.body.position().to_block_pos_floor().y as i64 - 0 >= 0,
+                    sim.body.position().to_block_pos_floor().y >= 0,
                     "sanity"
                 );
             }
@@ -405,7 +405,7 @@ fn hot_path_timing_with_sixty_four_entities() {
     let mut sim = Sim::new(test_settings(), Vec3::new(0.5, 64.0, 0.5));
     for i in 0..64 {
         let x = (i as f64) * 0.5 - 8.0;
-        sim.add_mob(1000 + i as i32, EntityKind::Zombie, Vec3::new(x, 64.0, 8.0));
+        sim.add_mob(1000 + i, EntityKind::Zombie, Vec3::new(x, 64.0, 8.0));
     }
     let start = Instant::now();
     let n = 200u64;

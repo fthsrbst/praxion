@@ -2,12 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use azalea_core::position::{ChunkSectionBlockPos, ChunkSectionPos};
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::builtin::ItemKind;
 use praxion_decoder::Packet;
 use praxion_eventlog::{Attribution, EvidenceRef, Outcome, Writer};
-use praxion_world::{BlockDescription, BlockPos, World};
+use praxion_gamedata::normalize;
+use praxion_world::{BlockDescription, BlockPos, PLAYER_STORAGE_SLOTS, World, section_block_pos};
 
 use crate::intent::{Expect, Intent, IntentId, ReceiptId};
 
@@ -350,6 +350,9 @@ impl Receipt {
         self.block_hit.get_or_insert(EvidenceRef { kind: kind.to_owned(), tick });
     }
 
+    /// The arguments are the receipt's own fields plus the packet being
+    /// observed; grouping them would invent a type with one caller.
+    #[allow(clippy::too_many_arguments)]
     fn observe_inventory(
         &mut self,
         packet: &Packet,
@@ -444,11 +447,15 @@ impl Receipt {
                 }
             }
             Packet::PlayClientbound(ClientboundGamePacket::ContainerSetSlot(set)) => {
-                if set.container_id == container_id
+                let reverted = if set.container_id == container_id
                     && set.state_id > state_id
-                    && set.slot == u16::try_from(slot).ok()?
-                    && self.slot_reverted(SlotItem::of(&set.item_stack))
                 {
+                    let slot = u16::try_from(slot).ok()?;
+                    set.slot == slot && self.slot_reverted(SlotItem::of(&set.item_stack))
+                } else {
+                    false
+                };
+                if reverted {
                     self.correction_hit = Some(EvidenceRef {
                         kind: "correction".to_owned(),
                         tick,
@@ -526,10 +533,11 @@ impl Receipt {
             &self.hurt_hit,
             &self.fact_hit,
             &self.correction_hit,
-        ] {
-            if let Some(hit) = hit {
-                evidence.push(hit.clone());
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            evidence.push(hit.clone());
         }
         evidence
     }
@@ -914,7 +922,7 @@ impl Engine {
         if self
             .settled
             .back()
-            .map_or(true, |back| back.late_until <= settled.late_until)
+            .is_none_or(|back| back.late_until <= settled.late_until)
         {
             self.settled.push_back(settled);
             return;
@@ -1123,7 +1131,7 @@ fn is_wanted_item(stack: &praxion_world::ItemStack, wanted: &str) -> bool {
     }
     match wanted.parse::<ItemKind>() {
         Ok(kind) => stack.kind() == kind,
-        Err(_) => normalize(&stack.kind().to_str()) == normalize(wanted),
+        Err(_) => normalize(stack.kind().to_str()) == normalize(wanted),
     }
 }
 
@@ -1148,7 +1156,6 @@ fn item_count(world: &World, item: &str) -> i64 {
 /// reaches us as a container packet for the open menu and would otherwise be
 /// invisible to the receipt.
 fn storage_count(world: &World, item: &str) -> i64 {
-    const PLAYER_STORAGE_SLOTS: usize = 36;
     let count = |stack: &praxion_world::ItemStack| {
         if is_wanted_item(stack, item) {
             i64::from(stack.count())
@@ -1182,15 +1189,4 @@ fn slot_item(world: &World, container_id: i32, slot: i16) -> Option<SlotItem> {
         return None;
     }
     container.slots().get(index).map(SlotItem::of)
-}
-
-fn section_block_pos(section: ChunkSectionPos, pos: ChunkSectionBlockPos) -> Option<BlockPos> {
-    let x = section.x.checked_mul(16)?.checked_add(i32::from(pos.x))?;
-    let y = section.y.checked_mul(16)?.checked_add(i32::from(pos.y))?;
-    let z = section.z.checked_mul(16)?.checked_add(i32::from(pos.z))?;
-    Some(BlockPos::new(x, y, z))
-}
-
-fn normalize(name: &str) -> String {
-    name.strip_prefix("minecraft:").unwrap_or(name).to_owned()
 }

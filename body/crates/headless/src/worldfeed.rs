@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use praxion_decoder::{Decoder, Event, Packet};
 use praxion_tee::Reader;
-use praxion_world::World;
+use praxion_world::{PLAYER_STORAGE_SLOTS, World};
 
 /// Bound on reaching the forwarder's tee listener.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -178,7 +178,6 @@ fn mirror_player_slots(
     packet: &azalea_protocol::packets::game::ClientboundGamePacket,
 ) {
     use azalea_protocol::packets::game::ClientboundGamePacket as Packet;
-    const PLAYER_STORAGE_SLOTS: usize = 36;
     let Packet::ContainerSetSlot(set) = packet else {
         return;
     };

@@ -731,10 +731,11 @@ impl Interpreter {
     }
 
     fn ensure_until(&mut self, depth: usize, rule: usize, has_until: bool, max_ticks: u32) {
-        if let Some(until) = &self.until {
-            if until.depth == depth && until.rule != rule {
-                self.until = None;
-            }
+        if let Some(until) = &self.until
+            && until.depth == depth
+            && until.rule != rule
+        {
+            self.until = None;
         }
         if !has_until {
             if matches!(&self.until, Some(until) if until.depth == depth && until.rule == rule) {

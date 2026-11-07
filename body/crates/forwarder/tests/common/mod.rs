@@ -21,15 +21,15 @@ use praxion_tee::{HEADER, Kind, Reader, Record};
 use super::{Config, Forwarder};
 
 pub fn test_config(upstream: SocketAddr, tee_queue_bytes: usize, timeout: Duration) -> Config {
-    let mut config = Config::default();
-    config.listen = SocketAddr::from(([127, 0, 0, 1], 0));
-    config.upstream = upstream;
-    config.tee_listen = SocketAddr::from(([127, 0, 0, 1], 0));
-    config.stats = None;
-    config.tee_queue_bytes = tee_queue_bytes;
-    config.protocol = 777;
-    config.first_frame_timeout = timeout;
-    config
+    Config {
+        listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+        upstream,
+        tee_listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+        tee_queue_bytes,
+        protocol: 777,
+        first_frame_timeout: timeout,
+        ..Config::default()
+    }
 }
 
 pub fn start_forwarder(config: Config) -> (SocketAddr, SocketAddr) {
@@ -92,28 +92,27 @@ pub fn connect_tee(addr: SocketAddr) -> TcpStream {
     let mut header = [0u8; 8];
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if let Ok(n) = stream.peek(&mut header) {
-            if n >= 8 {
-                assert_eq!(&header, HEADER, "tee stream header");
-                return stream;
-            }
+        if let Ok(n) = stream.peek(&mut header)
+            && n >= 8
+        {
+            assert_eq!(&header, HEADER, "tee stream header");
+            return stream;
         }
         thread::sleep(Duration::from_millis(5));
     }
     panic!("the tee never wrote its header");
 }
 
+/// Predicate that stops a collector once the records it needs have arrived.
+type Done = Box<dyn Fn(&[Record]) -> bool + Send>;
+
 /// Read records until `done` says stop, a `Closed` record arrives, or the socket times out.
-pub fn collect(
-    stream: TcpStream,
-    timeout: Duration,
-    done: Box<dyn Fn(&[Record]) -> bool + Send>,
-) -> JoinHandle<Vec<Record>> {
+pub fn collect(stream: TcpStream, timeout: Duration, done: Done) -> JoinHandle<Vec<Record>> {
     thread::spawn(move || {
         stream.set_read_timeout(Some(timeout)).unwrap();
-        let mut reader = Reader::new(stream).expect("tee header");
+        let reader = Reader::new(stream).expect("tee header");
         let mut records = Vec::new();
-        while let Some(item) = reader.next() {
+        for item in reader {
             match item {
                 Ok(record) => {
                     let closed = record.kind == Kind::Closed;
@@ -131,16 +130,12 @@ pub fn collect(
 
 /// Like [`collect`], but only stops on `done` (or the socket timeout), so it keeps records from
 /// several connections alive at once.
-pub fn collect_multi(
-    stream: TcpStream,
-    timeout: Duration,
-    done: Box<dyn Fn(&[Record]) -> bool + Send>,
-) -> JoinHandle<Vec<Record>> {
+pub fn collect_multi(stream: TcpStream, timeout: Duration, done: Done) -> JoinHandle<Vec<Record>> {
     thread::spawn(move || {
         stream.set_read_timeout(Some(timeout)).unwrap();
-        let mut reader = Reader::new(stream).expect("tee header");
+        let reader = Reader::new(stream).expect("tee header");
         let mut records = Vec::new();
-        while let Some(item) = reader.next() {
+        for item in reader {
             match item {
                 Ok(record) => {
                     records.push(record);

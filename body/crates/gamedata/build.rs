@@ -599,10 +599,10 @@ fn parse_table(jar: &mut Jar, path: &str, depth: usize) -> Result<Vec<DropDef>, 
     let mut drops = Vec::new();
     for (index, pool) in pools.iter().enumerate() {
         check_rolls(pool, path, index)?;
-        if let Some(condition) = pool.get("condition").or_else(|| pool.get("conditions")) {
-            if matches!(condition_of(condition, path, false)?, Condition::Skip) {
-                continue;
-            }
+        if let Some(condition) = pool.get("condition").or_else(|| pool.get("conditions"))
+            && matches!(condition_of(condition, path, false)?, Condition::Skip)
+        {
+            continue;
         }
         let entries = pool
             .get("entries")
@@ -835,12 +835,9 @@ fn tool_from_predicate(predicate: &Value) -> Option<&str> {
         Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
         _ => return None,
     };
-    for tool in ["pickaxe", "axe", "shovel", "hoe", "shears"] {
-        if list.iter().any(|item| item.contains(tool)) {
-            return Some(tool);
-        }
-    }
-    None
+    ["pickaxe", "axe", "shovel", "hoe", "shears"]
+        .into_iter()
+        .find(|&tool| list.iter().any(|item| item.contains(tool)))
 }
 
 fn table_path(id: &str) -> String {

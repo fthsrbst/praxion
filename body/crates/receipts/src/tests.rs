@@ -737,8 +737,8 @@ fn fault_injection_never_reports_a_false_confirmed() {
 }
 
 #[test]
-fn late_retention_is_positive() {
-    assert!(LATE_RETENTION_TICKS > 0);
+fn late_retention_is_five_minutes() {
+    assert_eq!(LATE_RETENTION_TICKS, 5 * 60 * 20, "6000 ticks of play");
 }
 
 #[test]
@@ -800,10 +800,10 @@ fn craft_is_attributed_to_the_click_that_took_the_result() {
     assert_eq!(
         h.events().into_iter().find_map(|event| match event.event {
             EventKind::IntentStarted {
-                intent_id,
+                intent_id: 1,
                 attribution,
                 ..
-            } if intent_id == 1 => {
+            } => {
                 Some(attribution)
             }
             _ => None,

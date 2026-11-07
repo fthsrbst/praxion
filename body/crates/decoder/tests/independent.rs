@@ -73,7 +73,9 @@ fn rechunk_records(records: &[Record], seed: &mut u64) -> Vec<Record> {
     out
 }
 
-fn decoded_sequence(records: &[Record]) -> (Vec<(u64, u32, &'static str, &'static str, String, u32)>, usize) {
+type DecodedRow = (u64, u32, &'static str, &'static str, String, u32);
+
+fn decoded_sequence(records: &[Record]) -> (Vec<DecodedRow>, usize) {
     let mut decoder = Decoder::new();
     decoder.set_reorder_window(60_000_000_000);
     let mut sequence = Vec::new();
@@ -164,15 +166,16 @@ fn gap_desyncs_one_connection_second_keeps_decoding() {
     let hs = handshake_frame();
     let sr = status_request_frame();
 
-    let mut records = Vec::new();
-    // Connection 0: decodes one handshake, then a gap desyncs it.
-    records.push(Record { ts_ns: 1, conn_id: 0, kind: Kind::Opened, data: Vec::new() });
-    records.push(Record { ts_ns: 2, conn_id: 0, kind: Kind::Serverbound, data: hs.clone() });
-    records.push(Record { ts_ns: 3, conn_id: 0, kind: Kind::Gap { dropped_bytes: 7 }, data: Vec::new() });
-    // Connection 1 starts after the gap and must still decode.
-    records.push(Record { ts_ns: 4, conn_id: 1, kind: Kind::Opened, data: Vec::new() });
-    records.push(Record { ts_ns: 5, conn_id: 1, kind: Kind::Serverbound, data: hs.clone() });
-    records.push(Record { ts_ns: 6, conn_id: 1, kind: Kind::Serverbound, data: sr.clone() });
+    let records = vec![
+        // Connection 0: decodes one handshake, then a gap desyncs it.
+        Record { ts_ns: 1, conn_id: 0, kind: Kind::Opened, data: Vec::new() },
+        Record { ts_ns: 2, conn_id: 0, kind: Kind::Serverbound, data: hs.clone() },
+        Record { ts_ns: 3, conn_id: 0, kind: Kind::Gap { dropped_bytes: 7 }, data: Vec::new() },
+        // Connection 1 starts after the gap and must still decode.
+        Record { ts_ns: 4, conn_id: 1, kind: Kind::Opened, data: Vec::new() },
+        Record { ts_ns: 5, conn_id: 1, kind: Kind::Serverbound, data: hs.clone() },
+        Record { ts_ns: 6, conn_id: 1, kind: Kind::Serverbound, data: sr.clone() },
+    ];
 
     let mut decoder = Decoder::new();
     let mut events = Vec::new();
@@ -216,14 +219,15 @@ fn gap_desyncs_one_connection_second_keeps_decoding() {
 fn closed_half_frame_and_reopened_conn_starts_clean() {
     let hs = handshake_frame();
 
-    let mut records = Vec::new();
-    records.push(Record { ts_ns: 1, conn_id: 0, kind: Kind::Opened, data: Vec::new() });
-    // A frame that claims 10 bytes but only 3 arrive, then Closed.
-    records.push(Record { ts_ns: 2, conn_id: 0, kind: Kind::Serverbound, data: vec![10, 1, 2, 3] });
-    records.push(Record { ts_ns: 3, conn_id: 0, kind: Kind::Closed, data: Vec::new() });
-    // Reuse the same conn id: should start clean and decode again.
-    records.push(Record { ts_ns: 4, conn_id: 0, kind: Kind::Opened, data: Vec::new() });
-    records.push(Record { ts_ns: 5, conn_id: 0, kind: Kind::Serverbound, data: hs });
+    let records = vec![
+        Record { ts_ns: 1, conn_id: 0, kind: Kind::Opened, data: Vec::new() },
+        // A frame that claims 10 bytes but only 3 arrive, then Closed.
+        Record { ts_ns: 2, conn_id: 0, kind: Kind::Serverbound, data: vec![10, 1, 2, 3] },
+        Record { ts_ns: 3, conn_id: 0, kind: Kind::Closed, data: Vec::new() },
+        // Reuse the same conn id: should start clean and decode again.
+        Record { ts_ns: 4, conn_id: 0, kind: Kind::Opened, data: Vec::new() },
+        Record { ts_ns: 5, conn_id: 0, kind: Kind::Serverbound, data: hs },
+    ];
 
     let mut decoder = Decoder::new();
     let mut events = Vec::new();
@@ -364,10 +368,11 @@ fn corpus5_reconnect_world_does_not_keep_old_chunks() {
 
     for record in &records {
         for event in decoder.feed(record) {
-            if let Event::Decoded(d) = &event {
-                if d.packet.name() == "login" && matches!(d.packet, Packet::PlayClientbound(_)) {
-                    play_logins.push(d.conn_id);
-                }
+            if let Event::Decoded(d) = &event
+                && d.packet.name() == "login"
+                && matches!(d.packet, Packet::PlayClientbound(_))
+            {
+                play_logins.push(d.conn_id);
             }
             match &event {
                 Event::Opened { conn_id, .. } => world.opened(*conn_id),

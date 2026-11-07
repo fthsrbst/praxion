@@ -35,6 +35,12 @@ mod session;
 mod win;
 mod worldfeed;
 
+use std::time::Duration;
+
+/// One client tick: 20 per second, as vanilla runs it. Also the event-loop poll
+/// interval the binaries use to look at the clock and the interrupt flag.
+pub const TICK: Duration = Duration::from_millis(50);
+
 pub use azalea_protocol::packets::game::ServerboundGamePacket;
 pub use driver::{Driver, DriverHandle, TickView};
 pub use error::Error;

@@ -9,12 +9,11 @@ use praxion_body::{
     resolve_goal_args, settings_path, skills_dir, summary,
 };
 use praxion_body::summary::{SessionSummary, Shared};
-use praxion_headless::{ConnectOptions, DriverHandle, Event, Session};
+use praxion_headless::{ConnectOptions, DriverHandle, Event, Session, TICK};
 use praxion_manifest::Manifest;
 use praxion_reflexes::Settings;
 use praxion_rules::CORE_COMPOSITION_DEPTH;
 
-const POLL: Duration = Duration::from_millis(50);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
@@ -145,7 +144,7 @@ fn run() -> Result<ExitCode, String> {
             break;
         }
 
-        match session.recv_event_timeout(POLL) {
+        match session.recv_event_timeout(TICK) {
             Some(Event::Joined) => eprintln!("joined"),
             Some(Event::Died) => {
                 {

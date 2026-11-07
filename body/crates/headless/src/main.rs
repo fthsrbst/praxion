@@ -21,12 +21,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use praxion_headless::{ConnectOptions, Event, Script, Session};
+use praxion_headless::{ConnectOptions, Event, Script, Session, TICK};
 
 /// How long a stop waits for the session to report its disconnect reason.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
-/// How often the event loop looks at the clock and the interrupt flag.
-const POLL: Duration = Duration::from_millis(50);
 
 const USAGE: &str = "usage: praxion-headless --server 127.0.0.1:PORT [--name Bot1] \
                      [--seconds N] [--auto-respawn] [--verbose] \
@@ -90,7 +88,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break None;
         }
-        match session.recv_event_timeout(POLL) {
+        match session.recv_event_timeout(TICK) {
             Some(Event::Joined) => println!("joined"),
             Some(Event::Died) => println!("died"),
             Some(Event::Disconnected(reason)) => break Some(reason),

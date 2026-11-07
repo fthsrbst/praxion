@@ -225,7 +225,7 @@ fn a_subscriber_joining_mid_connection_gets_the_header_and_a_gap_for_the_open_co
         "the mid-join gap covers every byte forwarded before the subscriber arrived"
     );
     assert!(
-        records.iter().any(|r| r.kind == Kind::Opened) == false,
+        !records.iter().any(|r| r.kind == Kind::Opened),
         "Opened was before the subscriber and is replaced by the gap"
     );
     let after = records

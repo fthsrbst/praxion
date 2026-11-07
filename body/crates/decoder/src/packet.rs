@@ -68,6 +68,11 @@ impl fmt::Display for Dir {
 }
 
 /// One decoded packet, already read by Azalea.
+///
+/// The variants have very different sizes because they wrap Azalea's packet
+/// enums; boxing them would make every match in the workspace dereference and
+/// buy little on a per-frame decode path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Packet {
     HandshakeServerbound(ServerboundHandshakePacket),

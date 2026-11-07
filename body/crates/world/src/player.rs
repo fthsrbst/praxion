@@ -19,6 +19,10 @@ const ON_FIRE_BIT: u8 = 0x1;
 /// maximum above vanilla's 300, so only the floor is clamped.
 const AIR_SUPPLY_INDEX: u8 = 1;
 
+/// The player's own inventory slots: 27 storage slots plus the 9-slot hotbar.
+/// A menu lists them after its own slots, so they are the menu's last 36.
+pub const PLAYER_STORAGE_SLOTS: usize = 36;
+
 /// Health, food and saturation from `set_health`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Health {

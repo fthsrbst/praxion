@@ -489,15 +489,15 @@ impl Tee {
         state.queued_bytes = 0;
         let mut dropped: Vec<(u32, u64)> = Vec::new();
         for item in items {
-            if let ItemKind::Record(record) = item.kind {
-                if matches!(record.kind, Kind::Serverbound | Kind::Clientbound) {
-                    let bytes = record.data.len() as u64;
-                    if state.conns.contains_key(&record.conn_id) {
-                        *state.pending.entry(record.conn_id).or_insert(0) += bytes;
-                    }
-                    if bytes > 0 {
-                        dropped.push((record.conn_id, bytes));
-                    }
+            if let ItemKind::Record(record) = item.kind
+                && matches!(record.kind, Kind::Serverbound | Kind::Clientbound)
+            {
+                let bytes = record.data.len() as u64;
+                if state.conns.contains_key(&record.conn_id) {
+                    *state.pending.entry(record.conn_id).or_insert(0) += bytes;
+                }
+                if bytes > 0 {
+                    dropped.push((record.conn_id, bytes));
                 }
             }
         }
@@ -512,7 +512,7 @@ impl Tee {
 /// never end the process or a game connection.
 fn supervise(name: &'static str, mut body: impl FnMut() + Send + 'static) {
     let spawned = thread::Builder::new().name(name.into()).spawn(move || loop {
-        let step = catch_unwind(AssertUnwindSafe(|| body()));
+        let step = catch_unwind(AssertUnwindSafe(&mut body));
         match step {
             Ok(()) => break,
             Err(_) => {

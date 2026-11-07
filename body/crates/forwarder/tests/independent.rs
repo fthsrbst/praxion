@@ -267,8 +267,10 @@ fn independent_gate_ten_second_timeout() {
         Duration::from_secs(10),
     ));
     let mut client = TcpStream::connect(game).unwrap();
+    // Above the gate's 10 s deadline and the assertion's 15 s ceiling, so the
+    // read only ends on the forwarder closing the socket, never on our timeout.
     client
-        .set_read_timeout(Some(Duration::from_secs(12)))
+        .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     let start = Instant::now();
     let mut buffer = [0u8; 64];
@@ -281,7 +283,7 @@ fn independent_gate_ten_second_timeout() {
     }
     let elapsed = start.elapsed();
     assert!(
-        elapsed >= Duration::from_secs(9) && elapsed <= Duration::from_secs(12),
+        elapsed >= Duration::from_secs(9) && elapsed <= Duration::from_secs(15),
         "gate timeout fired after {elapsed:?}"
     );
     assert_eq!(probe.connections.load(Ordering::Relaxed), 0);

@@ -95,7 +95,9 @@ struct Mining {
 /// azalea enum lacks `ChangeDestroyDirection` and would shift abort/stop/release.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outgoing {
-    Packet(ServerboundGamePacket),
+    /// Boxed so an outgoing packet stays small; one `Box` allocation per
+    /// packet is cheaper than 312 bytes in every `Vec<Outgoing>` element.
+    Packet(Box<ServerboundGamePacket>),
     PlayerAction {
         /// The server's `ServerboundPlayerActionPacket$Action` ordinal:
         /// 0 start, 2 abort, 3 stop, 6 release-use-item.
@@ -342,13 +344,13 @@ pub fn plan(
                 abort_destroy(state, &mut packets);
             }
             if state.attack_cooldown >= body.attack_cooldown_ticks() {
-                packets.push(Outgoing::Packet(
+                packets.push(Outgoing::Packet(Box::new(
                     ServerboundAttack {
                         entity_id: azalea_core::entity_id::MinecraftEntityId(entity.id),
                     }
                     .into_variant(),
-                ));
-                packets.push(Outgoing::Packet(ServerboundPunch.into_variant()));
+                )));
+                packets.push(Outgoing::Packet(Box::new(ServerboundPunch.into_variant())));
                 report.attack_entity = Some(entity.id);
                 state.attack_cooldown = 0;
             }
@@ -402,7 +404,7 @@ pub fn plan(
                         direction: mining.direction,
                         seq,
                     });
-                    packets.push(Outgoing::Packet(ServerboundPunch.into_variant()));
+                    packets.push(Outgoing::Packet(Box::new(ServerboundPunch.into_variant())));
                     report.block_seq = Some(seq);
                     report.block_hit = Some(mining.pos);
                     report.block_face = Some(mining.direction);
@@ -412,7 +414,7 @@ pub fn plan(
                 } else {
                     // Vanilla swings every tick while it mines
                     // (`mining.rs:698`).
-                    packets.push(Outgoing::Packet(ServerboundPunch.into_variant()));
+                    packets.push(Outgoing::Packet(Box::new(ServerboundPunch.into_variant())));
                     keep_mining = true;
                 }
             }
@@ -426,7 +428,7 @@ pub fn plan(
                 direction: block.direction,
                 seq,
             });
-            packets.push(Outgoing::Packet(ServerboundPunch.into_variant()));
+            packets.push(Outgoing::Packet(Box::new(ServerboundPunch.into_variant())));
             report.block_seq = Some(seq);
             report.block_hit = Some(target);
             report.block_face = Some(block.direction);
@@ -458,14 +460,14 @@ pub fn plan(
     if use_click && !state.last_use {
         if let Some(block) = &pick.block {
             let seq = state.next_seq();
-            packets.push(Outgoing::Packet(
+            packets.push(Outgoing::Packet(Box::new(
                 ServerboundUseItemOn {
                     hand: InteractionHand::MainHand,
                     block_hit: BlockHit::from(block),
                     seq,
                 }
                 .into_variant(),
-            ));
+            )));
             report.block_seq = Some(seq);
             report.block_hit = Some(block.block_pos);
             report.block_face = Some(block.direction);
@@ -474,7 +476,7 @@ pub fn plan(
         } else {
             let seq = state.next_seq();
             let (yaw, pitch): (f32, f32) = body.look().into();
-            packets.push(Outgoing::Packet(
+            packets.push(Outgoing::Packet(Box::new(
                 ServerboundUseItem {
                     hand: InteractionHand::MainHand,
                     seq,
@@ -482,7 +484,7 @@ pub fn plan(
                     x_rot: pitch,
                 }
                 .into_variant(),
-            ));
+            )));
             state.using_item = true;
         }
     } else if !use_click && state.last_use && state.using_item {
@@ -501,9 +503,9 @@ pub fn plan(
     if let Some(slot) = frame.select_slot
         && state.last_selected_slot != Some(slot)
     {
-        packets.push(Outgoing::Packet(
+        packets.push(Outgoing::Packet(Box::new(
             ServerboundSetCarriedItem { slot: u16::from(slot) }.into_variant(),
-        ));
+        )));
         state.last_selected_slot = Some(slot);
     }
 
@@ -513,13 +515,13 @@ pub fn plan(
         report.container_id = Some(container_id);
         match frame.menu_mode {
             MenuMode::Close => {
-                packets.push(Outgoing::Packet(
+                packets.push(Outgoing::Packet(Box::new(
                     ServerboundContainerClose { container_id }.into_variant(),
-                ));
+                )));
             }
             mode => {
                 if let Some(packet) = container_click(world, action, mode, menu_state_id) {
-                    packets.push(Outgoing::Packet(packet));
+                    packets.push(Outgoing::Packet(Box::new(packet)));
                     report.menu_state_id = Some(menu_state_id);
                 }
             }
@@ -619,11 +621,13 @@ fn inventory_from(
     window: i32,
     state_id: u32,
 ) -> Option<azalea_entity::inventory::Inventory> {
-    let mut inventory = azalea_entity::inventory::Inventory::default();
-    inventory.id = window;
-    inventory.state_id = state_id;
-    inventory.selected_hotbar_slot = world.selected_hotbar_slot().unwrap_or(0) as u8;
-    inventory.carried = world.carried_item().clone();
+    let mut inventory = azalea_entity::inventory::Inventory {
+        id: window,
+        state_id,
+        selected_hotbar_slot: world.selected_hotbar_slot().unwrap_or(0) as u8,
+        carried: world.carried_item().clone(),
+        ..Default::default()
+    };
     for (index, stack) in world.inventory().iter().enumerate() {
         if let Some(slot) = inventory.inventory_menu.slot_mut(index) {
             *slot = stack.clone();

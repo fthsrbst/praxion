@@ -24,8 +24,8 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - State: A1-A4 done, A5 fixtures done (forwarder, receipts, perception, interpreter); movement style
   part 1 (`Gaze`, 15e512d) and part 2 (walking: string-pulled route, pursuit carrot, deadband
   steering, sprint; briefs `logs/simplify/c2-walk.md`, `c2b-fix.md`) done.
-- Remaining: A5 clippy and small duplicates (`normalize` x5, `PLAYER_STORAGE_SLOTS`, `section_block_pos`,
-  `POLL`/`TICK`; audit `logs/audit-1107/a2-structure.answer.txt` §5); a live harness run to see and
+- A5 clippy and small duplicates done (brief `logs/simplify/a5-clippy.md`; 8 justified `allow`s).
+- Remaining: a live harness run to see and
   measure the new movement (research §6); idle gaze and pitch noise (research §4.6); one walkthrough for
   the user.
 - Walking limits: diagonal A* steps are not string-pulled (a naive version broke the narrowing
@@ -33,9 +33,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   inside the 4.0 window before it counts.
 - Watch: the `place` registry budget (80 ticks) is tight with human aiming (GLM review, about 74-81
   ticks worst case); check for place timeouts in the first live runs.
-- Flake: `forwarder/tests/independent.rs` `independent_gate_ten_second_timeout` asserts elapsed <= 12 s
-  with a 12 s read timeout; it failed once under a full-workspace parallel test load and passed 3/3
-  alone. Widen the bound or shorten the read timeout.
 - Decision owed (user): the raw-store/perception boundary in architecture §4/§5.1 is not enforced in
   code; either enforce it or update the doc.
 - Unverified carry-over: the orphan worker `s9d2-resume` added an "explore waits while airborne before

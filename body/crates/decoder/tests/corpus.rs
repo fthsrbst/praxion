@@ -213,7 +213,7 @@ fn parse_truth(path: &Path) -> TruthFile {
     // The files are a command log, not a final snapshot: a later line for the
     // same position supersedes an earlier one (e.g. `stone` then `air (stone
     // removed)`). Keeping the last line is the spike's tolerance rule.
-    let mut expected: BTreeMap<(i32, i32, i32), (String, Vec<(String, String)>)> = BTreeMap::new();
+    let mut expected = BTreeMap::new();
     for (line_number, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {

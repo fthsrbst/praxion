@@ -105,6 +105,9 @@ impl Writer {
         self.append(tick, ts_ns, EventKind::RunStarted { versions })
     }
 
+    /// The event's fields are passed individually; grouping them would invent
+    /// a type no caller uses.
+    #[allow(clippy::too_many_arguments)]
     pub fn intent_started(
         &mut self,
         tick: u64,
@@ -128,6 +131,9 @@ impl Writer {
         )
     }
 
+    /// The event's fields are passed individually; grouping them would invent
+    /// a type no caller uses.
+    #[allow(clippy::too_many_arguments)]
     pub fn receipt_settled(
         &mut self,
         tick: u64,
@@ -174,6 +180,9 @@ impl Writer {
         self.append(tick, ts_ns, EventKind::WorldDesync { reason: reason.into() })
     }
 
+    /// The event's fields are passed individually; grouping them would invent
+    /// a type no caller uses.
+    #[allow(clippy::too_many_arguments)]
     pub fn ledger(
         &mut self,
         tick: u64,

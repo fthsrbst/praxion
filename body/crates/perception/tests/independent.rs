@@ -568,11 +568,11 @@ fn corpus_visibility_summary() {
         for y in region.min.y..=region.max.y {
             for z in region.min.z..=region.max.z {
                 let pos = BlockPos::new(x, y, z);
-                if world.block_state(pos).map(|s| block_name(s)) != Some("stone".to_string()) { continue; }
+                if world.block_state(pos).map(block_name) != Some("stone".to_string()) { continue; }
                 // check 6 neighbours stone
                 let nbrs = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)];
                 if nbrs.iter().all(|(dx,dy,dz)| {
-                    world.block_state(BlockPos::new(x+dx,y+dy,z+dz)).map(|s| block_name(s)) == Some("stone".to_string())
+                    world.block_state(BlockPos::new(x+dx,y+dy,z+dz)).map(block_name) == Some("stone".to_string())
                 }) {
                     buried_example = Some(pos);
                     break 'outer;

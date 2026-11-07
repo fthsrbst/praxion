@@ -115,8 +115,10 @@ fn discrete_action_blocks_switching_until_settled() {
     );
     let mut facts = Mock::default();
     facts.ints.insert("x".into(), 0);
-    let mut act = Mock::default();
-    act.duration = 3;
+    let mut act = Mock {
+        duration: 3,
+        ..Mock::default()
+    };
     let mut interpreter = Interpreter::new(program);
     interpreter.start_skill("s", Vec::new()).unwrap();
 
@@ -583,8 +585,10 @@ skill parent()
 fn primitive_failure_retries_on_the_next_tick() {
     let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
     let mut facts = Mock::default();
-    let mut act = Mock::default();
-    act.outcome = Some(Outcome::Failed("no_block".into()));
+    let mut act = Mock {
+        outcome: Some(Outcome::Failed("no_block".into())),
+        ..Mock::default()
+    };
     let mut interpreter = Interpreter::new(program);
     interpreter.start_skill("s", Vec::new()).unwrap();
 
@@ -608,8 +612,10 @@ fn primitive_failure_retries_on_the_next_tick() {
 fn three_consecutive_primitive_failures_fail_the_skill() {
     let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
     let mut facts = Mock::default();
-    let mut act = Mock::default();
-    act.outcome = Some(Outcome::Failed("no_block".into()));
+    let mut act = Mock {
+        outcome: Some(Outcome::Failed("no_block".into())),
+        ..Mock::default()
+    };
     let mut interpreter = Interpreter::new(program);
     interpreter.start_skill("s", Vec::new()).unwrap();
 
@@ -641,8 +647,10 @@ fn another_rule_firing_keeps_the_failure_count() {
         "skill s()\n  rules:\n    count(x) >= 1 -> wait(1)\n    true -> mine(stone)\n",
     );
     let mut facts = Mock::default();
-    let mut act = Mock::default();
-    act.outcome = Some(Outcome::Failed("no_block".into()));
+    let mut act = Mock {
+        outcome: Some(Outcome::Failed("no_block".into())),
+        ..Mock::default()
+    };
     let mut interpreter = Interpreter::new(program);
     interpreter.start_skill("s", Vec::new()).unwrap();
 
@@ -733,9 +741,11 @@ fn a_terminal_continuous_failure_counts_toward_the_rule_streak() {
     // same 1200-tick search forever.
     let program = program("skill s()\n  rules:\n    true -> explore(oak_log)\n");
     let mut facts = Mock::default();
-    let mut act = Mock::default();
-    act.continuous_outcome = Some(Outcome::Failed("not_found".into()));
-    act.duration = 1;
+    let mut act = Mock {
+        continuous_outcome: Some(Outcome::Failed("not_found".into())),
+        duration: 1,
+        ..Mock::default()
+    };
     let mut interpreter = Interpreter::new(program);
     interpreter.start_skill("s", Vec::new()).unwrap();
 
@@ -757,9 +767,11 @@ fn a_continuous_success_clears_the_streak() {
         "skill s()\n  rules:\n    count(x) >= 1 -> wait(1)\n    true -> explore(oak_log)\n",
     );
     let mut facts = Mock::default();
-    let mut act = Mock::default();
-    act.continuous_outcome = Some(Outcome::Failed("not_found".into()));
-    act.duration = 1;
+    let mut act = Mock {
+        continuous_outcome: Some(Outcome::Failed("not_found".into())),
+        duration: 1,
+        ..Mock::default()
+    };
     let mut interpreter = Interpreter::new(program);
     interpreter.start_skill("s", Vec::new()).unwrap();
     // Two failures, below the limit.

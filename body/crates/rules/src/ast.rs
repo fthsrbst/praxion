@@ -31,7 +31,7 @@ impl fmt::Display for Pos {
 
 /// A half-open source range, from the first character of a token to the last
 /// character after it.
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 pub struct Span {
     pub start: Pos,
     pub end: Pos,
@@ -56,6 +56,13 @@ impl PartialEq for Span {
 }
 
 impl Eq for Span {}
+
+/// Hashes the same fields `PartialEq` compares. Equality ignores positions, so
+/// every span must hash equally; otherwise two equal spans could hash
+/// differently and break `Hash`/`Eq` consistency.
+impl std::hash::Hash for Span {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
 
 /// The type of a skill parameter or of a fact's value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

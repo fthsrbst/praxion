@@ -526,13 +526,13 @@ fn check_call_graph(
     let mut graph: BTreeMap<String, Vec<(String, Span)>> = BTreeMap::new();
     for skill in all.values() {
         for rule in &skill.rules {
-            if let ActionKind::Do { skill: callee, .. } = &rule.action.kind {
-                if all.contains_key(callee) {
-                    graph
-                        .entry(skill.name.clone())
-                        .or_default()
-                        .push((callee.clone(), rule.action.span));
-                }
+            if let ActionKind::Do { skill: callee, .. } = &rule.action.kind
+                && all.contains_key(callee)
+            {
+                graph
+                    .entry(skill.name.clone())
+                    .or_default()
+                    .push((callee.clone(), rule.action.span));
             }
         }
     }

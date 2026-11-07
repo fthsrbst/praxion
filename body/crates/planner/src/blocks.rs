@@ -121,10 +121,10 @@ pub fn name(state: BlockState) -> &'static str {
 /// names a required tool; otherwise the small table below applies. See the
 /// module's TODO.
 pub fn tool_class(state: BlockState) -> ToolClass {
-    if let Some(tool) = required_tool(state) {
-        if let Some((_, class)) = split_tool(tool) {
-            return class;
-        }
+    if let Some(tool) = required_tool(state)
+        && let Some((_, class)) = split_tool(tool)
+    {
+        return class;
     }
     match BlockKind::from(state) {
         BlockKind::Stone

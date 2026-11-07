@@ -326,7 +326,7 @@ fn report(name: &str, replay: &Replay) {
     }
 
     // One note per unconfirmed action, from the log the engine wrote.
-    let log = read(replay.writer.path().to_path_buf()).unwrap();
+    let log = read(replay.writer.path()).unwrap();
     let mut notes = BTreeMap::new();
     for event in &log.events {
         if let EventKind::ReceiptSettled {
@@ -693,7 +693,7 @@ fn synthetic_capture_replays_dig_and_place_as_confirmed() {
             action.pos
         );
     }
-    let log = read(replay.writer.path().to_path_buf()).unwrap();
+    let log = read(replay.writer.path()).unwrap();
     assert!(log.events.iter().any(|event| matches!(
         &event.event,
         EventKind::ReceiptSettled {

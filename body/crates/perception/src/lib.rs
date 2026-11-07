@@ -1017,11 +1017,11 @@ impl Perception {
         if let Some(visible) = self.entity_cache.cached(world, key, None, revision) {
             return if visible { Ok(()) } else { Err(Reason::OutOfSight) };
         }
-        if !self.entity_checked.contains(&entity.id()) {
-            if self.entity_checked.len() as u32 >= self.config.entity_cap {
-                self.entity_overflow = self.entity_overflow.saturating_add(1);
-                return Err(Reason::Budget);
-            }
+        if !self.entity_checked.contains(&entity.id())
+            && self.entity_checked.len() as u32 >= self.config.entity_cap
+        {
+            self.entity_overflow = self.entity_overflow.saturating_add(1);
+            return Err(Reason::Budget);
         }
         if self.remaining_rays(caller) == 0 {
             return Err(Reason::Budget);

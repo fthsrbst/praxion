@@ -53,6 +53,11 @@ pub struct Desync {
 }
 
 /// What one tee record produced.
+///
+/// A decoded packet is far larger than the connection events; boxing it would
+/// change every `Event::Decoded` construction and pattern in the workspace for
+/// one pointer-sized saving per event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Event {
     Opened { ts_ns: u64, conn_id: u32 },
@@ -275,7 +280,7 @@ impl Decoder {
             let direction = connection.direction_mut(dir);
             direction.framer.push(&record.data);
             loop {
-                match direction.framer.next() {
+                match direction.framer.pop_frame() {
                     Ok(Some(frame)) => frames.push(frame),
                     Ok(None) => break,
                     Err(e) => {
@@ -310,10 +315,7 @@ impl Decoder {
     /// of them when `flush` is set.
     fn drain_ready(&mut self, conn_id: u32, flush: bool) -> Vec<Event> {
         let mut events = Vec::new();
-        loop {
-            let Some(connection) = self.connections.get(&conn_id) else {
-                break;
-            };
+        while let Some(connection) = self.connections.get(&conn_id) {
             if connection.pending.is_empty() {
                 break;
             }

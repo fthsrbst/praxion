@@ -234,12 +234,8 @@ fn item_matches(stack: &ItemStack, wanted: &str) -> bool {
     if let Some(tag) = wanted.strip_prefix('#') {
         praxion_gamedata::item_in_tag(name, tag)
     } else {
-        normalize(name) == normalize(wanted)
+        praxion_gamedata::normalize(name) == praxion_gamedata::normalize(wanted)
     }
-}
-
-fn normalize(name: &str) -> &str {
-    name.strip_prefix("minecraft:").unwrap_or(name)
 }
 
 fn saturating_i64(value: u64) -> i64 {

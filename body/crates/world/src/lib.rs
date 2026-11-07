@@ -40,15 +40,18 @@ pub use azalea_registry::builtin::{EntityKind, MenuKind};
 pub use block::BlockDescription;
 pub use dimension::{Dimension, DimensionSource};
 pub use entity::Entity;
-pub use player::{ChangedSlot, ContainerClick, Experience, Health, OpenContainer};
+pub use player::{
+    ChangedSlot, ContainerClick, Experience, Health, OpenContainer, PLAYER_STORAGE_SLOTS,
+};
 pub use section::SectionView;
 pub use sound::{MAX_SOUNDS, Sound};
 
 use player::{Player, set_slot};
 
 /// Whether the followed world can still be trusted.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum Status {
+    #[default]
     Valid,
     Invalid { reason: String },
 }
@@ -64,12 +67,6 @@ impl Status {
             Status::Valid => None,
             Status::Invalid { reason } => Some(reason),
         }
-    }
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Status::Valid
     }
 }
 
@@ -539,7 +536,9 @@ impl World {
                 let mut out_of_bounds = 0u64;
                 let mut changed = false;
                 for update in &packet.states {
-                    let Some(pos) = section_block_pos(section, update.pos, min_y, height) else {
+                    let Some(pos) =
+                        section_block_pos_in_world(section, update.pos, min_y, height)
+                    else {
                         out_of_bounds += 1;
                         continue;
                     };
@@ -618,10 +617,10 @@ impl World {
                 if packet.container_id == 0 {
                     self.player
                         .set_content(packet.items.clone(), packet.carried_item.clone());
-                } else if let Some(container) = &mut self.open_container {
-                    if container.id() == packet.container_id {
-                        container.set_content(packet.items.clone());
-                    }
+                } else if let Some(container) = &mut self.open_container
+                    && container.id() == packet.container_id
+                {
+                    container.set_content(packet.items.clone());
                 }
             }
             ClientboundGamePacket::ContainerSetSlot(packet) => {
@@ -637,10 +636,10 @@ impl World {
                             ),
                         );
                     }
-                } else if let Some(container) = &mut self.open_container {
-                    if container.id() == packet.container_id {
-                        set_slot(container.slots_mut(), packet.slot, packet.item_stack.clone());
-                    }
+                } else if let Some(container) = &mut self.open_container
+                    && container.id() == packet.container_id
+                {
+                    set_slot(container.slots_mut(), packet.slot, packet.item_stack.clone());
                 }
             }
             ClientboundGamePacket::SetPlayerInventory(packet) => {
@@ -968,22 +967,34 @@ fn y_in_world(min_y: i32, height: u32, y: i32) -> bool {
 
 /// World position of a block inside a section update.
 ///
-/// `None` when a coordinate overflows `i32` or when the block is outside the
-/// world height. `section.x * 16` is what overflows: a section x of
-/// `i32::MAX / 8` is already past the limit, which the tests use.
-fn section_block_pos(
+/// `None` when a section coordinate times 16 overflows `i32`. Callers that
+/// know the world height must also check it; see the crate's section update
+/// handling.
+pub fn section_block_pos(
+    section: ChunkSectionPos,
+    pos: ChunkSectionBlockPos,
+) -> Option<BlockPos> {
+    let x = section.x.checked_mul(16)?.checked_add(i32::from(pos.x))?;
+    let y = section.y.checked_mul(16)?.checked_add(i32::from(pos.y))?;
+    let z = section.z.checked_mul(16)?.checked_add(i32::from(pos.z))?;
+    Some(BlockPos::new(x, y, z))
+}
+
+/// [`section_block_pos`] plus the world-height check. `None` when a coordinate
+/// overflows `i32` or the block is outside the world height. `section.x * 16`
+/// is what overflows: a section x of `i32::MAX / 8` is already past the limit,
+/// which the tests use.
+fn section_block_pos_in_world(
     section: ChunkSectionPos,
     pos: ChunkSectionBlockPos,
     min_y: i32,
     height: u32,
 ) -> Option<BlockPos> {
-    let x = section.x.checked_mul(16)?.checked_add(i32::from(pos.x))?;
-    let y = section.y.checked_mul(16)?.checked_add(i32::from(pos.y))?;
-    let z = section.z.checked_mul(16)?.checked_add(i32::from(pos.z))?;
-    if !y_in_world(min_y, height, y) {
+    let pos = section_block_pos(section, pos)?;
+    if !y_in_world(min_y, height, pos.y) {
         return None;
     }
-    Some(BlockPos::new(x, y, z))
+    Some(pos)
 }
 
 fn apply_change<T: std::ops::Add<Output = T>>(base: T, relative: bool, change: T) -> T {

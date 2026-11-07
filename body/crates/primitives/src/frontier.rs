@@ -120,11 +120,17 @@ pub fn rank_frontiers(
     )
 }
 
+/// Ranking key: the candidate's tier flags, then its distance and position.
+type RankKey = (bool, bool, bool, bool, i64, i64, i32, i32, i32);
+
 /// Like [`rank_frontiers`], but orders by distance from `origin` (the first
 /// cell this run explored) so a call walks outward instead of circling the
 /// nearest ring of the known map. Seed 202's spawn is plains and the nearest
 /// forest is 160 blocks away; nearest-first walked a ring at the sight radius
 /// for 4,000 ticks and never reached it.
+// The frontier query parameters are the caller's configuration; grouping them
+// would add a one-use type.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rank_frontiers_from(
     origin: BlockPos,
     start: BlockPos,
@@ -147,6 +153,8 @@ pub(crate) fn rank_frontiers_from(
     )
 }
 
+// The inner form differs only by the optional origin; the rest is the query.
+#[allow(clippy::too_many_arguments)]
 fn rank_frontiers_inner(
     origin: Option<BlockPos>,
     start: BlockPos,
@@ -198,10 +206,7 @@ fn rank_frontiers_inner(
 
     let explored_set: HashSet<BlockPos> = explored.iter().copied().collect();
     let rejected_set: HashSet<BlockPos> = rejected.iter().copied().collect();
-    let mut ranked: Vec<(
-        (bool, bool, bool, bool, i64, i64, i32, i32, i32),
-        FrontierChoice,
-    )> = Vec::new();
+    let mut ranked: Vec<(RankKey, FrontierChoice)> = Vec::new();
     let mut candidates = 0u32;
     for pos in &reachable {
         let pos = *pos;

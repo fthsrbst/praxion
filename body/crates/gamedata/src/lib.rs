@@ -122,10 +122,8 @@ impl Recipe {
         };
         match &self.shape {
             Shape::Shaped { grid, .. } => {
-                for cell in *grid {
-                    if let Some(ingredient) = cell {
-                        add(ingredient);
-                    }
+                for ingredient in grid.iter().flatten() {
+                    add(ingredient);
                 }
             }
             Shape::Shapeless { ingredients } => {
@@ -213,7 +211,7 @@ pub fn recipes_for_tag(name: &str) -> impl Iterator<Item = &'static Recipe> {
     let values = item_tag(name).unwrap_or(&[]);
     RECIPES
         .iter()
-        .filter(move |recipe| values.iter().any(|value| *value == recipe.output))
+        .filter(move |recipe| values.contains(&recipe.output))
 }
 
 /// Whether mining `block` needs a pickaxe. This is block data, not a loot-table
@@ -226,10 +224,15 @@ pub fn needs_pickaxe(block: &str) -> bool {
     )
 }
 
+/// Strips an optional `minecraft:` namespace.
+pub fn normalize(name: &str) -> &str {
+    name.strip_prefix("minecraft:").unwrap_or(name)
+}
+
 /// Strips an optional `minecraft:` namespace and a leading `#`.
 pub fn normalize_tag(name: &str) -> String {
     let name = name.strip_prefix('#').unwrap_or(name);
-    name.strip_prefix("minecraft:").unwrap_or(name).to_string()
+    normalize(name).to_string()
 }
 
 #[cfg(test)]

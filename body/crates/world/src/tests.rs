@@ -261,10 +261,10 @@ fn invalid_world_answers_none() {
 
 fn find_block(name: &str) -> BlockState {
     for id in 0..4096u32 {
-        if let Ok(state) = BlockState::try_from(id) {
-            if BlockDescription::of(state).name() == name {
-                return state;
-            }
+        if let Ok(state) = BlockState::try_from(id)
+            && BlockDescription::of(state).name() == name
+        {
+            return state;
         }
     }
     panic!("block {name} not found");

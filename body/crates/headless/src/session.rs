@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -275,10 +275,7 @@ impl Session {
 
     /// Wait at most `timeout` for the next event. `None` means nothing arrived.
     pub fn recv_event_timeout(&self, timeout: Duration) -> Option<Event> {
-        match self.events.recv_timeout(timeout) {
-            Ok(event) => Some(event),
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
-        }
+        self.events.recv_timeout(timeout).ok()
     }
 
     /// Whether the session thread is still running.

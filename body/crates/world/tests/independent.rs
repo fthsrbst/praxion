@@ -106,10 +106,10 @@ fn block_query_out_of_height_unloaded_forget_none() {
 
 fn find_block(name: &str) -> BlockState {
     for id in 0..4096u32 {
-        if let Ok(state) = BlockState::try_from(id) {
-            if praxion_world::BlockDescription::of(state).name() == name {
-                return state;
-            }
+        if let Ok(state) = BlockState::try_from(id)
+            && praxion_world::BlockDescription::of(state).name() == name
+        {
+            return state;
         }
     }
     panic!("block {name} not found");

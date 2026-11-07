@@ -180,7 +180,7 @@ impl Craft {
             // doom the whole craft after the single attempt. The click only
             // goes out when the crosshair is on the table, as in `place`; a
             // plant in the way is broken first.
-            if aligned && (self.wait <= 1 || self.wait % 10 == 0) {
+            if aligned && (self.wait <= 1 || self.wait.is_multiple_of(10)) {
                 let pick = praxion_headless::pick(ctx.world, ctx.body);
                 match pick.block.filter(|hit| !hit.miss) {
                     Some(hit) if hit.block_pos == table => {
@@ -214,12 +214,17 @@ impl Craft {
                 }
                 return (frame, None, None);
             }
-            let Some((window, slots, grid, grid_width, player)) = menu_view(ctx.world) else {
+            let Some(view) = menu_view(ctx.world) else {
                 return (frame, None, Some(Outcome::Failed("no_menu".into())));
             };
-            let Some(clicks) =
-                build_craft_clicks(recipe, &slots, window, &grid, grid_width, &player)
-            else {
+            let Some(clicks) = build_craft_clicks(
+                recipe,
+                &view.slots,
+                view.window,
+                &view.grid,
+                view.grid_width,
+                &view.player,
+            ) else {
                 return (
                     frame,
                     None,
@@ -233,7 +238,7 @@ impl Craft {
         match self.stage {
             CraftStage::Open => (frame, None, None),
             CraftStage::Clicks => {
-                if self.wait % 2 == 0 {
+                if self.wait.is_multiple_of(2) {
                     if let Some(click) = self.clicks.pop_front() {
                         frame.menu = Some(click);
                         frame.menu_mode = MenuMode::Click;
@@ -326,7 +331,15 @@ fn menu_slot(world: &World, slot: usize) -> Option<ItemStack> {
 
 /// The open menu's slots, its grid slot indexes, the grid width and the player
 /// slot range.
-fn menu_view(world: &World) -> Option<(u32, Vec<ItemStack>, Vec<usize>, usize, Vec<usize>)> {
+struct MenuView {
+    window: u32,
+    slots: Vec<ItemStack>,
+    grid: Vec<usize>,
+    grid_width: usize,
+    player: Vec<usize>,
+}
+
+fn menu_view(world: &World) -> Option<MenuView> {
     if let Some(container) = world.open_container() {
         let (grid, width) = match container.kind() {
             azalea_registry::builtin::MenuKind::Crafting => ((1..=9).collect(), 3),
@@ -334,10 +347,22 @@ fn menu_view(world: &World) -> Option<(u32, Vec<ItemStack>, Vec<usize>, usize, V
         };
         let slots = container.slots().to_vec();
         let player: Vec<usize> = (10..slots.len().max(10)).collect();
-        Some((container.id().max(0) as u32, slots, grid, width, player))
+        Some(MenuView {
+            window: container.id().max(0) as u32,
+            slots,
+            grid,
+            grid_width: width,
+            player,
+        })
     } else {
         let slots = world.inventory().to_vec();
-        Some((0, slots, (1..=4).collect(), 2, (9..=44).collect()))
+        Some(MenuView {
+            window: 0,
+            slots,
+            grid: (1..=4).collect(),
+            grid_width: 2,
+            player: (9..=44).collect(),
+        })
     }
 }
 
@@ -355,10 +380,10 @@ fn recipe_cells(
         } => {
             for row in 0..usize::from(*height) {
                 for col in 0..usize::from(*width) {
-                    if let Some(ingredient) = pattern[row * usize::from(*width) + col] {
-                        if let Some(slot) = grid.get(row * grid_width + col) {
-                            cells.push((*slot, ingredient));
-                        }
+                    if let Some(ingredient) = pattern[row * usize::from(*width) + col]
+                        && let Some(slot) = grid.get(row * grid_width + col)
+                    {
+                        cells.push((*slot, ingredient));
                     }
                 }
             }

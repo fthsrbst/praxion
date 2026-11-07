@@ -15,7 +15,6 @@
 //! `client_tick_end`: movement is refused rather than guessed.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::{ChunkPos, Vec3};
@@ -46,9 +45,7 @@ use crate::physics::Body;
 use crate::script::{Runner, Script};
 use crate::session::SessionStats;
 use crate::worldfeed::WorldFeed;
-
-/// One client tick: 20 per second, as vanilla runs it.
-pub(crate) const TICK: Duration = Duration::from_millis(50);
+use crate::TICK;
 
 /// What the owner can tell the session, and where it goes.
 pub(crate) struct Context<'a> {
@@ -274,7 +271,7 @@ impl PlayState {
         };
         for packet in packets {
             match packet {
-                Outgoing::Packet(packet) => login::send(writer, packet, trace).await?,
+                Outgoing::Packet(packet) => login::send(writer, *packet, trace).await?,
                 Outgoing::PlayerAction {
                     action,
                     pos,
@@ -408,7 +405,8 @@ fn world_ready(world: &praxion_world::World, position: Vec3) -> bool {
 /// End of one stretch of play.
 enum Outcome {
     /// The server moved us back to configuration; the connection is in hand.
-    Reconfigure(GameConn),
+    /// Boxed because `GameConn` dwarfs the other variant.
+    Reconfigure(Box<GameConn>),
     /// The session is over.
     Closed(Error),
 }
@@ -512,7 +510,7 @@ async fn play_until(
 
         match flow {
             Flow::Continue => {}
-            Flow::Reconfigure => return Outcome::Reconfigure(conn),
+            Flow::Reconfigure => return Outcome::Reconfigure(Box::new(conn)),
             Flow::Closed(error) => return Outcome::Closed(error),
         }
     }

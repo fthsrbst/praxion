@@ -651,11 +651,11 @@ impl BodyDriver {
     }
 
     fn note_world(&mut self, world: &World, tick: u64, ts_ns: u64) {
-        if let Some(reason) = world.status().reason() {
-            if !self.desync_logged {
-                self.desync_logged = true;
-                let _ = self.log.world_desync(tick, ts_ns, reason);
-            }
+        if let Some(reason) = world.status().reason()
+            && !self.desync_logged
+        {
+            self.desync_logged = true;
+            let _ = self.log.world_desync(tick, ts_ns, reason);
         }
         let warnings: BTreeMap<String, u64> = world
             .warning_counts()
