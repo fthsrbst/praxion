@@ -398,35 +398,23 @@ impl Explore {
             // The target is in sight but not yet in reach: walk to it.
             if let Some((cell, _)) = target
                 && !self.rejected.contains(&cell)
+                && self.approach(ctx, start, cell)
             {
-                let plan = self.plan_to(
-                    ctx,
-                    start,
-                    Goal::Near {
-                        pos: cell,
-                        radius: TARGET_APPROACH_RADIUS,
-                    },
-                );
-                match plan.status {
-                    praxion_planner::PlanStatus::Success
-                        if self.allow_water || !plan_crosses_water(&plan) =>
-                    {
-                        self.path_ticks = plan.cost.ceil().max(0.) as u64;
-                        log::debug!(
-                            "explore approach target={:?} cell={:?} cost={} steps={}",
-                            self.target,
-                            cell,
-                            plan.cost,
-                            plan.steps.len()
-                        );
-                        self.goal = Some(cell);
-                        self.follower = Some(self.follow(ctx, plan.steps));
-                        self.idle_ticks = 0;
-                        return (frame, None, None);
-                    }
-                    _ => {
-                        remember(&mut self.rejected, cell);
-                    }
+                return (frame, None, None);
+            } else if target.is_none() {
+                // No log is known, but a log grows in a leaf canopy: walk to
+                // the nearest known leaves instead of a frontier, so the
+                // search does not leave a tree that is already in view.
+                let cue = cue_goal(&self.target, |tag, radius| {
+                    let mut exclude = self.rejected.clone();
+                    exclude.extend(self.explored.iter().copied());
+                    nearest_known_block(ctx.perception, ctx.world, tag, radius, &exclude)
+                        .map(|(cell, _)| cell)
+                });
+                if let Some(cell) = cue
+                    && self.approach(ctx, start, cell)
+                {
+                    return (frame, None, None);
                 }
             }
         }
@@ -610,6 +598,38 @@ impl Explore {
             .with_max_ticks_per_step(EXPLORE_STEP_TICKS)
     }
 
+    /// Plan to `cell` and start the follower. A failed plan rejects the cell
+    /// for the next search. Returns whether a walk started.
+    fn approach(&mut self, ctx: &mut Ctx<'_>, start: BlockPos, cell: BlockPos) -> bool {
+        let plan = self.plan_to(
+            ctx,
+            start,
+            Goal::Near {
+                pos: cell,
+                radius: TARGET_APPROACH_RADIUS,
+            },
+        );
+        if plan.status == praxion_planner::PlanStatus::Success
+            && (self.allow_water || !plan_crosses_water(&plan))
+        {
+            self.path_ticks = plan.cost.ceil().max(0.) as u64;
+            log::debug!(
+                "explore approach target={:?} cell={:?} cost={} steps={}",
+                self.target,
+                cell,
+                plan.cost,
+                plan.steps.len()
+            );
+            self.goal = Some(cell);
+            self.follower = Some(self.follow(ctx, plan.steps));
+            self.idle_ticks = 0;
+            true
+        } else {
+            remember(&mut self.rejected, cell);
+            false
+        }
+    }
+
     fn plan_to(&self, ctx: &mut Ctx<'_>, start: BlockPos, goal: Goal) -> praxion_planner::Plan {
         let state = self.planning_state(ctx.world);
         let mut source = PerceptionBlocks {
@@ -618,6 +638,27 @@ impl Explore {
         };
         self.planner.plan(&mut source, &state, start, goal)
     }
+}
+
+/// The tag whose known cells point toward `target` when `target` itself is not
+/// known. Logs grow in leaf canopies, so a log search that sees no log can
+/// still walk to a canopy and look under it. This is the only cue; it is not a
+/// general mapping.
+fn cue_for(target: &str) -> Option<&'static str> {
+    let tag = target.strip_prefix('#')?;
+    // `#logs` is the general tag; a wood type names its own (`#oak_logs`).
+    let is_log = tag == "logs" || tag.ends_with("_log") || tag.ends_with("_logs");
+    is_log.then_some("#leaves")
+}
+
+/// The cell a cued search walks to, if the cue tag is known within the search
+/// radius. `nearest` is the perception lookup; it receives the cue tag and the
+/// radius so this decision stays independent of the ray-free map scan.
+fn cue_goal(
+    target: &str,
+    mut nearest: impl FnMut(&str, u32) -> Option<BlockPos>,
+) -> Option<BlockPos> {
+    nearest(cue_for(target)?, EXPLORE_SEARCH_RADIUS)
 }
 
 /// Whether a walking plan enters water. `explore` for wood stays on land: a
@@ -666,6 +707,30 @@ mod tests {
         remember(&mut cells, first);
         assert_eq!(cells.len(), before);
     }
+    #[test]
+    fn a_log_search_with_only_leaves_known_walks_to_the_leaves() {
+        // Only leaves are known, at 50 blocks; no log is known. The cue must
+        // ask for leaves within the search radius and return that cell as the
+        // goal, before the frontier scan gets a chance.
+        let leaves = at(0, 65, 50);
+        let mut asked = None;
+        let goal = cue_goal("#logs", |tag, radius| {
+            asked = Some((tag.to_owned(), radius));
+            (tag == "#leaves" && radius == EXPLORE_SEARCH_RADIUS).then_some(leaves)
+        });
+        assert_eq!(asked, Some(("#leaves".to_owned(), 64)));
+        assert_eq!(
+            goal,
+            Some(leaves),
+            "the leaves cell is the goal, not a frontier"
+        );
+        assert_eq!(cue_for("#oak_log"), Some("#leaves"));
+        assert_eq!(cue_for("#oak_logs"), Some("#leaves"));
+        assert_eq!(cue_for("#stone"), None);
+        assert_eq!(cue_for("oak_log"), None, "a block name is not a tag");
+        assert_eq!(cue_goal("#logs", |_, _| None), None);
+    }
+
     #[test]
     fn consecutive_explore_calls_rotate() {
         let mut memory = ExploreMemory::default();

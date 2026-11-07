@@ -30,10 +30,12 @@ pub const EXPLORE_MAX_TICKS: u32 = 1200;
 pub const EXPLORE_NEAR_RADIUS: u32 = 5;
 
 /// How far `explore` looks for its target in the perception known map before
-/// it falls back to walking to a frontier. Forty blocks reaches trees a
-/// mountain peak can see below, while an 80-block frontier box still finds the
-/// unknown edge. The scan is shell-ordered, so a near target stays cheap.
-pub const EXPLORE_SEARCH_RADIUS: u32 = 40;
+/// it falls back to walking to a frontier. This is the sight range: the view
+/// scan can record a tree out to 64 blocks, so a search shorter than that
+/// would walk away from a tree already in plain sight. The 80-block frontier
+/// box still reaches past the known ring. The scan is shell-ordered, so a near
+/// target stays cheap.
+pub const EXPLORE_SEARCH_RADIUS: u32 = 64;
 
 /// The signature of one fact.
 #[derive(Clone, Debug, PartialEq, Eq)]

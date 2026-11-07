@@ -23,6 +23,7 @@ mod ledger;
 mod see_through;
 mod sight;
 mod sweep;
+mod view;
 
 #[cfg(test)]
 mod tests;
@@ -40,7 +41,7 @@ pub use config::{
     Config, DEFAULT_ENTITY_CAP, DEFAULT_EYE_HEIGHT, DEFAULT_HEARING_RADIUS, DEFAULT_KNOWN_RADIUS,
     DEFAULT_MAX_LIST_RESULTS, DEFAULT_MAX_REGION_BLOCKS, DEFAULT_MEMORY_CAPACITY, DEFAULT_RANGE,
     DEFAULT_RAY_BUDGET, DEFAULT_REFLEX_RESERVE, DEFAULT_SNEAK_EYE_HEIGHT, DEFAULT_SWEEP_RADIUS,
-    DEFAULT_SWEEP_RETRY_TICKS, DEFAULT_SWEEP_STALE_TICKS,
+    DEFAULT_SWEEP_RETRY_TICKS, DEFAULT_SWEEP_STALE_TICKS, DEFAULT_VIEW_SCAN_PERIOD,
 };
 pub use known::Remembered;
 pub use ledger::{FactKind, Ledger, LedgerEntry, QueryKind};
@@ -166,6 +167,8 @@ pub struct Perception {
     block_cache: VisibilityCache<BlockCacheKey>,
     entity_cache: VisibilityCache<EntityCacheKey>,
     last_eye_cell: Option<BlockPos>,
+    /// Which half of the view fan the next scan casts.
+    view_scan_phase: bool,
     known: known::KnownMap,
     ledger: Ledger,
 }
@@ -193,6 +196,7 @@ impl Perception {
             block_cache: VisibilityCache::new(),
             entity_cache: VisibilityCache::new(),
             last_eye_cell: None,
+            view_scan_phase: false,
             ledger: Ledger::default(),
         }
     }
@@ -349,8 +353,8 @@ impl Perception {
     ///
     /// This is the one query behind both `near(block, r)` and `explore`: they
     /// must agree, or a skill would think nothing is near while `explore`
-    /// returns instantly, or the reverse. It spends no rays, so its cost is a
-    /// bounded cube scan, and `exclude` lets a caller skip cells a failed plan
+    /// returns instantly, or the reverse. It spends no rays; it walks the
+    /// remembered sections nearest first (`KnownMap::nearest_seen`), and `exclude` lets a caller skip cells a failed plan
     /// already rejected.
     pub fn nearest_known(
         &self,
@@ -360,44 +364,12 @@ impl Perception {
         mut accept: impl FnMut(BlockState) -> bool,
     ) -> Option<(BlockPos, f64)> {
         let eye = self.eye(world)?;
-        let eye_cell = eye.to_block_pos_floor();
-        let r = i32::try_from(radius).unwrap_or(i32::MAX);
-        let r2 = i64::from(r) * i64::from(r);
-        // Visit Chebyshev shells from the eye outwards and return the first
-        // match. A tree at eight blocks costs 17^3 cells, not the whole 65^3
-        // cube; only a genuinely empty radius pays the full scan.
-        for shell in 0..=r {
-            for dy in -shell..=shell {
-                for dz in -shell..=shell {
-                    for dx in -shell..=shell {
-                        if dx.abs().max(dy.abs()).max(dz.abs()) != shell {
-                            continue;
-                        }
-                        let distance_sq = i64::from(dx) * i64::from(dx)
-                            + i64::from(dy) * i64::from(dy)
-                            + i64::from(dz) * i64::from(dz);
-                        if distance_sq > r2 {
-                            continue;
-                        }
-                        let pos = BlockPos::new(
-                            eye_cell.x.saturating_add(dx),
-                            eye_cell.y.saturating_add(dy),
-                            eye_cell.z.saturating_add(dz),
-                        );
-                        if exclude(pos) {
-                            continue;
-                        }
-                        let Some(remembered) = self.known.get(pos) else {
-                            continue;
-                        };
-                        if accept(remembered.state) {
-                            return Some((pos, eye.distance_to(pos.center())));
-                        }
-                    }
-                }
-            }
-        }
-        None
+        let pos = self
+            .known
+            .nearest_seen(eye.to_block_pos_floor(), radius, |pos, state| {
+                !exclude(pos) && accept(state)
+            })?;
+        Some((pos, eye.distance_to(pos.center())))
     }
 
     /// The world's eye position: player position plus the current eye height.
