@@ -20,6 +20,16 @@ pub const WALK_TOLERANCE_DEG: f32 = 4.0;
 
 /// Ticks per second of the body.
 const TICKS_PER_SECOND: f32 = 20.0;
+/// The time constant of the walking drift, in seconds.
+const DRIFT_TAU: f32 = 2.5;
+/// The walking drift's noise scale, in degrees.
+const DRIFT_SIGMA: f32 = 2.0;
+/// The largest walking drift offset, in degrees.
+const DRIFT_MAX_DEG: f32 = 6.0;
+/// The drift's integration step, in seconds (one tick).
+const DRIFT_DT: f32 = 0.05;
+/// The factor the drift offsets decay by outside `Walking`.
+const DRIFT_DECAY: f32 = 0.9;
 /// A gesture's travel may miss by up to 6 % (half of this).
 const LANDING_BIAS: f32 = 0.12;
 /// A request that moves by more than this restarts the running gesture.
@@ -46,11 +56,15 @@ pub struct Personality {
     pub sprints: bool,
     /// Ticks after forward starts before sprint may begin.
     pub sprint_delay_ticks: u32,
+    /// The walking pitch, in degrees down (Minecraft's positive pitch).
+    pub walk_pitch: f32,
+    /// The seed of the follower's glance noise (research §4.6).
+    pub seed: u64,
 }
 
 impl Personality {
     fn draw(rng: &mut StdRng) -> Self {
-        Self {
+        let mut personality = Self {
             turn_time: rng.gen_range(0.8..1.2),
             step_deg: STEP,
             look_ahead: rng.gen_range(1.8..3.0),
@@ -61,20 +75,31 @@ impl Personality {
             } else {
                 (20.0_f32 * rng.gen_range(0.1_f32..0.8)).round() as u32
             },
-        }
+            walk_pitch: 0.0,
+            seed: 0,
+        };
+        // Drawn after the older traits so their values never change (§4.6).
+        let gauss: f32 = Normal::new(0.0, 1.0)
+            .expect("the unit normal is a valid distribution")
+            .sample(rng);
+        personality.walk_pitch = (6.0 + 5.0 * gauss).clamp(-5.0, 16.0);
+        personality.seed = rng.r#gen();
+        personality
     }
 
     /// One compact line for the event log.
     pub fn describe(&self) -> String {
         format!(
             "gaze turn_time={:.3} step={:.2} look_ahead={:.2} deadband={:.1} \
-             sprints={} sprint_delay={}",
+             sprints={} sprint_delay={} walk_pitch={:.1} seed={}",
             self.turn_time,
             self.step_deg,
             self.look_ahead,
             self.deadband_deg,
             self.sprints,
-            self.sprint_delay_ticks
+            self.sprint_delay_ticks,
+            self.walk_pitch,
+            self.seed
         )
     }
 }
@@ -89,6 +114,8 @@ impl Default for Personality {
             deadband_deg: 8.0,
             sprints: true,
             sprint_delay_ticks: 0,
+            walk_pitch: 8.0,
+            seed: 0,
         }
     }
 }
@@ -214,12 +241,24 @@ pub enum Cue {
     Urgent,
 }
 
+/// What the body is doing, from the driver's frame: a walking gaze drifts and
+/// glances, an idle one looks around, and a still one (a menu) does neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GazeMode {
+    Walking,
+    Idle,
+    Still,
+}
+
 /// The body's one camera controller.
 pub struct Gaze {
     personality: Personality,
     rng: StdRng,
     emitted_yaw: f32,
     emitted_pitch: f32,
+    /// The drift-free camera on the rotation grid, for gesture decisions.
+    base_yaw: f32,
+    base_pitch: f32,
     ideal_yaw: f32,
     ideal_pitch: f32,
     velocity_yaw: f32,
@@ -229,12 +268,19 @@ pub struct Gaze {
     target_pitch: f32,
     /// The last request seen, unwrapped near the current yaw.
     last_request: Option<(f32, f32)>,
+    /// The last requested yaw and pitch, for the idle gaze's anchor.
+    anchor: Option<(f32, f32)>,
     /// Consecutive ticks with no request.
     none_ticks: u64,
     /// Do not start a gesture before this tick.
     delay_until: u64,
     /// A correction waits until this tick, after a gesture that landed off.
     correction_at: Option<u64>,
+    /// The walking drift offsets, in degrees (research §4.6).
+    drift_yaw: f32,
+    drift_pitch: f32,
+    /// The next idle-gaze gesture, after the no-request pause.
+    idle_next: Option<u64>,
     initialized: bool,
 }
 
@@ -247,6 +293,8 @@ impl Gaze {
             rng,
             emitted_yaw: 0.0,
             emitted_pitch: 0.0,
+            base_yaw: 0.0,
+            base_pitch: 0.0,
             ideal_yaw: 0.0,
             ideal_pitch: 0.0,
             velocity_yaw: 0.0,
@@ -255,9 +303,13 @@ impl Gaze {
             target_yaw: 0.0,
             target_pitch: 0.0,
             last_request: None,
+            anchor: None,
             none_ticks: 0,
             delay_until: 0,
             correction_at: None,
+            drift_yaw: 0.0,
+            drift_pitch: 0.0,
+            idle_next: None,
             initialized: false,
         }
     }
@@ -273,9 +325,12 @@ impl Gaze {
         body_look: LookDirection,
         cue: Cue,
         tick: u64,
+        mode: GazeMode,
     ) -> Look {
         self.resync(body_look);
         self.absorb(request, cue, tick);
+        self.update_drift(mode);
+        self.maybe_idle(tick, mode, request);
         self.maybe_start(tick);
 
         let mut ended = false;
@@ -297,14 +352,88 @@ impl Gaze {
             }
         }
 
-        if self.gesture.is_none() && !ended {
+        if self.gesture.is_none()
+            && !ended
+            && self.drift_yaw == 0.0
+            && self.drift_pitch == 0.0
+        {
             return Look::None;
         }
-        let look = self.quantise();
+        let look = self.quantise(self.gesture.is_some() || ended);
         if ended {
             self.schedule_correction(tick);
         }
         look
+    }
+
+    /// One unit Gaussian from the gaze's own stream.
+    fn gauss(&mut self) -> f32 {
+        Normal::new(0.0, 1.0)
+            .expect("the unit normal is a valid distribution")
+            .sample(&mut self.rng)
+    }
+
+    /// Walk one tick of the Ornstein-Uhlenbeck drift (research §4.6). The
+    /// offsets are output only: they never move the request or the gesture.
+    fn update_drift(&mut self, mode: GazeMode) {
+        if mode == GazeMode::Walking {
+            let (noise_yaw, noise_pitch) = (self.gauss(), self.gauss());
+            let decay = 1.0 - DRIFT_DT / DRIFT_TAU;
+            let kick = DRIFT_SIGMA * DRIFT_DT.sqrt();
+            self.drift_yaw =
+                (self.drift_yaw * decay + kick * noise_yaw).clamp(-DRIFT_MAX_DEG, DRIFT_MAX_DEG);
+            self.drift_pitch = (self.drift_pitch * decay + kick * noise_pitch)
+                .clamp(-DRIFT_MAX_DEG, DRIFT_MAX_DEG);
+        } else {
+            self.drift_yaw *= DRIFT_DECAY;
+            self.drift_pitch *= DRIFT_DECAY;
+        }
+    }
+
+    /// Start an idle gaze gesture after the no-request pause, at the
+    /// personality's walk pitch (research §4.6). Still mode never does.
+    fn maybe_idle(&mut self, tick: u64, mode: GazeMode, request: Look) {
+        let pausing = mode != GazeMode::Idle
+            || !matches!(request, Look::None)
+            || self.none_ticks < REACTION_NONE_TICKS;
+        if pausing {
+            if mode != GazeMode::Idle {
+                self.idle_next = None;
+            }
+            return;
+        }
+        if self.gesture.is_some() || self.correction_at.is_some_and(|at| tick < at) {
+            return;
+        }
+        let (anchor_yaw, anchor_pitch) = self
+            .anchor
+            .unwrap_or((self.ideal_yaw, self.ideal_pitch));
+        if self.idle_next.is_none() {
+            self.idle_next = Some(tick.saturating_add(self.idle_interval()));
+        }
+        if tick < self.idle_next.unwrap_or(0) {
+            return;
+        }
+        // Mostly a new spot near the last one; sometimes back to the work point.
+        let (yaw, pitch) = if self.rng.gen_bool(0.30) {
+            (anchor_yaw, anchor_pitch)
+        } else {
+            (
+                anchor_yaw + self.gauss() * 12.0,
+                self.personality.walk_pitch + self.gauss() * 5.0,
+            )
+        };
+        self.target_yaw = unwrap_near(yaw, self.ideal_yaw);
+        self.target_pitch = pitch.clamp(-90.0, 90.0);
+        self.begin_gesture(tick);
+        self.idle_next = Some(tick.saturating_add(self.idle_interval()));
+    }
+
+    /// A uniform idle-gaze interval, in ticks: `U(1.5, 5) s`.
+    fn idle_interval(&mut self) -> u64 {
+        (TICKS_PER_SECOND * self.rng.gen_range(1.5..5.0))
+            .round()
+            .max(1.0) as u64
     }
 
     fn resync(&mut self, body_look: LookDirection) {
@@ -314,6 +443,8 @@ impl Gaze {
             self.initialized = true;
             self.emitted_yaw = yaw;
             self.emitted_pitch = pitch;
+            self.base_yaw = yaw;
+            self.base_pitch = pitch;
             self.ideal_yaw = yaw;
             self.ideal_pitch = pitch;
             self.target_yaw = yaw;
@@ -333,6 +464,10 @@ impl Gaze {
         // local trajectory is meaningless now; restart from the real look.
         self.ideal_yaw = yaw;
         self.ideal_pitch = pitch;
+        self.base_yaw = yaw;
+        self.base_pitch = pitch;
+        self.drift_yaw = 0.0;
+        self.drift_pitch = 0.0;
         self.velocity_yaw = 0.0;
         self.velocity_pitch = 0.0;
         self.gesture = None;
@@ -368,6 +503,8 @@ impl Gaze {
         self.target_yaw = request_yaw;
         self.target_pitch = request_pitch;
         self.last_request = Some((request_yaw, request_pitch));
+        self.anchor = Some((request_yaw, request_pitch));
+        self.idle_next = None;
         self.none_ticks = 0;
         if self.gesture.is_some() && moved && tick >= self.delay_until {
             // Keep position and velocity continuous across the new target.
@@ -378,9 +515,7 @@ impl Gaze {
     /// One human reaction time, drawn per stimulus: about 250 ms, never under
     /// 150 ms or 3 ticks.
     fn reaction_ticks(&mut self) -> u64 {
-        let gauss: f32 = Normal::new(0.0, 1.0)
-            .expect("the unit normal is a valid distribution")
-            .sample(&mut self.rng);
+        let gauss = self.gauss();
         let seconds = (0.25 + 0.10 * gauss).max(0.15);
         (TICKS_PER_SECOND * seconds).round().max(3.0) as u64
     }
@@ -395,8 +530,10 @@ impl Gaze {
         let Some((request_yaw, request_pitch)) = self.last_request else {
             return;
         };
-        let off = wrap_degrees(request_yaw - self.emitted_yaw).abs() > self.personality.step_deg
-            || (request_pitch - self.emitted_pitch).abs() > self.personality.step_deg;
+        // Compare against the drift-free camera: the walking drift is an output
+        // offset and must never start a gesture.
+        let off = wrap_degrees(request_yaw - self.base_yaw).abs() > self.personality.step_deg
+            || (request_pitch - self.base_pitch).abs() > self.personality.step_deg;
         if off {
             self.begin_gesture(tick);
         }
@@ -434,8 +571,8 @@ impl Gaze {
             self.correction_at = None;
             return;
         };
-        let off = wrap_degrees(request_yaw - self.emitted_yaw).abs() > self.personality.step_deg
-            || (request_pitch - self.emitted_pitch).abs() > self.personality.step_deg;
+        let off = wrap_degrees(request_yaw - self.base_yaw).abs() > self.personality.step_deg
+            || (request_pitch - self.base_pitch).abs() > self.personality.step_deg;
         self.correction_at = if off {
             Some(tick.saturating_add(CORRECTION_PAUSE_TICKS + 1))
         } else {
@@ -443,12 +580,19 @@ impl Gaze {
         };
     }
 
-    /// Move `emitted` to the nearest point of the rotation grid. The remainder
-    /// is never accumulated, so the output never drifts from the ideal.
-    fn quantise(&mut self) -> Look {
+    /// Move the drift-free camera and the actual output to the nearest point of
+    /// the rotation grid. The remainder is never accumulated, so the output
+    /// never drifts from the ideal.
+    fn quantise(&mut self, base_active: bool) -> Look {
         let step = self.personality.step_deg;
-        let dyaw = ((self.ideal_yaw - self.emitted_yaw) / step).round() * step;
-        let dpitch = ((self.ideal_pitch - self.emitted_pitch) / step).round() * step;
+        if base_active {
+            self.base_yaw += ((self.ideal_yaw - self.base_yaw) / step).round() * step;
+            self.base_pitch += ((self.ideal_pitch - self.base_pitch) / step).round() * step;
+        }
+        let target_yaw = self.ideal_yaw + self.drift_yaw;
+        let target_pitch = self.ideal_pitch + self.drift_pitch;
+        let dyaw = ((target_yaw - self.emitted_yaw) / step).round() * step;
+        let dpitch = ((target_pitch - self.emitted_pitch) / step).round() * step;
         self.emitted_yaw += dyaw;
         self.emitted_pitch += dpitch;
         if dyaw == 0.0 && dpitch == 0.0 {
@@ -488,12 +632,21 @@ mod tests {
             self.step_cue(request, Cue::Continue)
         }
 
+        fn step_mode(&mut self, request: Look, mode: GazeMode) -> Look {
+            self.step_cue_mode(request, Cue::Continue, mode)
+        }
+
         fn step_cue(&mut self, request: Look, cue: Cue) -> Look {
+            self.step_cue_mode(request, cue, GazeMode::Still)
+        }
+
+        fn step_cue_mode(&mut self, request: Look, cue: Cue, mode: GazeMode) -> Look {
             let look = self.gaze.step(
                 request,
                 LookDirection::new(self.yaw, self.pitch),
                 cue,
                 self.tick,
+                mode,
             );
             if let Look::Delta { dyaw, dpitch } = look {
                 self.yaw += dyaw;
@@ -794,5 +947,103 @@ mod tests {
         let (look, aligned) = look_towards(current, eye, target, 4.);
         assert!(aligned);
         assert!(matches!(look, Look::Aim { .. }));
+    }
+
+    #[test]
+    fn idle_mode_glances_after_the_pause_and_still_mode_is_silent() {
+        let mut still = Rig::new(2);
+        for _ in 0..2000 {
+            assert_eq!(
+                still.step_mode(Look::None, GazeMode::Still),
+                Look::None,
+                "Still must never start a look"
+            );
+        }
+
+        let mut rig = Rig::new(11);
+        let anchor_yaw = 0.0;
+        let walk_pitch = rig.gaze.personality.walk_pitch;
+        let mut gestures = 0;
+        let mut was_active = false;
+        for _ in 0..2000 {
+            rig.step_mode(Look::None, GazeMode::Idle);
+            let active = rig.gaze.gesture.is_some();
+            if active && !was_active {
+                gestures += 1;
+            }
+            was_active = active;
+            assert!(
+                wrap_degrees(rig.yaw - anchor_yaw).abs() < 60.0,
+                "idle yaw left the N(0,12) range: {}",
+                rig.yaw
+            );
+            assert!(
+                (rig.pitch - walk_pitch).abs() < 40.0,
+                "idle pitch left the walk pitch range: {}",
+                rig.pitch
+            );
+        }
+        assert!(gestures >= 5, "only {gestures} idle gestures in 2000 ticks");
+    }
+
+    #[test]
+    fn walking_drift_varies_on_the_grid_within_six_degrees() {
+        let mut rig = Rig::new(9);
+        let request = Look::Aim {
+            yaw: 30.,
+            pitch: 5.,
+        };
+        for _ in 0..80 {
+            rig.step_mode(request, GazeMode::Walking);
+        }
+        let mut distinct = std::collections::HashSet::new();
+        let mut moving = 0;
+        for _ in 0..1000 {
+            let look = rig.step_mode(request, GazeMode::Walking);
+            if let Look::Delta { dyaw, dpitch } = look {
+                moving += 1;
+                let n_yaw = dyaw / STEP;
+                let n_pitch = dpitch / STEP;
+                assert!((n_yaw - n_yaw.round()).abs() < 1e-3, "dyaw {dyaw}");
+                assert!((n_pitch - n_pitch.round()).abs() < 1e-3, "dpitch {dpitch}");
+                distinct.insert((n_yaw.round() as i32, n_pitch.round() as i32));
+            }
+            let off_yaw = wrap_degrees(rig.yaw - 30.).abs();
+            let off_pitch = (rig.pitch - 5.).abs();
+            assert!(off_yaw <= 6.0 + STEP + 1e-3, "yaw off by {off_yaw}");
+            assert!(off_pitch <= 6.0 + STEP + 1e-3, "pitch off by {off_pitch}");
+        }
+        assert!(moving > 500, "drift should move most ticks, got {moving}");
+        assert!(
+            distinct.len() > 20,
+            "drift should vary, got {} distinct deltas",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_walking_and_idle_output() {
+        let run = || {
+            let mut rig = Rig::new(77);
+            let mut output = Vec::new();
+            for tick in 0..600 {
+                let mode = if tick % 3 == 0 {
+                    GazeMode::Walking
+                } else {
+                    GazeMode::Idle
+                };
+                let request = if tick < 100 {
+                    Look::Aim {
+                        yaw: 40.,
+                        pitch: 3.,
+                    }
+                } else {
+                    Look::None
+                };
+                output.push(rig.step_mode(request, mode));
+            }
+            output
+        };
+        assert_eq!(run(), run());
     }
 }

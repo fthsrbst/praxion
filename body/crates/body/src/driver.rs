@@ -39,7 +39,7 @@ use praxion_interpreter::{
     StartAction, Truth,
 };
 use praxion_perception::{Config as PerceptionConfig, Perception};
-use praxion_planner::{Block, Cue, Gaze, KnownBlocks};
+use praxion_planner::{Block, Cue, Gaze, GazeMode, KnownBlocks};
 use praxion_primitives::{Ctx, IntentSpec, PrimitiveEvent, Runner, fact_known};
 use praxion_receipts::{Engine, Intent, ReceiptId};
 use praxion_reflexes::{EndermanGuard, LatencyClass, ReflexKind, Settings, View};
@@ -878,11 +878,23 @@ impl BodyDriver {
         frame.tick = view.tick;
         frame.generation = view.body.generation();
         // Movement style is the only producer of look output (§5.2): the frame
-        // carries the request, the gaze carries the camera.
+        // carries the request, the gaze carries the camera. A menu means a
+        // still gaze; held forward means a walking gaze; otherwise idle.
         let request = frame.look;
+        let menu_open = frame.menu.is_some()
+            || view
+                .world
+                .is_some_and(|world| world.open_container().is_some());
+        let mode = if menu_open {
+            GazeMode::Still
+        } else if frame.held.forward {
+            GazeMode::Walking
+        } else {
+            GazeMode::Idle
+        };
         let look = self
             .gaze
-            .step(request, view.body.look(), cue, view.tick);
+            .step(request, view.body.look(), cue, view.tick, mode);
         if let Look::Delta { dyaw, dpitch } = look
             && (dyaw != 0.0 || dpitch != 0.0)
         {

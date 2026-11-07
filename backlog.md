@@ -33,6 +33,9 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Walking limits: diagonal A* steps are not string-pulled (a naive version broke the narrowing
   corridor test); the hazard window measures to a step's end, so a Descend edge can sit up to one block
   inside the 4.0 window before it counts.
+- Watcher handoff (user, 2026-11-07): after C3 gaze, C4 far cue AND the thin Demo-2 LLM/Jev slice are all
+  done, write `logs/BUILDER_DONE.signal` (final hash + summary) and message the watcher session. Prompt:
+  `logs/watcher-prompt.md`; review base `logs/WATCH_FROM`. Never signal on a partial milestone.
 - Watch: the `place` registry budget (80 ticks) is tight with human aiming (GLM review, about 74-81
   ticks worst case); check for place timeouts in the first live runs.
 - Decision owed (user): the raw-store/perception boundary in architecture §4/§5.1 is not enforced in

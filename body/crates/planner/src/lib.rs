@@ -56,7 +56,7 @@ pub use astar::{Budget, SearchStatus};
 pub use follow::{Follower, Progress};
 pub use goal::Goal;
 pub use look::{
-    Cue, Gaze, Personality, STEP, WALK_TOLERANCE_DEG, aim, look_towards, wrap_degrees,
+    Cue, Gaze, GazeMode, Personality, STEP, WALK_TOLERANCE_DEG, aim, look_towards, wrap_degrees,
 };
 pub use moves::{MoveData, MoveKind, PLACE_BLOCK_COST, PrimitiveCall};
 pub use state::{HotbarItem, Inventory, Placements, PlanningState, place_block_kind};
