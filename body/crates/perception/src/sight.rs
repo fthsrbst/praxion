@@ -29,10 +29,15 @@ use crate::see_through::see_through_override;
 /// A little more than zero, for boundary comparisons.
 const EPS: f64 = 1.0e-9;
 
-/// How many chunks the visibility of one block may depend on and still be
-/// cached: the chunks its rays crossed plus its own. A 64-block ray crosses at
-/// most 12 chunks (grid traversal), so only long diagonal rays end up uncached;
-/// their result is still correct, just not remembered.
+/// The most distinct chunks one visibility answer may depend on and still be
+/// cached: the chunks its rays crossed plus the target's own chunk.
+///
+/// This is a size/ray trade-off measured live, not a geometric bound: a
+/// 64-block ray can cross up to 12 chunks, so a ray that needs a seventh
+/// distinct chunk is not remembered at all ([`CrossedChunks::is_complete`]
+/// turns false). Its answer is still correct; the next query just casts the
+/// rays again. Six keeps the common near rays cached and a cache entry small
+/// enough to copy.
 pub(crate) const MAX_CROSSED_CHUNKS: usize = 6;
 
 /// How a sight ray meets the cell that holds a block state.

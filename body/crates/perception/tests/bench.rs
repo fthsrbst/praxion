@@ -15,65 +15,15 @@
 //! is the fastest of the three, because the first one in a process also pays
 //! for the sight table of every block state it touches.
 
-use std::fs::File;
-use std::io::BufReader;
-use std::path::PathBuf;
+mod common;
+
 use std::time::Instant;
 
 use azalea_registry::builtin::BlockKind;
-use praxion_decoder::{Decoder, Event, Packet};
-use praxion_tee::Reader;
+use praxion_perception::*;
 use praxion_world::World;
 
-use super::*;
-
-fn apply(world: &mut World, followed: &mut bool, event: &Event) {
-    match event {
-        Event::Opened { conn_id, .. } => world.opened(*conn_id),
-        Event::Closed { conn_id, .. } => world.closed(*conn_id),
-        Event::Desync(desync) => world.invalidate(desync.conn_id, desync.reason.clone()),
-        Event::Decoded(decoded) => match &decoded.packet {
-            Packet::ConfigurationClientbound(packet) => {
-                world.apply_clientbound_config(decoded.conn_id, packet);
-            }
-            Packet::PlayClientbound(packet) => {
-                if !*followed && decoded.packet.name() == "login" {
-                    world.follow(decoded.conn_id);
-                    *followed = true;
-                }
-                world.apply_clientbound_play(decoded.conn_id, packet);
-            }
-            Packet::PlayServerbound(packet) => {
-                world.apply_serverbound_play(decoded.conn_id, packet);
-            }
-            _ => {}
-        },
-    }
-}
-
-fn decode_corpus(name: &str) -> World {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../spikes/captures")
-        .join(name);
-    let file = File::open(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-    let reader = Reader::new(BufReader::new(file)).expect("tee header");
-    let mut decoder = Decoder::new();
-    decoder.set_reorder_window(60_000_000_000);
-    let mut world = World::new();
-    let mut followed = false;
-    for record in reader {
-        let record = record.expect("tee record");
-        for event in decoder.feed(&record) {
-            apply(&mut world, &mut followed, &event);
-        }
-    }
-    for event in decoder.finish() {
-        apply(&mut world, &mut followed, &event);
-    }
-    assert!(world.status().is_valid(), "corpus desynced: {:?}", world.status());
-    world
-}
+use common::decode_corpus;
 
 /// The fastest of three runs of `query`, each with a fresh [`Perception`].
 fn fastest(config: &Config, world: &World, query: impl Fn(&mut Perception) -> String) -> f64 {
@@ -94,7 +44,9 @@ fn fastest(config: &Config, world: &World, query: impl Fn(&mut Perception) -> St
 #[ignore = "release-only benchmark, see the module doc for the command"]
 fn bench_real_corpus() {
     let world = decode_corpus("corpus4.prxcap");
-    let pos = world.player_position().expect("the corpus has no player position");
+    let pos = world
+        .player_position()
+        .expect("the corpus has no player position");
     println!(
         "corpus: {} chunks, {} entities, player {:?}, dimension {:?}",
         world.chunk_count(),
@@ -125,7 +77,10 @@ fn bench_real_corpus() {
         format!("{:?}, {rays} rays", answer.reason())
     });
     let rays = 3_000.0;
-    println!("  best: 3000 rays in {best:.3} ms = {:.0} rays/ms", rays / best);
+    println!(
+        "  best: 3000 rays in {best:.3} ms = {:.0} rays/ms",
+        rays / best
+    );
 
     // The nearest-block searches: cold (first query) and warm (the same query
     // again in the same tick, which the cache answers without a ray).

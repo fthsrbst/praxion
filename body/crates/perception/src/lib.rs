@@ -15,19 +15,19 @@
 //! `docs/sessions/03-perception-world-model.md`.
 
 mod answer;
+mod cache;
 mod config;
 mod hash;
 mod known;
 mod ledger;
 mod see_through;
 mod sight;
+mod sweep;
 
-#[cfg(test)]
-mod bench;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use azalea_core::position::ChunkSectionPos;
 use azalea_entity::dimensions::EntityDimensions;
@@ -35,6 +35,7 @@ use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_world::{BlockPos, BlockState, Entity, Health, ItemStack, Vec3, World};
 
 pub use answer::{Answer, Caller, Provenance, Reason};
+use cache::{BlockCacheKey, EntityCacheKey, VisibilityCache};
 pub use config::{
     Config, DEFAULT_ENTITY_CAP, DEFAULT_EYE_HEIGHT, DEFAULT_HEARING_RADIUS, DEFAULT_KNOWN_RADIUS,
     DEFAULT_MAX_LIST_RESULTS, DEFAULT_MAX_REGION_BLOCKS, DEFAULT_MEMORY_CAPACITY, DEFAULT_RANGE,
@@ -43,8 +44,8 @@ pub use config::{
 };
 pub use known::Remembered;
 pub use ledger::{FactKind, Ledger, LedgerEntry, QueryKind};
+pub use sweep::Sweep;
 
-use hash::FxBuildHasher;
 use sight::{CellReader, CrossedChunks, SightTable};
 
 /// A block fact returned by a query.
@@ -54,15 +55,6 @@ pub struct BlockFact {
     pub state: BlockState,
     pub kind: BlockKind,
     pub distance: f64,
-}
-
-/// What one sweep spent.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Sweep {
-    /// Rays cast by the sweep, all of them from `Caller::Other`'s share.
-    pub rays: u32,
-    /// Cells whose visibility was tested.
-    pub probes: usize,
 }
 
 /// An entity fact returned by a query.
@@ -156,44 +148,6 @@ impl BlockRegion {
     }
 }
 
-/// The block visibility cache entry.
-///
-/// It lives across ticks. `checked` is the world revision the entry was last
-/// verified against, so a tick with no block change validates every entry with
-/// one integer compare; otherwise `crossed` names the chunks whose revisions
-/// must still match.
-#[derive(Clone, Copy, Debug)]
-struct BlockCacheEntry {
-    state: BlockState,
-    visible: bool,
-    checked: u64,
-    crossed: CrossedChunks,
-}
-
-/// The entity visibility cache entry, valid while the eye cell, the entity
-/// cell, and the revisions of the chunks the rays crossed are unchanged.
-#[derive(Clone, Copy, Debug)]
-struct EntityCacheEntry {
-    visible: bool,
-    checked: u64,
-    crossed: CrossedChunks,
-}
-
-/// The eye cell is part of every cache key, so moving to another cell misses.
-/// `begin_tick` also drops the entries of the cell the eye left.
-type BlockCacheKey = (BlockPos, BlockPos);
-type EntityCacheKey = (BlockPos, i32, BlockPos);
-
-/// Cache entries kept. Moving the eye to another cell drops the old cell's
-/// entries; a query that fills the cache without moving clears it, which only
-/// costs rays the next time the same blocks are asked for.
-const MAX_CACHE_ENTRIES: usize = 8_192;
-
-/// Rays the background sweep may spend per tick. The configured ray budget is
-/// an upper bound shared with queries; the sweep takes a slice so one tick
-/// never pays the whole map fill.
-const SWEEP_RAYS_PER_TICK: u32 = 900;
-
 /// The perception API for one world.
 pub struct Perception {
     config: Config,
@@ -209,8 +163,8 @@ pub struct Perception {
     entity_checked: HashSet<i32>,
     entity_overflow: u64,
     table: SightTable,
-    block_cache: HashMap<BlockCacheKey, BlockCacheEntry, FxBuildHasher>,
-    entity_cache: HashMap<EntityCacheKey, EntityCacheEntry, FxBuildHasher>,
+    block_cache: VisibilityCache<BlockCacheKey>,
+    entity_cache: VisibilityCache<EntityCacheKey>,
     last_eye_cell: Option<BlockPos>,
     known: known::KnownMap,
     ledger: Ledger,
@@ -236,8 +190,8 @@ impl Perception {
             entity_checked: HashSet::new(),
             entity_overflow: 0,
             table: SightTable::new(),
-            block_cache: HashMap::default(),
-            entity_cache: HashMap::default(),
+            block_cache: VisibilityCache::new(),
+            entity_cache: VisibilityCache::new(),
             last_eye_cell: None,
             ledger: Ledger::default(),
         }
@@ -293,14 +247,14 @@ impl Perception {
     /// Drop the cache entries of the eye cell the eye left. Every key carries
     /// the eye cell, so those entries could never be used again.
     fn forget_other_eye_cells(&mut self, world: &World) {
-        let eye_cell = if self.world_valid { self.eye_cell(world) } else { None };
+        let eye_cell = self.valid_eye(world).map(|eye| eye.to_block_pos_floor());
         if eye_cell == self.last_eye_cell {
             return;
         }
         match eye_cell {
             Some(cell) => {
-                self.block_cache.retain(|(eye, _), _| *eye == cell);
-                self.entity_cache.retain(|(eye, _, _), _| *eye == cell);
+                self.block_cache.retain_eye_cell(cell);
+                self.entity_cache.retain_eye_cell(cell);
             }
             None => {
                 self.block_cache.clear();
@@ -462,16 +416,26 @@ impl Perception {
         self.eye(world).map(|eye| eye.to_block_pos_floor())
     }
 
+    /// Deny-by-default: a query on an invalid world answers
+    /// `Unknown(never_seen)` and spends nothing. Every query starts here
+    /// (architecture §5.1).
+    fn valid_world<'w>(&self, world: &'w World) -> Option<&'w World> {
+        self.world_valid.then_some(world)
+    }
+
+    /// [`valid_world`](Self::valid_world) plus the eye. Every ray query needs
+    /// both, and both failures answer the same `Unknown(never_seen)`.
+    fn valid_eye(&self, world: &World) -> Option<Vec3> {
+        self.valid_world(world)?;
+        self.eye(world)
+    }
+
     /// A block at `pos`. Answers memory (with its age) when the block is no
     /// longer in sight; answers `Unknown(budget)`, never memory, when the ray
     /// budget is spent.
     pub fn block(&mut self, caller: Caller, world: &World, pos: BlockPos) -> Answer<BlockFact> {
-        if !self.world_valid {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
-        let eye = match self.eye(world) {
-            Some(eye) => eye,
-            None => return Answer::Unknown(Reason::NeverSeen),
         };
         let Some(state) = world.block_state(pos) else {
             return Answer::Unknown(Reason::NeverSeen);
@@ -525,10 +489,7 @@ impl Perception {
         region: BlockRegion,
         filter: BlockFilter,
     ) -> Answer<Vec<BlockFact>> {
-        if !self.world_valid {
-            return Answer::Unknown(Reason::NeverSeen);
-        }
-        let Some(eye) = self.eye(world) else {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
         };
         if region.volume() > self.config.max_region_blocks {
@@ -607,15 +568,10 @@ impl Perception {
         kind: BlockKind,
         radius: u32,
     ) -> Answer<BlockFact> {
-        if !self.world_valid {
-            return Answer::Unknown(Reason::NeverSeen);
-        }
-        let Some(eye) = self.eye(world) else {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
         };
-        let Some(eye_cell) = self.eye_cell(world) else {
-            return Answer::Unknown(Reason::NeverSeen);
-        };
+        let eye_cell = eye.to_block_pos_floor();
         let limit = self.config.max_list_results;
         if limit == 0 {
             return Answer::Unknown(Reason::NeverSeen);
@@ -709,10 +665,7 @@ impl Perception {
 
     /// One tracked entity by id.
     pub fn entity(&mut self, caller: Caller, world: &World, id: i32) -> Answer<EntityFact> {
-        if !self.world_valid {
-            return Answer::Unknown(Reason::NeverSeen);
-        }
-        let Some(eye) = self.eye(world) else {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
         };
         let Some(entity) = world.entity(id) else {
@@ -740,10 +693,7 @@ impl Perception {
         radius: u32,
         filter: EntityFilter,
     ) -> Answer<Vec<EntityFact>> {
-        if !self.world_valid {
-            return Answer::Unknown(Reason::NeverSeen);
-        }
-        let Some(eye) = self.eye(world) else {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
         };
         let radius = f64::from(radius).min(f64::from(self.config.range));
@@ -784,10 +734,7 @@ impl Perception {
         kind: EntityKind,
         radius: u32,
     ) -> Answer<EntityFact> {
-        if !self.world_valid {
-            return Answer::Unknown(Reason::NeverSeen);
-        }
-        let Some(eye) = self.eye(world) else {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
         };
         let radius = f64::from(radius).min(f64::from(self.config.range));
@@ -811,10 +758,7 @@ impl Perception {
     /// Sounds within `radius` blocks, capped by [`Config::hearing_radius`].
     /// Each fact carries its own age; the answer's age is the newest one.
     pub fn sounds_near(&mut self, world: &World, radius: u32) -> Answer<Vec<SoundFact>> {
-        if !self.world_valid {
-            return Answer::Unknown(Reason::NeverSeen);
-        }
-        let Some(eye) = self.eye(world) else {
+        let Some(eye) = self.valid_eye(world) else {
             return Answer::Unknown(Reason::NeverSeen);
         };
         let radius = radius.min(self.config.hearing_radius);
@@ -843,9 +787,9 @@ impl Perception {
 
     /// Own position: an F3 fact, allowed without a ray.
     pub fn own_position(&self, world: &World) -> Answer<Vec3> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.player_position() {
             Some(pos) => Answer::known(pos, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -854,17 +798,17 @@ impl Perception {
 
     /// Own rotation `(yaw, pitch)`: an F3 fact.
     pub fn own_rotation(&self, world: &World) -> Answer<(f32, f32)> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         Answer::known(world.player_rotation(), Provenance::Sight, 0)
     }
 
     /// Own dimension: an F3 fact.
     pub fn dimension(&self, world: &World) -> Answer<praxion_world::Dimension> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.dimension().cloned() {
             Some(dimension) => Answer::known(dimension, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -893,17 +837,17 @@ impl Perception {
 
     /// Day time: an F3 fact.
     pub fn day_time(&self, world: &World) -> Answer<u64> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         Answer::known(world.day_time(), Provenance::Sight, 0)
     }
 
     /// Own health: an F3 fact.
     pub fn own_health(&self, world: &World) -> Answer<Health> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.health() {
             Some(health) => Answer::known(health, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -912,9 +856,9 @@ impl Perception {
 
     /// Own food level: an F3 fact.
     pub fn own_food(&self, world: &World) -> Answer<u32> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.health() {
             Some(health) => Answer::known(health.food(), Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -925,9 +869,9 @@ impl Perception {
     /// allowed without a ray. `Unknown(never_seen)` until the server sends it,
     /// which is not the same as full air.
     pub fn air(&self, world: &World) -> Answer<u32> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.own_air() {
             Some(air) => Answer::known(air, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -937,9 +881,9 @@ impl Perception {
     /// Whether the server has the player on fire, from its shared flags byte:
     /// an F3 fact, allowed without a ray. `Unknown` until the server sends it.
     pub fn burning(&self, world: &World) -> Answer<bool> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.own_burning() {
             Some(burning) => Answer::known(burning, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -948,17 +892,17 @@ impl Perception {
 
     /// Own inventory: an F3 fact.
     pub fn inventory(&self, world: &World) -> Answer<Vec<ItemStack>> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         Answer::known(world.inventory().to_vec(), Provenance::Sight, 0)
     }
 
     /// Selected hotbar slot: an F3 fact.
     pub fn selected_slot(&self, world: &World) -> Answer<u32> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.selected_hotbar_slot() {
             Some(slot) => Answer::known(slot, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -967,9 +911,9 @@ impl Perception {
 
     /// Game mode: an F3 fact.
     pub fn game_mode(&self, world: &World) -> Answer<azalea_core::game_type::GameMode> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         match world.game_mode() {
             Some(mode) => Answer::known(mode, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
@@ -978,9 +922,9 @@ impl Perception {
 
     /// Weather: an F3 fact.
     pub fn weather(&self, world: &World) -> Answer<praxion_world::Weather> {
-        if !self.world_valid {
+        let Some(world) = self.valid_world(world) else {
             return Answer::Unknown(Reason::NeverSeen);
-        }
+        };
         Answer::known(world.weather(), Provenance::Sight, 0)
     }
 
@@ -997,83 +941,6 @@ impl Perception {
             let age = self.tick.saturating_sub(remembered.seen_tick);
             (remembered, age)
         })
-    }
-
-    /// Spend the ray budget the callers left (never the reflex reserve) on the
-    /// space around the player: nearest sections first, rotating inside each
-    /// distance shell, and write every cell a ray reaches to the known map.
-    ///
-    /// Call this once per tick, after the callers have made their queries. A
-    /// cell that is known and fresh is skipped; a cell whose chunk changed or
-    /// whose sighting is stale is probed again. A cell no ray reaches is only
-    /// remembered as a miss, never as a block fact.
-    pub fn sweep(&mut self, world: &World) -> Sweep {
-        let mut stats = Sweep::default();
-        if !self.world_valid {
-            return stats;
-        }
-        let Some(eye) = self.eye(world) else {
-            return stats;
-        };
-        let eye_cell = eye.to_block_pos_floor();
-        let focus = section_key_of(eye_cell);
-        let radius = self.config.sweep_radius.min(self.config.range);
-        let rays_before = self.rays_other;
-        let mut reader = CellReader::new();
-        let shells = swept_sections(eye, radius, self.tick);
-
-        'outer: for shell in shells {
-            for key in shell {
-                let base = BlockPos::new(key.0 * 16, key.1 * 16, key.2 * 16);
-                let cells = 16 * 16 * 16;
-                let start = (self.tick as usize).wrapping_add(section_seed(key)) % cells;
-                for offset in 0..cells {
-                    // Spend a bounded slice per tick. The sweep is background
-                    // map filling, not an action: a smaller slice keeps a tick
-                    // under the 25 ms budget while the same cells are covered
-                    // over the next few ticks.
-                    if self.remaining_rays(Caller::Other) == 0
-                        || self.rays_other.saturating_sub(rays_before) >= SWEEP_RAYS_PER_TICK
-                    {
-                        break 'outer;
-                    }
-                    let index = (start + offset) % cells;
-                    let pos = BlockPos::new(
-                        base.x + (index & 15) as i32,
-                        base.y + ((index >> 8) & 15) as i32,
-                        base.z + ((index >> 4) & 15) as i32,
-                    );
-                    if eye.distance_to(pos.center()) > f64::from(radius) {
-                        continue;
-                    }
-                    let Some(revision) = world
-                        .chunk_revision(praxion_world::ChunkPos::from(pos))
-                    else {
-                        continue;
-                    };
-                    if !self.known.needs_probe(pos, self.tick, revision) {
-                        continue;
-                    }
-                    let Some(state) = world.block_state(pos) else {
-                        continue;
-                    };
-                    stats.probes += 1;
-                    match self.visible_block(world, Caller::Other, eye, pos, state, &mut reader) {
-                        Ok(()) => {
-                            self.known
-                                .record_seen(pos, state, self.tick, revision, focus);
-                        }
-                        Err(Reason::OutOfSight) => {
-                            self.known.record_miss(pos, self.tick, revision, focus);
-                        }
-                        Err(Reason::Budget) => break 'outer,
-                        Err(_) => {}
-                    }
-                }
-            }
-        }
-        stats.rays = self.rays_other.saturating_sub(rays_before);
-        stats
     }
 
     /// `Ok(())` when the block is visible now; otherwise the reason it is not.
@@ -1096,7 +963,7 @@ impl Perception {
         let eye_cell = eye.to_block_pos_floor();
         let revision = world.revision();
         let key = (eye_cell, pos);
-        if let Some(visible) = self.cached_block(world, key, state, revision) {
+        if let Some(visible) = self.block_cache.cached(world, key, Some(state), revision) {
             return if visible { Ok(()) } else { Err(Reason::OutOfSight) };
         }
         let distance = eye.distance_to(pos.center());
@@ -1126,56 +993,10 @@ impl Perception {
             }
         }
         if crossed.is_complete() {
-            self.remember_block(key, state, visible, revision, crossed);
+            self.block_cache
+                .remember(key, Some(state), visible, revision, crossed);
         }
         if visible { Ok(()) } else { Err(Reason::OutOfSight) }
-    }
-
-    /// The cached answer for `key`, when it is still valid, refreshed against
-    /// the current world revision so the next lookup is one compare.
-    fn cached_block(
-        &mut self,
-        world: &World,
-        key: BlockCacheKey,
-        state: BlockState,
-        revision: u64,
-    ) -> Option<bool> {
-        let entry = self.block_cache.get_mut(&key)?;
-        if entry.state != state {
-            // The block itself changed; a fresh cast is needed.
-            self.block_cache.remove(&key);
-            return None;
-        }
-        if entry.checked != revision {
-            if !entry.crossed.is_current(world) {
-                self.block_cache.remove(&key);
-                return None;
-            }
-            entry.checked = revision;
-        }
-        Some(entry.visible)
-    }
-
-    /// Store a block answer, keeping the cache bounded.
-    fn remember_block(
-        &mut self,
-        key: BlockCacheKey,
-        state: BlockState,
-        visible: bool,
-        revision: u64,
-        crossed: CrossedChunks,
-    ) {
-        if self.block_cache.len() >= MAX_CACHE_ENTRIES {
-            let eye_cell = key.0;
-            self.block_cache.retain(|(eye, _), _| *eye == eye_cell);
-            if self.block_cache.len() >= MAX_CACHE_ENTRIES {
-                self.block_cache.clear();
-            }
-        }
-        self.block_cache.insert(
-            key,
-            BlockCacheEntry { state, visible, checked: revision, crossed },
-        );
     }
 
     /// `Ok(())` when a ray set reaches the entity. The entity is checked at
@@ -1193,7 +1014,7 @@ impl Perception {
         let cell = entity.position().to_block_pos_floor();
         let key = (eye_cell, entity.id(), cell);
         let revision = world.revision();
-        if let Some(visible) = self.cached_entity(world, key, revision) {
+        if let Some(visible) = self.entity_cache.cached(world, key, None, revision) {
             return if visible { Ok(()) } else { Err(Reason::OutOfSight) };
         }
         if !self.entity_checked.contains(&entity.id()) {
@@ -1243,37 +1064,9 @@ impl Perception {
             }
         }
         if crossed.is_complete() {
-            if self.entity_cache.len() >= MAX_CACHE_ENTRIES {
-                let eye_cell = key.0;
-                self.entity_cache.retain(|(eye, _, _), _| *eye == eye_cell);
-                if self.entity_cache.len() >= MAX_CACHE_ENTRIES {
-                    self.entity_cache.clear();
-                }
-            }
-            self.entity_cache.insert(
-                key,
-                EntityCacheEntry { visible, checked: revision, crossed },
-            );
+            self.entity_cache.remember(key, None, visible, revision, crossed);
         }
         if visible { Ok(()) } else { Err(Reason::OutOfSight) }
-    }
-
-    /// The cached entity answer, when it is still valid.
-    fn cached_entity(
-        &mut self,
-        world: &World,
-        key: EntityCacheKey,
-        revision: u64,
-    ) -> Option<bool> {
-        let entry = self.entity_cache.get_mut(&key)?;
-        if entry.checked != revision {
-            if !entry.crossed.is_current(world) {
-                self.entity_cache.remove(&key);
-                return None;
-            }
-            entry.checked = revision;
-        }
-        Some(entry.visible)
     }
 }
 
@@ -1397,90 +1190,6 @@ fn sections_near(eye: Vec3, region: BlockRegion) -> Vec<(f64, ChunkSectionPos)> 
 /// The section key `(x, y, z)` of a block position.
 fn section_key_of(pos: BlockPos) -> (i32, i32, i32) {
     (pos.x >> 4, pos.y >> 4, pos.z >> 4)
-}
-
-/// A per-section rotation seed, so two sections do not scan their cells in the
-/// same order.
-fn section_seed(key: (i32, i32, i32)) -> usize {
-    let mut hash = 0x9E37_79B9_7F4A_7C15_u64;
-    for word in [key.0, key.1, key.2] {
-        hash = (hash ^ u64::from(word as u32)).wrapping_mul(0x1000_0000_01B3);
-        hash ^= hash >> 29;
-    }
-    (hash >> 32) as usize
-}
-
-/// The sections the sweep walks, grouped into distance shells: nearest shell
-/// first, and inside a shell a per-tick rotation so one direction cannot take
-/// the whole budget every tick.
-fn swept_sections(eye: Vec3, radius: u32, tick: u64) -> Vec<Vec<(i32, i32, i32)>> {
-    let r = i32::try_from(radius).unwrap_or(i32::MAX);
-    let eye_cell = eye.to_block_pos_floor();
-    let first = (
-        eye_cell.x.saturating_sub(r) >> 4,
-        eye_cell.y.saturating_sub(r) >> 4,
-        eye_cell.z.saturating_sub(r) >> 4,
-    );
-    let last = (
-        eye_cell.x.saturating_add(r) >> 4,
-        eye_cell.y.saturating_add(r) >> 4,
-        eye_cell.z.saturating_add(r) >> 4,
-    );
-    let radius_sq = f64::from(radius) * f64::from(radius);
-    let mut sections = Vec::new();
-    for x in first.0..=last.0 {
-        for y in first.1..=last.1 {
-            for z in first.2..=last.2 {
-                let base = BlockPos::new(
-                    x.saturating_mul(16),
-                    y.saturating_mul(16),
-                    z.saturating_mul(16),
-                );
-                let cells = SectionCells {
-                    base,
-                    min: BlockPos::new(
-                        base.x.max(eye_cell.x.saturating_sub(r)),
-                        base.y.max(eye_cell.y.saturating_sub(r)),
-                        base.z.max(eye_cell.z.saturating_sub(r)),
-                    ),
-                    max: BlockPos::new(
-                        base.x.saturating_add(15).min(eye_cell.x.saturating_add(r)),
-                        base.y.saturating_add(15).min(eye_cell.y.saturating_add(r)),
-                        base.z.saturating_add(15).min(eye_cell.z.saturating_add(r)),
-                    ),
-                };
-                let distance_sq = lower_bound_sq(eye, cells);
-                if distance_sq <= radius_sq {
-                    sections.push((distance_sq, (x, y, z)));
-                }
-            }
-        }
-    }
-    sections.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-    let mut shells: Vec<Vec<(i32, i32, i32)>> = Vec::new();
-    let mut current = Vec::new();
-    let mut current_shell = -1_i32;
-    for (distance_sq, key) in sections {
-        let shell = distance_sq.sqrt().floor() as i32;
-        if shell != current_shell {
-            if !current.is_empty() {
-                shells.push(std::mem::take(&mut current));
-            }
-            current_shell = shell;
-        }
-        current.push(key);
-    }
-    if !current.is_empty() {
-        shells.push(current);
-    }
-    for shell in &mut shells {
-        if !shell.is_empty() {
-            let start = (tick as usize) % shell.len();
-            shell.rotate_left(start);
-        }
-    }
-    shells
 }
 
 /// The squared distance from `eye` to the nearest cell center in `cells`.
