@@ -7,7 +7,7 @@ use std::time::Duration;
 use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockKind;
 use praxion_gamedata as gamedata;
-use praxion_headless::ControlFrame;
+use praxion_headless::{ControlFrame, Look};
 use praxion_interpreter::Outcome;
 use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, Step};
 use praxion_world::World;
@@ -44,12 +44,24 @@ const TARGET_APPROACH_RADIUS: f32 = 4.0;
 /// several directions.
 const EXPLORE_STEP_TICKS: u32 = 160;
 
+/// One full turn on the spot before the first frontier: two seconds, about
+/// four view scans, each a different quarter of the horizon.
+const LOOK_AROUND_TICKS: u64 = 40;
+
 #[derive(Debug)]
 pub(crate) struct Explore {
     target: String,
     planner: Planner,
     follower: Option<Follower>,
     goal: Option<BlockPos>,
+    /// What the follower is walking to. A walk to a frontier or a cue keeps
+    /// looking for something better on the search period, as a person who
+    /// spots the tree turns toward it instead of finishing the detour.
+    chase: Chase,
+    /// When nothing is known yet, the call first turns once on the spot (tick
+    /// it started, yaw it started from), so the view scan sees every side
+    /// before a frontier is picked; a person looks around before walking off.
+    look_around: Option<(u64, f32)>,
     /// Frontier cells this call has reached; new choices stay away from them.
     explored: Vec<BlockPos>,
     /// Frontier cells the planner could not reach.
@@ -244,6 +256,8 @@ impl Explore {
             },
             follower: None,
             goal: None,
+            chase: Chase::Frontier,
+            look_around: None,
             explored: {
                 // Continue from where recent calls walked, so a retry does not
                 // repeat the same direction from an empty set.
@@ -281,14 +295,28 @@ impl Explore {
         self.waited += 1;
         let start = ctx.body.position().to_block_pos_floor();
         let home = memory.home_y(start.y);
-        // The completion check is cheap: a 5-block scan. The wider 32-block
-        // target search runs only when a new plan is needed, never while a
-        // follower is walking, so exploring keeps the 20 TPS tick rate.
+        // The completion check is cheap: a 5-block scan. The wider target
+        // search runs on `EXPLORE_SEARCH_PERIOD_TICKS`, also while walking to a
+        // frontier or a cue; it walks remembered sections, not the cube.
         if near_block(ctx.perception, ctx.world, &self.target, EXPLORE_NEAR_RADIUS) == Some(true) {
             return (frame, None, Some(Outcome::Confirmed));
         }
         if self.waited > self.budget {
             return (frame, None, Some(Outcome::Failed("not_found".into())));
+        }
+
+        // While walking to a frontier or a cue, keep looking: a target (or,
+        // on a frontier walk, a cue) seen on the way replaces the detour.
+        if self.chase != Chase::Target
+            && ctx.tick >= self.target_search_tick
+            && ctx.body.on_ground()
+            && self
+                .follower
+                .as_ref()
+                .is_some_and(|follower| !follower.is_done() && !follower.is_stalled())
+        {
+            self.target_search_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
+            self.seek(ctx, start);
         }
 
         if let Some(follower) = &mut self.follower {
@@ -388,34 +416,22 @@ impl Explore {
         // period instead of every tick.
         if ctx.tick >= self.target_search_tick {
             self.target_search_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
-            let target = nearest_known_block(
-                ctx.perception,
-                ctx.world,
-                &self.target,
-                EXPLORE_SEARCH_RADIUS,
-                &self.rejected,
-            );
-            // The target is in sight but not yet in reach: walk to it.
-            if let Some((cell, _)) = target
-                && !self.rejected.contains(&cell)
-                && self.approach(ctx, start, cell)
-            {
+            if self.seek(ctx, start) {
                 return (frame, None, None);
-            } else if target.is_none() {
-                // No log is known, but a log grows in a leaf canopy: walk to
-                // the nearest known leaves instead of a frontier, so the
-                // search does not leave a tree that is already in view.
-                let cue = cue_goal(&self.target, |tag, radius| {
-                    let mut exclude = self.rejected.clone();
-                    exclude.extend(self.explored.iter().copied());
-                    nearest_known_block(ctx.perception, ctx.world, tag, radius, &exclude)
-                        .map(|(cell, _)| cell)
-                });
-                if let Some(cell) = cue
-                    && self.approach(ctx, start, cell)
-                {
-                    return (frame, None, None);
-                }
+            }
+            self.look_around
+                .get_or_insert((ctx.tick, ctx.body.look().y_rot()));
+        }
+        if let Some((since, yaw)) = self.look_around {
+            let elapsed = ctx.tick.saturating_sub(since);
+            if elapsed < LOOK_AROUND_TICKS {
+                let turned = 360.0 * elapsed as f32 / LOOK_AROUND_TICKS as f32;
+                let mut frame = frame;
+                frame.look = Look::Aim {
+                    yaw: yaw + turned,
+                    pitch: 0.0,
+                };
+                return (frame, None, None);
             }
         }
 
@@ -502,6 +518,7 @@ impl Explore {
                             choice.candidates
                         );
                         self.goal = Some(goal);
+                        self.chase = Chase::Frontier;
                         self.follower = Some(self.follow(ctx, plan.steps));
                         self.idle_ticks = 0;
                         self.walk_backs = 0;
@@ -564,6 +581,7 @@ impl Explore {
                 {
                     self.path_ticks = plan.cost.ceil().max(0.) as u64;
                     self.goal = Some(cell);
+                    self.chase = Chase::Frontier;
                     self.follower = Some(self.follow(ctx, plan.steps));
                     self.idle_ticks = 0;
                     self.walk_backs += 1;
@@ -600,7 +618,7 @@ impl Explore {
 
     /// Plan to `cell` and start the follower. A failed plan rejects the cell
     /// for the next search. Returns whether a walk started.
-    fn approach(&mut self, ctx: &mut Ctx<'_>, start: BlockPos, cell: BlockPos) -> bool {
+    fn approach(&mut self, ctx: &mut Ctx<'_>, start: BlockPos, cell: BlockPos, chase: Chase) -> bool {
         let plan = self.plan_to(
             ctx,
             start,
@@ -621,6 +639,7 @@ impl Explore {
                 plan.steps.len()
             );
             self.goal = Some(cell);
+            self.chase = chase;
             self.follower = Some(self.follow(ctx, plan.steps));
             self.idle_ticks = 0;
             true
@@ -628,6 +647,35 @@ impl Explore {
             remember(&mut self.rejected, cell);
             false
         }
+    }
+
+    /// Look for the target, then (unless a cue walk is already under way) for a
+    /// cue, and approach the first one found. A known target that cannot be
+    /// reached falls back to the frontiers, not to a cue.
+    fn seek(&mut self, ctx: &mut Ctx<'_>, start: BlockPos) -> bool {
+        let target = nearest_known_block(
+            ctx.perception,
+            ctx.world,
+            &self.target,
+            EXPLORE_SEARCH_RADIUS,
+            &self.rejected,
+        );
+        if let Some((cell, _)) = target {
+            return !self.rejected.contains(&cell) && self.approach(ctx, start, cell, Chase::Target);
+        }
+        if self.chase == Chase::Cue && self.follower.is_some() {
+            return false;
+        }
+        // No log is known, but a log grows in a leaf canopy: walk to the
+        // nearest known leaves instead of a frontier, so the search does not
+        // leave a tree that is already in view.
+        let cue = cue_goal(&self.target, |tag, radius| {
+            let mut exclude = self.rejected.clone();
+            exclude.extend(self.explored.iter().copied());
+            nearest_known_block(ctx.perception, ctx.world, tag, radius, &exclude)
+                .map(|(cell, _)| cell)
+        });
+        cue.is_some_and(|cell| self.approach(ctx, start, cell, Chase::Cue))
     }
 
     fn plan_to(&self, ctx: &mut Ctx<'_>, start: BlockPos, goal: Goal) -> praxion_planner::Plan {
@@ -644,6 +692,14 @@ impl Explore {
 /// known. Logs grow in leaf canopies, so a log search that sees no log can
 /// still walk to a canopy and look under it. This is the only cue; it is not a
 /// general mapping.
+/// What the follower is walking to; see [`Explore::chase`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chase {
+    Frontier,
+    Cue,
+    Target,
+}
+
 fn cue_for(target: &str) -> Option<&'static str> {
     let tag = target.strip_prefix('#')?;
     // `#logs` is the general tag; a wood type names its own (`#oak_logs`).

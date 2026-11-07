@@ -29,6 +29,7 @@ impl Perception {
         let pitch_rows =
             ((VIEW_PITCH_MAX_DEGREES - VIEW_PITCH_MIN_DEGREES) / VIEW_STEP_DEGREES) as usize + 1;
         let eye_cell = eye.to_block_pos_floor();
+        let (mut cast, mut hits, mut farthest) = (0u32, 0u32, 0f64);
         'rows: for row in (phase..yaw_rows).step_by(2) {
             let yaw_offset = -VIEW_YAW_HALF_DEGREES + row as f64 * VIEW_STEP_DEGREES;
             for col in 0..pitch_rows {
@@ -41,6 +42,7 @@ impl Perception {
                     (f64::from(pitch) + pitch_offset).clamp(-90.0, 90.0),
                 );
                 self.spend_ray(Caller::Other);
+                cast += 1;
                 let Some(hit) = sight::first_blocking_cell(
                     world,
                     eye,
@@ -58,9 +60,12 @@ impl Perception {
                 if state == BlockState::AIR {
                     continue;
                 }
+                hits += 1;
+                farthest = farthest.max(eye.distance_to(hit.center()));
                 self.record_seen(world, hit, state, eye);
             }
         }
+        log::debug!("view scan yaw={yaw:.0} pitch={pitch:.0} rays={cast} hits={hits} farthest={farthest:.1}");
     }
 }
 

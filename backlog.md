@@ -36,6 +36,11 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Watcher handoff (user, 2026-11-07): after C3 gaze, C4 far cue AND the thin Demo-2 LLM/Jev slice are all
   done, write `logs/BUILDER_DONE.signal` (final hash + summary) and message the watcher session. Prompt:
   `logs/watcher-prompt.md`; review base `logs/WATCH_FROM`. Never signal on a partial milestone.
+- Explore frontier strategy (2026-11-08): with the view scan live (debug `view scan` lines show rays
+  reaching 64 blocks), seed 303 spawns where a hill hides the tree still fail `explore #logs` at 1200
+  ticks in about 2 of 5 runs: the nearest-frontier order wanders downhill and west. A person would climb
+  for a view or follow open ground. Needs a design (score by height or by unseen sky area); runs
+  `runs/test-body-405d2ee3274444ae8e1c75b959a749fb`, `...11b45b28...` (3 follower stalls at deviation 0.8).
 - Watch: the `place` registry budget (80 ticks) is tight with human aiming (GLM review, about 74-81
   ticks worst case); check for place timeouts in the first live runs.
 - Decision owed (user): the raw-store/perception boundary in architecture §4/§5.1 is not enforced in

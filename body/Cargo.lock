@@ -2264,6 +2264,7 @@ dependencies = [
  "azalea-protocol",
  "azalea-registry",
  "azalea-world",
+ "log",
  "praxion-decoder",
  "praxion-tee",
  "praxion-world",
