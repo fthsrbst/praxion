@@ -15,8 +15,8 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
   2026-10-31: results in `docs/sessions/02-body-connection.md` "2.7 Windows runs"; Demo-0's experiments
   passed. Spikes and their one-command setup: `spikes/` (`python setup.py`, `SETUP.md`).
   Agreed decisions go to `docs/decisions.md`; per-session notes go to `docs/sessions/NN-topic.md`.
-  Next: finish Demo-0, then a thin Demo-2 slice on the headless body, then Demo-1 (order decided
-  2026-11-03, architecture §1.1), each designed with the user step by step. The remaining hands
+  Next (decided 2026-11-07): a simplification pass, then the movement-style layer on the headless
+  body, then a thin Demo-2 slice, then the rest of Demo-1 (architecture §1.1). The remaining hands
   experiments (E8, E10, E11, E12, E15, E16) gate Demo-1 only (`backlog.md`).
 - Demo-0 product code is allowed (decision 2026-11-01). Do not write Demo-1 code (SendInput actuator,
   take-over, indicator) until E8, E10, E11, E12, E15 and E16 have passed. Experiment code in `spikes/`
@@ -51,6 +51,7 @@ data structure and every interface. We build it together; agents never design al
 Start of a session:
 1. Keep the machine awake (see "Keep-awake").
 2. Read `backlog.md` (open items) and the newest entries of `notes.md`.
+   Stop orphaned OpenCode workers: `.claude/skills/opencode-worker/scripts/oc-reap.sh`.
 3. Follow the global hub protocol (`agent_checkin`, `project_get`) once the project is registered there.
 
 End of a session, or whenever you stop with work unfinished:

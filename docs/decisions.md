@@ -3,6 +3,27 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-07
+
+User complaints: the code is too complicated to explain, and the bot moves like a bot. Agreed plan
+(Claude's recommendation, approved by the user):
+
+- **Order changes: simplify, then movement style, then the thin Demo-2 slice.** The movement-style
+  layer (session 13) does not need SendInput, so it is built on the headless body and watched with
+  `harness watch`. Replaces the 2026-11-03 order "Demo-0, Demo-2 slice, Demo-1" only in that the
+  style layer moves ahead of the slice; the rest of Demo-1 (SendInput, take-over, indicator) stays gated.
+- **Simplification pass before new features** (`docs/reviews/2026-11-07-complexity/synthesis.md`):
+  delete code with no consumer, one driver instead of two, split `runner.rs` per primitive, debug
+  output behind one trace switch, shared test fixtures, clippy check.
+- **`fakeworld` is deleted.** Decided as the level-1 test world, it never got a consumer. It returns
+  from git history if a test needs it. Rules out: keeping unused crates "for later".
+- **One skills folder:** `.claude/skills` (OpenCode reads it too); `.agents/skills` removed.
+- **Orphaned OpenCode sessions are reaped at session start** (`oc-reap.sh`); each run's title carries
+  its watchdog pid.
+- **Team:** DeepSeek v4.1 Flash writes, GLM-5.3-Flash reviews short diffs, at most one Claude Sonnet
+  agent for research or final review, Claude Opus orchestrates and verifies.
+- The user asked for speed: no per-step explanations; one walkthrough at the end of the run.
+
 ## 2026-11-03
 
 All on Claude's recommendation, agreed by the user, except where marked (user).

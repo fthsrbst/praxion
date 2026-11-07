@@ -6,6 +6,26 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-07 - OpenCode DeepSeek V4.1 Flash - s9d: per-rule failure counts and leaving a peak
+
+- **Per-rule failure counts (decision 2026-11-02) are in.** A frame keeps a `BTreeMap<rule, count>`;
+  a rule's own success clears only its entry, another rule firing leaves it alone, and the third
+  failure of any one rule fails the frame with that kind (`interp.rs:43`, `:657`, `:718`). The A-B-A
+  test (`tests.rs:631`) is the live shape from `runs/s9d-f11-3-seed303` seq 83-125.
+- **The peak failure was a drop, not the map.** Seed 303's run ended in a one-cell pit after
+  `explore` planned an eight-block drop (the WIP had raised `max_drop` to 8 to leave the plateau).
+  It now uses the planner's safe three-block drop (`runner.rs:1604`), and the follower releases
+  forward once airborne instead of carrying the fall into the next ledge
+  (`follow.rs:129`, test `:284`). A peak is left along its slopes.
+- **Nearest-first exploration circles the sight ring.** Seed 202 is plains with its forest 160
+  blocks away (`locate biome`: `[84,65,144]`, evidence `logs/s9d/biomeprobe/`); nearest-first walked
+  the ring at the 80-block sight edge for 4,000 ticks. The first eight goals of a call stay
+  nearest-first, then farther-from-origin frontiers win (`runner.rs:1214`, `:1789`, test `:2959`).
+  Seed 202 then finished in 2,208-2,685 ticks in the probes.
+- **Still open:** the `get_stone_pickaxe` video runs show the same pit problem from spawns the
+  wooden gate does not sample; known-map lag after a place; the runner is still a script, not a
+  `-m server` harness test.
+
 ## 2026-11-03 - Claude Opus 5.5 - macOS session: setup, test parity, first stone from a fresh spawn
 
 - **macOS works for body work.** `setup.py` finished without downloads by seeding

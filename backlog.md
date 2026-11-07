@@ -19,6 +19,16 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Simplification pass, then movement style (2026-11-07 plan)
+- Source: Claude Opus 5.5, 2026-11-07 (`docs/decisions.md` 2026-11-07)
+- State: audit done (`docs/reviews/2026-11-07-complexity/synthesis.md`); A1 worker safety done.
+- Remaining: A2 dead code and deps, A3 dig-receipt fix in the body driver, A4 split `runner.rs` and a
+  trace switch, A5 shared test fixtures and clippy; then movement style v0 on the headless body; then
+  one walkthrough for the user.
+- Unverified carry-over: the orphan worker `s9d2-resume` added an "explore waits while airborne before
+  planning" guard (`runner.rs`, Explore::tick). Unit tests pass; no live run yet. Check it with the
+  bad-spawn explore item below.
+
 ### End-to-end skills from a free spawn
 - Source: OpenCode DeepSeek V4.1 Flash, 2026-11-02; updated Claude Opus 5.5, 2026-11-03 (macOS)
 - State: 2026-11-03 landed table carry, `mine` tool selection, one-shot swaps, per-run `ExploreMemory`
@@ -224,31 +234,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   published before its scancode; guarded by the gate except on a same-thread panic) and #6-8 (E12
   timestamps taken at the wrong points) must be fixed before E12.
 - Pointers: `spikes/README.md`, `SETUP.md`, `logs/briefs/` (worker briefs, ignored)
-
-### Step 9 follow-ups (before step 10)
-- Source: Claude Opus 5.5, 2026-11-01 (step 9 worker report)
-- State: reflexes and arbiter written, 47 tests and a 72-cell coverage matrix pass on a mirror build; the real
-  workspace did not build at that moment because of step 8b's in-progress gamedata and headless changes.
-  The independent review (`logs/demo0/t9-reflexes-arbiter.review.md`) found 2 major and 6 minor items; all
-  eight are fixed (2026-11-01): unknown blocks stay unknown in the reflex layer, the own entity data feeds
-  air and burning, plus the pitch sign, the zero tick settings, the nearest Enderman, the push-before-start
-  order, the single-step lava/unknown refusal and the arrow strafe side.
-- Remaining: (1) verify and commit step 9 in the real workspace after 8b; (2) done: the player's own entity
-  data (shared flags: burning; air supply) is parsed in `praxion-world` (`own_air`, `own_burning`), exposed
-  through perception (`air`, `burning`, HUD facts) and the drowning and fire reflexes read them, keeping the
-  simulated air only as the fallback while the fact is unknown; (3) the melee reflex's `Attack.weapon` must
-  reach the actuator through `ControlFrame.select_slot` once 8b adds it; (4) done: independent review of
-  step 9, findings fixed.
-- Pointers: `logs/demo0/s9-reflexes-arbiter.answer.txt`, `logs/demo0/t9-reflexes-arbiter.review.md`,
-  `body/crates/reflexes`, `body/crates/arbiter`
-
-### oc-run.sh: unique session title per run
-- Source: Claude Opus 5.5, 2026-11-01 (review rv1 by Iceman, finding "title-only session match")
-- State: `stop_session` finds the session by title = brief name; two runs of the same brief at once could
-  export and delete the other run's session.
-- Remaining: pass `--title "$name-$$-$start"` and match that exact title. Edit only when no oc-run.sh is
-  running (notes.md 2026-11-01).
-- Pointers: `.claude/skills/opencode-worker/scripts/oc-run.sh`
 
 ### Body restart in the middle of a game connection (before Demo-1)
 - Source: Claude Opus 5.5, 2026-11-01

@@ -21,6 +21,9 @@ wall=${OC_WALL_SECS:-1800}
 [[ -r $brief ]] || { echo "oc-run: brief not readable: $brief" >&2; exit 13; }
 mkdir -p "$logdir" || exit 13
 name=$(basename "$brief" .md)
+# Unique per run: two runs of one brief never share a session, and oc-reap.sh
+# reads the watchdog pid back from the title to find orphans.
+title="$name.$$"
 # Distinct suffixes so these never collide with files the worker itself creates.
 log=$logdir/$name.events.jsonl
 out=$logdir/$name.answer.txt
@@ -45,9 +48,9 @@ stop_session() {
   local id dest
   dest=$logdir/$name.session.json
   id=$(opencode session list --format json -n 100 2>/dev/null \
-    | node "$(dirname "$0")/oc-events.js" session-id "$name" 2>/dev/null)
+    | node "$(dirname "$0")/oc-events.js" session-id "$title" 2>/dev/null)
   if [[ -z $id ]]; then
-    echo "oc-run: WARNING no session titled '$name' to stop" >&2
+    echo "oc-run: WARNING no session titled '$title' to stop" >&2
     return 0
   fi
   if ! opencode session export "$id" >"$dest" 2>/dev/null || [[ ! -s $dest ]]; then
@@ -62,7 +65,7 @@ stop_session() {
   return 0
 }
 
-opencode run --auto --format json --title "$name" --model "$model" "$(cat "$brief")" \
+opencode run --auto --format json --title "$title" --model "$model" "$(cat "$brief")" \
   </dev/null >"$log" 2>&1 &
 pid=$!
 

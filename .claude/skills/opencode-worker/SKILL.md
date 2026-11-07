@@ -36,6 +36,7 @@ Do not delegate when the spec is still open. Close the open questions first, the
 | `opencode/deepseek-v4.1-flash-free` | Same model, free on Zen. Fallback when Go fails or its limit is reached. | PONG 3 s; same bug test passed in 16 s |
 | `opencode-go/minimax-m3.1-flash` | Second opinion from a different model family. | PONG 2 s |
 | `opencode-go/beam-free` | Free, limited time. Untested beyond PONG. | PONG 1 s |
+| `opencode-go/glm-5.3-flash` | Short reviews from a different family than DeepSeek. Not for long reports. | 2026-11-07: a 15-finding audit came back with garbled, mixed-language passages; verify every claim |
 
 All rows measured 2026-10-31 on Windows. The event log reports `cost: 0` even for Go models;
 Go usage is metered as an allowance, not in `step_finish.cost`. Check spend in the OpenCode Console.
@@ -98,12 +99,18 @@ Verified under `--auto` on macOS (2026-10-21) and Windows (2026-10-31). Windows 
    (exit 0 path and exit 11 path; the shared `opencode serve --service` process correctly survives).
    Killing the client is not enough: the service keeps running the session (measured 2026-10-31: a
    timed-out decoder worker kept editing files and running `cargo clean` for 18 minutes). So on exit
-   10 or 11 the script also finds the session by its `--title` (`<brief-name>`), exports it to
+   10 or 11 the script also finds the session by its `--title` (`<brief-name>.<watchdog pid>`), exports it to
    `<log-dir>/<name>.session.json`, and deletes it; it names the session in its output, and warns
    without failing if no session matches. If you see that warning, stop the session by hand:
    `opencode session list`, `opencode session export <id> > <log-dir>/<name>.session.json`,
    `opencode session delete <id>`.
    Do not `&` workers or "check back later": nothing wakes you when they die.
+   **Orphans:** if the watchdog itself dies (sleep, reboot, killed orchestrator) the service keeps the
+   session running; on 2026-11-07 one had edited the tree unsupervised for five days. Run
+   `scripts/oc-reap.sh [log-dir]` at the start of every session: it exports and deletes any session
+   updated in the last hour (`OC_REAP_MINUTES`) whose watchdog pid (title suffix) is gone, and lists
+   recent sessions without a pid suffix for a manual check. Verified 2026-11-07 (live run skipped,
+   finished run reaped).
 3. Verify the result yourself. Exit 0 is not success. Success means the expected diff, no out-of-scope
    changes (`git status --porcelain`), and your own run of the build and tests passing.
 4. Have a different model review non-trivial output before it is committed.

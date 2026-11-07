@@ -121,12 +121,16 @@ the exact effect; the record's `effects` is the union over all arguments.
 `observe(fact)` is discrete, settles with evidence `FactKnown`, and times out
 at its record's default `max_ticks` (100). `explore(target)` is continuous with a
 1200-tick budget: while no target cell is in the perception known map within 32
-blocks it walks to the nearest frontier (a known walkable cell next to unknown
-cells, scored away from cells already explored in that call); once a target is
-known it plans straight to it. It finishes `Confirmed` when `near(target, 5)` is
-known — the radius of the `mine` search, so the target is in reach — or
-`Failed(not_found)` at the budget. `do skill(...)` calls another skill. `done`
-finishes the skill; `fail(kind)` fails it.
+blocks it walks to a frontier (a known walkable cell next to unknown cells,
+scored away from cells already explored in that call). The first eight goals in
+a call stay nearest-first; after that a frontier farther from the call's origin
+wins, so the body heads outward instead of circling the sight ring. Descending
+stays within the planner's safe three-block drop. When dry land is exhausted
+(40 idle ticks) the call may swim. Once a target is known it plans straight to
+it. It finishes `Confirmed` when `near(target, 5)` is known — the radius of the
+`mine` search, so the target is in reach — or `Failed(not_found)` at the
+budget. `do skill(...)` calls another skill. `done` finishes the skill;
+`fail(kind)` fails it.
 
 ## One tick
 
