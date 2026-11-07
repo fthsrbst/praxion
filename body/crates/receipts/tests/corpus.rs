@@ -39,15 +39,17 @@ use azalea_protocol::packets::{
     },
 };
 use azalea_protocol::write::{encode_to_network_packet, serialize_packet};
+use azalea_registry::DataRegistry;
 use azalea_registry::builtin::{BlockKind, ItemKind};
 use azalea_registry::data::DimensionKind;
 use azalea_registry::identifier::Identifier;
-use azalea_registry::DataRegistry;
 use praxion_decoder::{Decoder, Dir, Event, Packet};
 use praxion_eventlog::{EventKind, Outcome, Writer, read};
 use praxion_receipts::{Engine, Intent, ReceiptId};
 use praxion_tee::{Kind, Reader, Record, write_header, write_record};
 use praxion_world::{BlockPos, ItemStack, World};
+
+mod common;
 
 struct ActionInfo {
     kind: &'static str,
@@ -192,8 +194,13 @@ impl Replay {
         self.engine
             .observe(&mut self.writer, self.tick, ts_ns, &packet, &self.world)
             .unwrap();
-        if matches!(packet, Packet::PlayServerbound(ServerboundGamePacket::ClientTickEnd(_))) {
-            self.engine.advance(&mut self.writer, self.tick, ts_ns).unwrap();
+        if matches!(
+            packet,
+            Packet::PlayServerbound(ServerboundGamePacket::ClientTickEnd(_))
+        ) {
+            self.engine
+                .advance(&mut self.writer, self.tick, ts_ns)
+                .unwrap();
             self.tick += 1;
         }
     }
@@ -228,7 +235,10 @@ fn replay_capture(name: &str) -> Option<Replay> {
 
 fn replay_path(path: &Path, label: &str) -> Option<Replay> {
     if !path.is_file() {
-        eprintln!("SKIP corpus: {} does not exist on this machine", path.display());
+        eprintln!(
+            "SKIP corpus: {} does not exist on this machine",
+            path.display()
+        );
         return None;
     }
     let file = File::open(path).unwrap();
@@ -241,10 +251,7 @@ fn replay_path(path: &Path, label: &str) -> Option<Replay> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let run_dir = repo_root()
-        .join("body/target/receipts-tests")
-        .join(format!("corpus-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&run_dir);
+    let run_dir = common::test_dir(&format!("corpus-{label}"));
     let mut replay = Replay::new(run_dir);
     for record in reader {
         let record = record.unwrap();
@@ -319,16 +326,13 @@ fn report(name: &str, replay: &Replay) {
     }
 
     // One note per unconfirmed action, from the log the engine wrote.
-    let log = read(
-        replay
-            .writer
-            .path()
-            .to_path_buf(),
-    )
-    .unwrap();
+    let log = read(replay.writer.path().to_path_buf()).unwrap();
     let mut notes = BTreeMap::new();
     for event in &log.events {
-        if let EventKind::ReceiptSettled { receipt_id, note, .. } = &event.event {
+        if let EventKind::ReceiptSettled {
+            receipt_id, note, ..
+        } = &event.event
+        {
             notes.insert(*receipt_id, note.clone());
         }
     }
@@ -386,7 +390,10 @@ fn e2e_capture_replay() {
 fn find_captures_with_player_actions() {
     let dir = repo_root().join("spikes/captures");
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        eprintln!("SKIP corpus: {} does not exist on this machine", dir.display());
+        eprintln!(
+            "SKIP corpus: {} does not exist on this machine",
+            dir.display()
+        );
         return;
     };
     let mut names: Vec<String> = entries
@@ -432,12 +439,7 @@ impl CaptureBuilder {
         }
     }
 
-    fn packet<P: ProtocolPacket + Debug>(
-        &mut self,
-        dir: Dir,
-        packet: &P,
-        threshold: Option<u32>,
-    ) {
+    fn packet<P: ProtocolPacket + Debug>(&mut self, dir: Dir, packet: &P, threshold: Option<u32>) {
         let raw = serialize_packet(packet).expect("serialize");
         let mut cipher = None;
         let wire = encode_to_network_packet(&raw, threshold, &mut cipher);
@@ -694,6 +696,9 @@ fn synthetic_capture_replays_dig_and_place_as_confirmed() {
     let log = read(replay.writer.path().to_path_buf()).unwrap();
     assert!(log.events.iter().any(|event| matches!(
         &event.event,
-        EventKind::ReceiptSettled { outcome: Outcome::Confirmed, .. }
+        EventKind::ReceiptSettled {
+            outcome: Outcome::Confirmed,
+            ..
+        }
     )));
 }

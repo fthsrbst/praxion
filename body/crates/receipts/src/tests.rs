@@ -1,56 +1,23 @@
-use std::path::{Path, PathBuf};
-
 use azalea_block::BlockState;
 use azalea_core::entity_id::{MinecraftEntityId, OptionalEntityId};
-use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos, Vec3};
-use azalea_inventory::operations::ClickType;
-use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
 use azalea_protocol::packets::game::{
-    ClientboundBlockChangedAck, ClientboundBlockUpdate, ClientboundContainerSetContent,
     ClientboundContainerSetSlot, ClientboundDamageEvent, ClientboundGamePacket,
-    ClientboundOpenScreen, ClientboundPlayerPosition, ClientboundSectionBlocksUpdate,
-    ServerboundContainerClick, ServerboundGamePacket,
-    c_section_blocks_update::BlockStateWithPosition, s_container_click::HashedStack,
+    ClientboundOpenScreen, ClientboundSectionBlocksUpdate,
+    c_section_blocks_update::BlockStateWithPosition,
 };
-use azalea_registry::builtin::{BlockKind, ItemKind, MenuKind};
 use azalea_registry::Registry;
+use azalea_registry::builtin::{ItemKind, MenuKind};
 use praxion_decoder::Packet;
-use praxion_eventlog::{Event, EventKind, Outcome, Writer, read};
-use praxion_world::{ItemStack, World};
+use praxion_eventlog::{EventKind, Outcome};
+use praxion_world::ItemStack;
 
-use crate::{
-    Engine, Intent, ReceiptId, interpreter_outcome, LATE_RETENTION_TICKS,
-};
+use crate::{Engine, Intent, LATE_RETENTION_TICKS, ReceiptId, interpreter_outcome};
 
-fn test_dir(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/receipts-tests")
-        .join(format!("{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+#[path = "../tests/common/mod.rs"]
+mod common;
 
-fn stone() -> BlockState {
-    BlockState::from(BlockKind::Stone)
-}
-
-fn dirt() -> BlockState {
-    BlockState::from(BlockKind::Dirt)
-}
-
-fn block_update(pos: BlockPos, state: BlockState) -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
-        pos,
-        block_state: state,
-    }))
-}
-
-fn block_ack(seq: u32) -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::BlockChangedAck(
-        ClientboundBlockChangedAck { seq },
-    ))
-}
+use common::*;
 
 /// The 26.3 damage packet a hit produces (the live capture showed this, not a
 /// hurt animation, for a NoAI zombie).
@@ -66,40 +33,12 @@ fn damage_event(id: i32) -> Packet {
 
 fn section_update(pos: BlockPos, state: BlockState) -> Packet {
     let section = ChunkSectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4);
-    let local = ChunkSectionBlockPos::new(
-        (pos.x & 15) as u8,
-        (pos.y & 15) as u8,
-        (pos.z & 15) as u8,
-    );
+    let local =
+        ChunkSectionBlockPos::new((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8);
     Packet::PlayClientbound(ClientboundGamePacket::SectionBlocksUpdate(
         ClientboundSectionBlocksUpdate {
             section_pos: section,
             states: vec![BlockStateWithPosition { pos: local, state }],
-        },
-    ))
-}
-
-fn player_position() -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::PlayerPosition(
-        ClientboundPlayerPosition {
-            id: 1,
-            change: PositionMoveRotation {
-                pos: Vec3::new(0.0, 64.0, 0.0),
-                delta: Vec3::ZERO,
-                look_direction: Default::default(),
-            },
-            relative: RelativeMovements::all_absolute(),
-        },
-    ))
-}
-
-fn content(container_id: i32, state_id: u32, items: Vec<ItemStack>) -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::ContainerSetContent(
-        ClientboundContainerSetContent {
-            container_id,
-            state_id,
-            items,
-            carried_item: ItemStack::Empty,
         },
     ))
 }
@@ -113,88 +52,6 @@ fn set_slot(container_id: i32, state_id: u32, slot: u16, item: ItemStack) -> Pac
             item_stack: item,
         },
     ))
-}
-
-fn click(container_id: i32, state_id: u32, slot: i16) -> Packet {
-    Packet::PlayServerbound(ServerboundGamePacket::ContainerClick(
-        ServerboundContainerClick {
-            container_id,
-            state_id,
-            slot_num: slot,
-            button_num: 0,
-            click_type: ClickType::Pickup,
-            changed_slots: Default::default(),
-            carried_item: HashedStack(None),
-        },
-    ))
-}
-
-struct Harness {
-    dir: PathBuf,
-    writer: Writer,
-    engine: Engine,
-    world: World,
-    tick: u64,
-    ts_ns: u64,
-}
-
-impl Harness {
-    fn new(name: &str) -> Self {
-        let dir = test_dir(name);
-        let writer = Writer::create(&dir).unwrap();
-        let mut world = World::new();
-        world.follow(0);
-        Self {
-            dir,
-            writer,
-            engine: Engine::new(),
-            world,
-            tick: 0,
-            ts_ns: 1_793_443_244_558_717_800,
-        }
-    }
-
-    fn register(&mut self, intent: Intent) -> ReceiptId {
-        self.engine
-            .register(&mut self.writer, self.tick, self.ts_ns, intent, &self.world)
-            .unwrap()
-    }
-
-    fn apply(&mut self, packet: &Packet) {
-        match packet {
-            Packet::PlayClientbound(packet) => {
-                self.world.apply_clientbound_play(0, packet);
-            }
-            Packet::PlayServerbound(packet) => {
-                self.world.apply_serverbound_play(0, packet);
-            }
-            _ => {}
-        }
-    }
-
-    fn observe_at(&mut self, tick: u64, packet: Packet) {
-        self.apply(&packet);
-        self.ts_ns += 1;
-        self.engine
-            .observe(&mut self.writer, tick, self.ts_ns, &packet, &self.world)
-            .unwrap();
-    }
-
-    fn advance_at(&mut self, tick: u64) {
-        self.ts_ns += 1;
-        self.engine
-            .advance(&mut self.writer, tick, self.ts_ns)
-            .unwrap();
-    }
-
-    fn outcome(&self, receipt: ReceiptId) -> Option<Outcome> {
-        self.engine.outcome(receipt)
-    }
-
-    fn events(&mut self) -> Vec<Event> {
-        self.writer.flush().unwrap();
-        read(self.dir.join(praxion_eventlog::FILE_NAME)).unwrap().events
-    }
 }
 
 #[test]
@@ -218,9 +75,12 @@ fn dig_confirms_on_air_plus_matching_ack_in_either_order() {
     let settled: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.event {
-            EventKind::ReceiptSettled { receipt_id, outcome, evidence, .. } => {
-                Some((*receipt_id, *outcome, evidence.clone()))
-            }
+            EventKind::ReceiptSettled {
+                receipt_id,
+                outcome,
+                evidence,
+                ..
+            } => Some((*receipt_id, *outcome, evidence.clone())),
             _ => None,
         })
         .collect();
@@ -255,9 +115,10 @@ fn dig_late_evidence_is_logged_but_does_not_reopen_the_receipt() {
         .events()
         .into_iter()
         .filter_map(|event| match event.event {
-            EventKind::LateEvidence { receipt_id, evidence_kind } => {
-                Some((receipt_id, evidence_kind))
-            }
+            EventKind::LateEvidence {
+                receipt_id,
+                evidence_kind,
+            } => Some((receipt_id, evidence_kind)),
             _ => None,
         })
         .collect();
@@ -334,10 +195,18 @@ fn preemption_settles_preempted() {
     let mut h = Harness::new("preempt");
     h.tick = 0;
     let receipt = h.register(Intent::dig(1, BlockPos::new(0, 64, 0), 1, 0));
-    assert!(h.engine.preempt(&mut h.writer, receipt, 1, h.ts_ns).unwrap());
+    assert!(
+        h.engine
+            .preempt(&mut h.writer, receipt, 1, h.ts_ns)
+            .unwrap()
+    );
     assert_eq!(h.outcome(receipt), Some(Outcome::Preempted));
     assert!(!h.engine.is_open(receipt));
-    assert!(!h.engine.preempt(&mut h.writer, receipt, 2, h.ts_ns).unwrap());
+    assert!(
+        !h.engine
+            .preempt(&mut h.writer, receipt, 2, h.ts_ns)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -367,18 +236,16 @@ fn a_same_batch_block_update_confirms_with_the_pre_action_state() {
     let pos = BlockPos::new(0, 64, 0);
     h.apply(&block_update(pos, stone()));
     h.tick = 0;
-    let receipt = h.register(
-        Intent::place(1, pos, "stone", 7, 0).with_initial_block(Some(BlockState::AIR)),
-    );
+    let receipt =
+        h.register(Intent::place(1, pos, "stone", 7, 0).with_initial_block(Some(BlockState::AIR)));
     h.observe_at(1, block_update(pos, stone()));
     h.observe_at(1, block_ack(7));
     assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
 
     // Placing the state that was already there is still not a change.
     h.apply(&block_update(pos, dirt()));
-    let unchanged = h.register(
-        Intent::place(2, pos, "dirt", 8, 1).with_initial_block(Some(dirt())),
-    );
+    let unchanged =
+        h.register(Intent::place(2, pos, "dirt", 8, 1).with_initial_block(Some(dirt())));
     h.observe_at(2, block_update(pos, dirt()));
     h.observe_at(2, block_ack(8));
     h.advance_at(30);
@@ -443,7 +310,9 @@ fn a_dig_update_before_registration_still_confirms_with_its_ack() {
         .flatten()
         .collect();
     assert!(
-        evidence.iter().any(|hit| hit.kind == "block_air" && hit.tick == 2641),
+        evidence
+            .iter()
+            .any(|hit| hit.kind == "block_air" && hit.tick == 2641),
         "the pre-click stone plus the observed air is the block evidence: {evidence:?}"
     );
     assert!(
@@ -495,7 +364,9 @@ fn the_live_place_order_confirms_with_the_observed_state_and_the_same_batch_ack(
         .flatten()
         .collect();
     assert!(
-        evidence.iter().any(|hit| hit.kind == "block_state" && hit.tick == 300),
+        evidence
+            .iter()
+            .any(|hit| hit.kind == "block_state" && hit.tick == 300),
         "block evidence comes from the pre-action air plus the observed placed state: {evidence:?}"
     );
     assert!(
@@ -526,13 +397,13 @@ fn a_craft_result_in_the_open_menu_player_slots_counts_as_storage() {
     // and `World::inventory` is not updated while a menu is open. The storage
     // receipt must read the menu's copy.
     let mut h = Harness::new("craft-open-menu");
-    h.apply(&Packet::PlayClientbound(
-        ClientboundGamePacket::OpenScreen(ClientboundOpenScreen {
+    h.apply(&Packet::PlayClientbound(ClientboundGamePacket::OpenScreen(
+        ClientboundOpenScreen {
             container_id: 1,
             menu_type: MenuKind::Crafting,
             title: "Crafting".into(),
-        }),
-    ));
+        },
+    )));
     h.apply(&content(1, 0, vec![ItemStack::Empty; 46]));
     h.tick = 0;
     let receipt = h.register(Intent::storage_inventory(
@@ -552,8 +423,10 @@ fn a_craft_result_in_the_open_menu_player_slots_counts_as_storage() {
 #[test]
 fn inventory_delta_confirms_and_late_inventory_is_logged() {
     let mut h = Harness::new("inventory");
-    h.world
-        .apply_clientbound_play(0, &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]));
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]),
+    );
     h.tick = 0;
     let receipt = h.register(Intent::inventory(1, "craft", "stone", 1, 0).with_window(5));
     h.observe_at(1, content(0, 1, vec![ItemStack::new(ItemKind::Stone, 6)]));
@@ -604,24 +477,13 @@ fn a_tag_inventory_receipt_accepts_any_item_in_the_tag() {
     );
 }
 
-fn content_packet(
-    container_id: i32,
-    state_id: u32,
-    items: Vec<ItemStack>,
-) -> ClientboundGamePacket {
-    ClientboundGamePacket::ContainerSetContent(ClientboundContainerSetContent {
-        container_id,
-        state_id,
-        items,
-        carried_item: ItemStack::Empty,
-    })
-}
-
 #[test]
 fn a_stale_pre_start_inventory_cannot_confirm() {
     let mut h = Harness::new("stale-inventory");
-    h.world
-        .apply_clientbound_play(0, &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]));
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]),
+    );
     h.tick = 10;
     let receipt = h.register(Intent::inventory(1, "pickup", "stone", 1, 10));
     // The packet is stamped before the start but reaches us after registration.
@@ -639,13 +501,12 @@ fn movement_is_unrefuted_without_a_correction_and_refuted_with_one() {
     let receipt = h.register(Intent::movement(1, "move_to", 0).with_window(5));
     h.advance_at(5);
     assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
-    let note = h
-        .events()
-        .into_iter()
-        .find_map(|event| match event.event {
-            EventKind::ReceiptSettled { receipt_id, note, .. } if receipt_id == receipt => note,
-            _ => None,
-        });
+    let note = h.events().into_iter().find_map(|event| match event.event {
+        EventKind::ReceiptSettled {
+            receipt_id, note, ..
+        } if receipt_id == receipt => note,
+        _ => None,
+    });
     assert_eq!(note.as_deref(), Some("unrefuted"));
 
     let corrected = h.register(Intent::movement(2, "move_to", 6).with_window(5));
@@ -656,8 +517,10 @@ fn movement_is_unrefuted_without_a_correction_and_refuted_with_one() {
 #[test]
 fn slot_click_confirms_without_a_correction_and_refutes_with_one() {
     let mut h = Harness::new("slot-click");
-    h.world
-        .apply_clientbound_play(0, &content_packet(0, 1, vec![ItemStack::new(ItemKind::Stone, 1)]));
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 1, vec![ItemStack::new(ItemKind::Stone, 1)]),
+    );
     h.tick = 0;
     let receipt = h.register(Intent::slot_click(1, 0, 0, 1, 0).with_window(5));
     h.observe_at(1, click(0, 1, 0));
@@ -806,7 +669,10 @@ fn fault_injection_never_reports_a_false_confirmed() {
                     h.observe_at(start + 1, content(0, 1, vec![ItemStack::new(item, 6)]));
                 } else if rng.chance(50) {
                     // A stale inventory packet stamped before the start.
-                    h.observe_at(start.saturating_sub(1), content(0, 1, vec![ItemStack::new(item, 6)]));
+                    h.observe_at(
+                        start.saturating_sub(1),
+                        content(0, 1, vec![ItemStack::new(item, 6)]),
+                    );
                 }
                 receipt
             }
@@ -831,7 +697,10 @@ fn fault_injection_never_reports_a_false_confirmed() {
                     h.observe_at(start + 1, click(0, 1, 0));
                 } else if rng.chance(50) {
                     h.observe_at(start + 1, click(0, 1, 0));
-                    h.observe_at(start + 2, set_slot(0, 2, 0, ItemStack::new(ItemKind::Stone, 1)));
+                    h.observe_at(
+                        start + 2,
+                        set_slot(0, 2, 0, ItemStack::new(ItemKind::Stone, 1)),
+                    );
                 }
                 receipt
             }
@@ -858,13 +727,12 @@ fn fault_injection_never_reports_a_false_confirmed() {
     };
     eprintln!(
         "fault injection: actions={} happened={} false_confirmed={} unconfirmed_when_happened={} rate={:.3}",
-        stats.actions,
-        stats.happened,
-        stats.false_confirmed,
-        stats.unconfirmed_when_happened,
-        rate
+        stats.actions, stats.happened, stats.false_confirmed, stats.unconfirmed_when_happened, rate
     );
-    assert_eq!(stats.false_confirmed, 0, "a confirmed receipt must have happened");
+    assert_eq!(
+        stats.false_confirmed, 0,
+        "a confirmed receipt must have happened"
+    );
     assert_eq!(stats.actions, 10_000);
 }
 
@@ -884,13 +752,12 @@ fn dig_revert_inside_the_window_clears_the_air_hit() {
     h.observe_at(3, block_ack(5));
     h.advance_at(10);
     assert_eq!(h.outcome(receipt), Some(Outcome::Unconfirmed));
-    let note = h
-        .events()
-        .into_iter()
-        .find_map(|event| match event.event {
-            EventKind::ReceiptSettled { receipt_id, note, .. } if receipt_id == receipt => note,
-            _ => None,
-        });
+    let note = h.events().into_iter().find_map(|event| match event.event {
+        EventKind::ReceiptSettled {
+            receipt_id, note, ..
+        } if receipt_id == receipt => note,
+        _ => None,
+    });
     assert_eq!(note.as_deref(), Some("missing_block"));
 }
 
@@ -931,15 +798,20 @@ fn craft_is_attributed_to_the_click_that_took_the_result() {
     h.tick = 0;
     let receipt = h.register(Intent::craft(1, "stone", 1, 0, 10, 0).with_window(10));
     assert_eq!(
-        h.events()
-            .into_iter()
-            .find_map(|event| match event.event {
-                EventKind::IntentStarted { intent_id, attribution, .. } if intent_id == 1 => {
-                    Some(attribution)
-                }
-                _ => None,
-            }),
-        Some(praxion_eventlog::Attribution::SlotClick { state_id: 10, slot: 0 })
+        h.events().into_iter().find_map(|event| match event.event {
+            EventKind::IntentStarted {
+                intent_id,
+                attribution,
+                ..
+            } if intent_id == 1 => {
+                Some(attribution)
+            }
+            _ => None,
+        }),
+        Some(praxion_eventlog::Attribution::SlotClick {
+            state_id: 10,
+            slot: 0
+        })
     );
     // A pickup of the same item before the click's state id is unrelated; it
     // must not confirm the craft and must not count toward its delta.
@@ -1017,7 +889,10 @@ fn one_hundred_thousand_settled_receipts_do_not_slow_the_packet_scan() {
     assert_eq!(large.engine.settled_count(), 0);
     assert_eq!(large.outcome(0), Some(Outcome::Expired));
     assert_eq!(large.outcome(99_999), Some(Outcome::Expired));
-    assert_eq!(large.engine.outcome_for_intent(99_999), Some(Outcome::Expired));
+    assert_eq!(
+        large.engine.outcome_for_intent(99_999),
+        Some(Outcome::Expired)
+    );
     let large_ns = ns_per_observe(&mut large, iterations);
 
     eprintln!(

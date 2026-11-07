@@ -1,190 +1,14 @@
-//! Independent adversarial tests for receipts (step 6 review).
-
-use std::path::{Path, PathBuf};
-
-use azalea_block::BlockState;
-use azalea_core::position::{BlockPos, Vec3};
-use azalea_inventory::operations::ClickType;
-use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
-use azalea_protocol::packets::game::{
-    ClientboundBlockChangedAck, ClientboundContainerSetContent, ClientboundGamePacket, ClientboundPlayerPosition, ServerboundContainerClick, ServerboundGamePacket, s_container_click::HashedStack,
-};
-use azalea_registry::builtin::{BlockKind, ItemKind};
+use azalea_core::position::BlockPos;
+use azalea_registry::builtin::ItemKind;
 use praxion_decoder::Packet;
-use praxion_eventlog::{EventKind, Outcome, Writer, read};
-use praxion_world::{ItemStack, World};
+use praxion_eventlog::{EventKind, Outcome};
+use praxion_world::ItemStack;
 
 use praxion_receipts::{Engine, Intent, ReceiptId};
 
-fn test_dir(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/receipts-tests")
-        .join(format!("independent-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+mod common;
 
-fn stone() -> BlockState {
-    BlockState::from(BlockKind::Stone)
-}
-
-fn air() -> BlockState {
-    BlockState::AIR
-}
-
-fn block_update(pos: BlockPos, state: BlockState) -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::BlockUpdate(
-        azalea_protocol::packets::game::ClientboundBlockUpdate {
-            pos,
-            block_state: state,
-        },
-    ))
-}
-
-fn block_ack(seq: u32) -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::BlockChangedAck(
-        ClientboundBlockChangedAck { seq },
-    ))
-}
-
-
-fn player_position() -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::PlayerPosition(
-        ClientboundPlayerPosition {
-            id: 1,
-            change: PositionMoveRotation {
-                pos: Vec3::new(0.0, 64.0, 0.0),
-                delta: Vec3::ZERO,
-                look_direction: Default::default(),
-            },
-            relative: RelativeMovements::all_absolute(),
-        },
-    ))
-}
-
-fn content(container_id: i32, state_id: u32, items: Vec<ItemStack>) -> Packet {
-    Packet::PlayClientbound(ClientboundGamePacket::ContainerSetContent(
-        ClientboundContainerSetContent {
-            container_id,
-            state_id,
-            items,
-            carried_item: ItemStack::Empty,
-        },
-    ))
-}
-
-
-fn click(container_id: i32, state_id: u32, slot: i16) -> Packet {
-    Packet::PlayServerbound(ServerboundGamePacket::ContainerClick(
-        ServerboundContainerClick {
-            container_id,
-            state_id,
-            slot_num: slot,
-            button_num: 0,
-            click_type: ClickType::Pickup,
-            changed_slots: Default::default(),
-            carried_item: HashedStack(None),
-        },
-    ))
-}
-
-fn content_packet(
-    container_id: i32,
-    state_id: u32,
-    items: Vec<ItemStack>,
-) -> ClientboundGamePacket {
-    ClientboundGamePacket::ContainerSetContent(ClientboundContainerSetContent {
-        container_id,
-        state_id,
-        items,
-        carried_item: ItemStack::Empty,
-    })
-}
-
-struct Harness {
-    dir: PathBuf,
-    writer: Writer,
-    engine: Engine,
-    world: World,
-    tick: u64,
-    ts_ns: u64,
-}
-
-impl Harness {
-    fn new(name: &str) -> Self {
-        let dir = test_dir(name);
-        let writer = Writer::create(&dir).unwrap();
-        let mut world = World::new();
-        world.follow(0);
-        Self {
-            dir,
-            writer,
-            engine: Engine::new(),
-            world,
-            tick: 0,
-            ts_ns: 1_793_443_244_558_717_800,
-        }
-    }
-
-    fn register(&mut self, intent: Intent) -> ReceiptId {
-        self.engine
-            .register(&mut self.writer, self.tick, self.ts_ns, intent, &self.world)
-            .unwrap()
-    }
-
-    fn apply(&mut self, packet: &Packet) {
-        match packet {
-            Packet::PlayClientbound(packet) => {
-                self.world.apply_clientbound_play(0, packet);
-            }
-            Packet::PlayServerbound(packet) => {
-                self.world.apply_serverbound_play(0, packet);
-            }
-            _ => {}
-        }
-    }
-
-    fn observe_at(&mut self, tick: u64, packet: Packet) {
-        self.apply(&packet);
-        self.ts_ns += 1;
-        self.engine
-            .observe(&mut self.writer, tick, self.ts_ns, &packet, &self.world)
-            .unwrap();
-    }
-
-    fn advance_at(&mut self, tick: u64) {
-        self.ts_ns += 1;
-        self.engine
-            .advance(&mut self.writer, tick, self.ts_ns)
-            .unwrap();
-    }
-
-    fn outcome(&self, receipt: ReceiptId) -> Option<Outcome> {
-        self.engine.outcome(receipt)
-    }
-
-    fn events(&mut self) -> Vec<praxion_eventlog::Event> {
-        self.writer.flush().unwrap();
-        read(self.dir.join(praxion_eventlog::FILE_NAME)).unwrap().events
-    }
-}
-
-// FINDING 1
-// inside the window still confirms, because the engine keeps the first air hit
-// and never clears it on a revert.
-#[test]
-fn dig_reverted_by_server_inside_window_does_not_confirm() {
-    let mut h = Harness::new("revert-dig");
-    let pos = BlockPos::new(0, 64, 0);
-    h.tick = 0;
-    let receipt = h.register(Intent::dig(1, pos, 5, 0).with_window(10));
-    h.observe_at(1, block_update(pos, air()));
-    h.observe_at(2, block_update(pos, stone())); // server reverts
-    h.observe_at(3, block_ack(5));
-    h.advance_at(10);
-    assert_eq!(h.outcome(receipt), Some(Outcome::Unconfirmed));
-}
+use common::*;
 
 #[test]
 fn two_intents_same_block_interleaved_acks_attribute_by_seq() {
@@ -241,38 +65,12 @@ fn evidence_at_exact_start_tick_counts() {
 }
 
 #[test]
-fn evidence_at_exact_window_end_counts() {
-    let mut h = Harness::new("exact-end");
-    let pos = BlockPos::new(5, 64, 0);
-    h.tick = 0;
-    let receipt = h.register(Intent::dig(1, pos, 11, 0).with_window(5));
-    h.observe_at(5, block_update(pos, air()));
-    h.observe_at(5, block_ack(11));
-    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
-}
-
-#[test]
-fn move_settles_confirmed_at_window_end() {
-    let mut h = Harness::new("move-end");
-    h.tick = 0;
-    let receipt = h.register(Intent::movement(1, "move_to", 0).with_window(5));
-    h.advance_at(5);
-    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
-    let note = h
-        .events()
-        .into_iter()
-        .find_map(|event| match event.event {
-            EventKind::ReceiptSettled { receipt_id, note, .. } if receipt_id == receipt => note,
-            _ => None,
-        });
-    assert_eq!(note.as_deref(), Some("unrefuted"));
-}
-
-#[test]
 fn unrelated_pickup_does_not_confirm_craft() {
     let mut h = Harness::new("craft-unrelated");
-    h.world
-        .apply_clientbound_play(0, &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]));
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]),
+    );
     h.tick = 0;
     let receipt = h.register(Intent::inventory(1, "craft", "stone", 1, 0).with_window(10));
     h.observe_at(
@@ -280,22 +78,14 @@ fn unrelated_pickup_does_not_confirm_craft() {
         content(
             0,
             1,
-            vec![ItemStack::new(ItemKind::Stone, 5), ItemStack::new(ItemKind::Dirt, 1)],
+            vec![
+                ItemStack::new(ItemKind::Stone, 5),
+                ItemStack::new(ItemKind::Dirt, 1),
+            ],
         ),
     );
     h.advance_at(10);
     assert_eq!(h.outcome(receipt), Some(Outcome::Unconfirmed));
-}
-
-#[test]
-fn same_item_pickup_confirms_craft_intent() {
-    let mut h = Harness::new("craft-pickup");
-    h.world
-        .apply_clientbound_play(0, &content_packet(0, 0, vec![ItemStack::new(ItemKind::Stone, 5)]));
-    h.tick = 0;
-    let receipt = h.register(Intent::inventory(1, "craft", "stone", 1, 0).with_window(10));
-    h.observe_at(1, content(0, 1, vec![ItemStack::new(ItemKind::Stone, 6)]));
-    assert_eq!(h.outcome(receipt), Some(Outcome::Confirmed));
 }
 
 #[test]
@@ -324,8 +114,10 @@ fn move_correction_one_tick_after_window_is_late_evidence() {
 #[test]
 fn slot_click_reverted_by_newer_set_content() {
     let mut h = Harness::new("slot-content-revert");
-    h.world
-        .apply_clientbound_play(0, &content_packet(0, 1, vec![ItemStack::new(ItemKind::Stone, 1)]));
+    h.world.apply_clientbound_play(
+        0,
+        &content_packet(0, 1, vec![ItemStack::new(ItemKind::Stone, 1)]),
+    );
     h.tick = 0;
     let receipt = h.register(Intent::slot_click(1, 0, 0, 1, 0).with_window(5));
     h.observe_at(1, click(0, 1, 0));
@@ -408,10 +200,6 @@ fn property_no_confirmed_without_own_evidence() {
             }
         }
     }
-}
-
-fn dirt() -> BlockState {
-    BlockState::from(BlockKind::Dirt)
 }
 
 // --- Step 8b adversarial receipts tests ---

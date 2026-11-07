@@ -1,219 +1,18 @@
-//! End-to-end tests: real TCP sockets, the real forwarder, and the real tee reader.
-//!
-//! Every listener binds port 0, so the user's ports are never touched. Fake upstreams stand in
-//! for the vanilla server; the live status ping against a real server is run separately.
-
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use praxion_tee::{Kind, Reader, Record, HEADER};
+use praxion_tee::{Kind, Reader};
 
 use super::*;
 
-fn test_config(upstream: SocketAddr, tee_queue_bytes: usize, timeout: Duration) -> Config {
-    Config {
-        listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-        upstream,
-        tee_listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-        stats: None,
-        tee_queue_bytes,
-        protocol: 777,
-        first_frame_timeout: timeout,
-        #[cfg(test)]
-        panic_in_handle_client: false,
-        #[cfg(test)]
-        fail_half_close: false,
-    }
-}
+#[path = "../tests/common/mod.rs"]
+mod common;
 
-fn start_forwarder(config: Config) -> (SocketAddr, SocketAddr) {
-    let forwarder = Forwarder::bind(config).expect("forwarder binds");
-    let game = forwarder.local_addr().expect("game address");
-    let tee = forwarder.tee_local_addr().expect("tee address");
-    thread::spawn(move || forwarder.run());
-    (game, tee)
-}
-
-fn varint(value: i32) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut v = value as u32;
-    loop {
-        let byte = (v & 0x7F) as u8;
-        v >>= 7;
-        if v == 0 {
-            out.push(byte);
-            return out;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-fn handshake(protocol: i32, intent: i32) -> Vec<u8> {
-    let host = b"localhost";
-    let mut payload = varint(0);
-    payload.extend(varint(protocol));
-    payload.extend(varint(host.len() as i32));
-    payload.extend_from_slice(host);
-    payload.extend_from_slice(&25565u16.to_be_bytes());
-    payload.extend(varint(intent));
-    let mut frame = varint(payload.len() as i32);
-    frame.extend(payload);
-    frame
-}
-
-/// Deterministic pseudo-random bytes: xorshift64*.
-fn random_bytes(seed: u64, len: usize) -> Vec<u8> {
-    let mut state = seed | 1;
-    let mut out = vec![0u8; len];
-    let mut i = 0;
-    while i < len {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        let value = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
-        let take = (len - i).min(8);
-        out[i..i + take].copy_from_slice(&value.to_le_bytes()[..take]);
-        i += take;
-    }
-    out
-}
-
-/// Connect a tee subscriber and wait until the forwarder has written the stream header, so a
-/// subsequently opened game connection cannot be missed.
-fn connect_tee(addr: SocketAddr) -> TcpStream {
-    let stream = TcpStream::connect(addr).expect("tee subscriber connects");
-    stream.set_nodelay(true).unwrap();
-    let mut header = [0u8; 8];
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if let Ok(n) = stream.peek(&mut header) {
-            if n >= 8 {
-                assert_eq!(&header, HEADER, "tee stream header");
-                return stream;
-            }
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    panic!("the tee never wrote its header");
-}
-
-/// Read records until `done` says stop, a `Closed` record arrives, or the socket times out.
-fn collect(
-    stream: TcpStream,
-    timeout: Duration,
-    done: Box<dyn Fn(&[Record]) -> bool + Send>,
-) -> JoinHandle<Vec<Record>> {
-    thread::spawn(move || {
-        stream.set_read_timeout(Some(timeout)).unwrap();
-        let mut reader = Reader::new(stream).expect("tee header");
-        let mut records = Vec::new();
-        while let Some(item) = reader.next() {
-            match item {
-                Ok(record) => {
-                    let closed = record.kind == Kind::Closed;
-                    records.push(record);
-                    if closed || done(&records) {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        records
-    })
-}
-
-fn collected_bytes(records: &[Record], kind: Kind) -> Vec<u8> {
-    let mut out = Vec::new();
-    for record in records {
-        if record.kind == kind {
-            out.extend_from_slice(&record.data);
-        }
-    }
-    out
-}
-
-fn dropped_bytes(records: &[Record]) -> u64 {
-    records
-        .iter()
-        .filter_map(|record| match record.kind {
-            Kind::Gap { dropped_bytes } => Some(dropped_bytes),
-            _ => None,
-        })
-        .sum()
-}
-
-fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if condition() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    condition()
-}
-
-/// Fake upstream that reads and discards; exposes the byte count it has received.
-fn spawn_sink() -> (SocketAddr, Arc<AtomicU64>) {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let addr = listener.local_addr().unwrap();
-    let received = Arc::new(AtomicU64::new(0));
-    let counter = received.clone();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let Ok(mut stream) = incoming else { continue };
-            let _ = stream.set_nodelay(true);
-            let counter = counter.clone();
-            thread::spawn(move || {
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    match stream.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            counter.fetch_add(n as u64, Ordering::Relaxed);
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-    });
-    (addr, received)
-}
-
-/// Fake upstream that echoes every byte back.
-fn spawn_echo() -> SocketAddr {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let Ok(mut stream) = incoming else { continue };
-            let _ = stream.set_nodelay(true);
-            thread::spawn(move || {
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    match stream.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if stream.write_all(&buffer[..n]).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let _ = stream.shutdown(Shutdown::Write);
-            });
-        }
-    });
-    addr
-}
+use common::*;
 
 /// Fake upstream that accepts one connection, sends `server_bytes`, and collects what the client
 /// sent until the client half-closes.
@@ -239,47 +38,11 @@ fn spawn_duplex(server_bytes: Vec<u8>) -> (SocketAddr, JoinHandle<Vec<u8>>) {
     (addr, handle)
 }
 
-/// Fake upstream that records connections and all bytes received, for gate tests.
-struct Probe {
-    addr: SocketAddr,
-    connections: Arc<AtomicUsize>,
-    data: Arc<Mutex<Vec<u8>>>,
-}
-
-fn spawn_probe() -> Probe {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let addr = listener.local_addr().unwrap();
-    let connections = Arc::new(AtomicUsize::new(0));
-    let data = Arc::new(Mutex::new(Vec::new()));
-    let counter = connections.clone();
-    let collected = data.clone();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let Ok(mut stream) = incoming else { continue };
-            counter.fetch_add(1, Ordering::Relaxed);
-            let collected = collected.clone();
-            thread::spawn(move || {
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    match stream.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => collected.lock().unwrap().extend_from_slice(&buffer[..n]),
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-    });
-    Probe {
-        addr,
-        connections,
-        data,
-    }
-}
-
 /// Read until the server closes this client; fail if it stays open.
 fn expect_closed(mut stream: TcpStream) {
-    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
     let mut buffer = [0u8; 64];
     loop {
         match stream.read(&mut buffer) {
@@ -308,7 +71,11 @@ fn forwarding_is_byte_exact_both_ways_and_the_tee_reconstructs_both_directions()
     };
     let to_client = random_bytes(0xB0B, LEN);
     let (upstream, server) = spawn_duplex(to_client.clone());
-    let (game, tee) = start_forwarder(test_config(upstream, 256 * 1024 * 1024, Duration::from_secs(10)));
+    let (game, tee) = start_forwarder(test_config(
+        upstream,
+        256 * 1024 * 1024,
+        Duration::from_secs(10),
+    ));
 
     let subscriber = connect_tee(tee);
     let collector = collect(subscriber, Duration::from_secs(60), Box::new(|_| false));
@@ -320,13 +87,17 @@ fn forwarding_is_byte_exact_both_ways_and_the_tee_reconstructs_both_directions()
     let reader = thread::spawn(move || {
         let mut received = vec![0u8; expected_len];
         let mut reader = client_reader;
-        reader.read_exact(&mut received).expect("client receives all bytes");
+        reader
+            .read_exact(&mut received)
+            .expect("client receives all bytes");
         let mut tail = Vec::new();
         reader.read_to_end(&mut tail).expect("client sees EOF");
         assert!(tail.is_empty(), "unexpected bytes after the payload");
         (received, to_client)
     });
-    client.write_all(&to_server).expect("client sends all bytes");
+    client
+        .write_all(&to_server)
+        .expect("client sends all bytes");
     client.shutdown(Shutdown::Write).unwrap();
 
     let (received, expected) = reader.join().unwrap();
@@ -348,9 +119,19 @@ fn forwarding_is_byte_exact_both_ways_and_the_tee_reconstructs_both_directions()
         expected,
         "tee reconstructs server-to-client bytes"
     );
-    assert_eq!(dropped_bytes(&records), 0, "a reading subscriber loses nothing");
-    assert!(records.iter().any(|r| r.kind == Kind::Opened), "Opened record");
-    assert!(records.iter().any(|r| r.kind == Kind::Closed), "Closed record");
+    assert_eq!(
+        dropped_bytes(&records),
+        0,
+        "a reading subscriber loses nothing"
+    );
+    assert!(
+        records.iter().any(|r| r.kind == Kind::Opened),
+        "Opened record"
+    );
+    assert!(
+        records.iter().any(|r| r.kind == Kind::Closed),
+        "Closed record"
+    );
     assert!(records.iter().all(|r| r.conn_id == 0));
 }
 
@@ -368,14 +149,18 @@ fn a_subscriber_that_never_reads_never_slows_forwarding_and_gaps_add_up() {
     sent.extend(random_bytes(0x5EED, PAYLOAD));
 
     let start = Instant::now();
-    client.write_all(&sent).expect("client sends while the tee is stalled");
+    client
+        .write_all(&sent)
+        .expect("client sends while the tee is stalled");
     let write_time = start.elapsed();
     assert!(
         write_time < Duration::from_secs(5),
         "forwarding took {write_time:?} with a stalled subscriber"
     );
     assert!(
-        wait_until(Duration::from_secs(10), || received.load(Ordering::Relaxed) as usize == sent.len()),
+        wait_until(Duration::from_secs(10), || received.load(Ordering::Relaxed)
+            as usize
+            == sent.len()),
         "the server did not receive the payload"
     );
 
@@ -398,7 +183,10 @@ fn a_subscriber_that_never_reads_never_slows_forwarding_and_gaps_add_up() {
         sent.len() as u64,
         "bytes forwarded = bytes teed + bytes in gaps"
     );
-    assert_eq!(collected_bytes(&records, Kind::Serverbound).len() as u64, teed);
+    assert_eq!(
+        collected_bytes(&records, Kind::Serverbound).len() as u64,
+        teed
+    );
     assert!(records.iter().any(|r| r.kind == Kind::Closed));
 }
 
@@ -532,9 +320,11 @@ fn a_disconnected_subscriber_does_not_affect_forwarding_or_the_next_subscriber()
 
     let records = collector.join().unwrap();
     assert!(records.iter().any(|r| matches!(r.kind, Kind::Gap { .. })));
-    assert!(records
-        .iter()
-        .any(|r| r.kind == Kind::Serverbound && r.data.as_slice() == tail));
+    assert!(
+        records
+            .iter()
+            .any(|r| r.kind == Kind::Serverbound && r.data.as_slice() == tail)
+    );
     assert!(wait_until(Duration::from_secs(5), || {
         received.load(Ordering::Relaxed) as usize == head.len() + tail.len()
     }));
@@ -848,7 +638,12 @@ fn subscribe_keeps_the_old_subscriber_when_the_clone_fails() {
         }
     }
 
-    tee.forwarded(0, praxion_tee::now_ns(), Kind::Serverbound, b"still-registered");
+    tee.forwarded(
+        0,
+        praxion_tee::now_ns(),
+        Kind::Serverbound,
+        b"still-registered",
+    );
     let record = reader
         .next()
         .expect("the old subscriber must still be connected")
@@ -953,7 +748,9 @@ fn a_refused_half_close_ends_the_connection_instead_of_waiting_for_the_peer() {
 
     let records = collector.join().unwrap();
     assert!(
-        records.iter().any(|r| r.conn_id == 0 && r.kind == Kind::Closed),
+        records
+            .iter()
+            .any(|r| r.conn_id == 0 && r.kind == Kind::Closed),
         "a refused half-close must still emit Closed: {records:?}"
     );
 }
@@ -996,11 +793,8 @@ fn handle_client_panic_closes_both_sockets_and_reports_it() {
 
 #[test]
 fn config_refuses_a_zero_byte_tee_queue() {
-    let error = Config::parse([
-        "--tee-queue-bytes".to_string(),
-        "0".to_string(),
-    ])
-    .expect_err("a zero-byte tee queue is refused");
+    let error = Config::parse(["--tee-queue-bytes".to_string(), "0".to_string()])
+        .expect_err("a zero-byte tee queue is refused");
     assert!(
         error.contains("greater than 0"),
         "the message must say what is wrong: {error}"
