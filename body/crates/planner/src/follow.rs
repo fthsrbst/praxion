@@ -1,9 +1,10 @@
 //! The path follower: a path becomes one [`ControlFrame`] per tick.
 //!
-//! The order is the contract's "camera then move" (§5.2): aim at the next
-//! node through [`LookStyle`] and hold no movement key until the aim is inside
-//! the tolerance, then hold forward. A step-up or pillar also holds jump while
-//! grounded; a bridge holds sneak.
+//! The order is the contract's "camera then move" (§5.2): request the next
+//! node's look and hold no movement key until the aim is inside the tolerance,
+//! then hold forward. The look request is an absolute target; the driver's
+//! [`crate::Gaze`] turns it into the human gesture. A step-up or pillar also
+//! holds jump while grounded; a bridge holds sneak.
 //!
 //! The follower reports progress and deviation, and marks itself `stalled`
 //! after `max_ticks_per_step` ticks on one step so the caller can replan. It
@@ -13,7 +14,7 @@
 use praxion_headless::{ControlFrame, Held};
 use praxion_world::{BlockPos, Vec3};
 
-use crate::look::{LookStyle, look_towards};
+use crate::look::{WALK_TOLERANCE_DEG, look_towards};
 use crate::moves::MoveKind;
 use crate::world::center;
 use crate::Step;
@@ -23,7 +24,8 @@ use crate::Step;
 pub struct Follower {
     steps: Vec<Step>,
     next: usize,
-    style: LookStyle,
+    /// The walking pitch, in degrees down (Minecraft's positive pitch).
+    walk_pitch: f32,
     max_ticks_per_step: u32,
     ticks_on_step: u32,
     stalled: bool,
@@ -45,16 +47,22 @@ pub struct Progress {
 }
 
 impl Follower {
-    pub fn new(steps: Vec<Step>, style: LookStyle) -> Self {
+    pub fn new(steps: Vec<Step>) -> Self {
         Self {
             steps,
             next: 0,
-            style,
+            walk_pitch: 8.0,
             max_ticks_per_step: 200,
             ticks_on_step: 0,
             stalled: false,
             air_forward: false,
         }
+    }
+
+    /// The pitch the walk requests, in degrees down (default 8).
+    pub fn with_walk_pitch(mut self, degrees: f32) -> Self {
+        self.walk_pitch = degrees;
+        self
     }
 
     pub fn with_max_ticks_per_step(mut self, ticks: u32) -> Self {
@@ -96,11 +104,14 @@ impl Follower {
         let step = &self.steps[self.next];
         let position = body.position();
         let target = center(step.to);
-        // Azalea's walking look-at keeps the target at eye height, so the
-        // pitch stays level while the yaw turns to the next cell.
-        let aim_point = Vec3::new(target.x, position.y + 1.62, target.z);
         let eye = Vec3::new(position.x, position.y + 1.62, position.z);
-        let (look, aligned) = look_towards(self.style, body.look(), eye, aim_point);
+        // Look a little below the target's column, so the pitch is the
+        // personality's walking pitch instead of a flat 0.
+        let horizontal = horizontal_distance(position, target);
+        let drop = horizontal * f64::from(self.walk_pitch.to_radians().tan());
+        let aim_point = Vec3::new(target.x, eye.y - drop, target.z);
+        let (look, aligned) =
+            look_towards(body.look(), eye, aim_point, WALK_TOLERANCE_DEG);
         frame.look = look;
 
         if aligned {
@@ -248,18 +259,23 @@ mod tests {
     #[test]
     fn the_follower_aims_before_it_moves() {
         let mut body = body();
-        // South is already yaw 0, so no turn is needed. This body is airborne
-        // (there is no world here), so use a StepUp: a Walk would wait for the
-        // ground before moving forward.
+        // South is already yaw 0 and the camera already sits at the walking
+        // pitch, so no gesture is needed. This body is airborne (there is no
+        // world here), so use a StepUp: a Walk would wait for the ground
+        // before moving forward.
+        body.set_look(azalea_entity::LookDirection::new(0., 8.));
         let path = vec![step(
             BlockPos::new(0, 64, 0),
             BlockPos::new(0, 65, 1),
             MoveKind::StepUp,
         )];
-        let mut follower = Follower::new(path, LookStyle::default());
+        let mut follower = Follower::new(path);
         let frame = follower.step(0, body.generation(), &body);
         assert!(frame.held.forward);
-        assert_eq!(frame.look, Look::None);
+        match frame.look {
+            Look::Aim { yaw, .. } => assert!(yaw.abs() < 1e-3, "south is already yaw 0"),
+            other => panic!("the follower requests its target, got {other:?}"),
+        }
         frame.apply(&mut body, 0).unwrap();
     }
 
@@ -271,7 +287,7 @@ mod tests {
             BlockPos::new(1, 64, 0),
             MoveKind::Walk,
         )];
-        let mut follower = Follower::new(path, LookStyle::default());
+        let mut follower = Follower::new(path);
         let frame = follower.step(0, body.generation(), &body);
         assert!(!frame.held.forward, "forward waits for the aim tolerance");
         match frame.look {
@@ -292,7 +308,7 @@ mod tests {
             BlockPos::new(0, 63, 1),
             MoveKind::Descend { drop: 1 },
         )];
-        let mut follower = Follower::new(path, LookStyle::default());
+        let mut follower = Follower::new(path);
         let frame = follower.step(0, body.generation(), &body);
         assert!(
             !frame.held.forward,
@@ -302,13 +318,14 @@ mod tests {
 
     #[test]
     fn a_step_up_keeps_forward_while_airborne() {
-        let body = Body::new(Vec3::new(0.5, 64., 0.5));
+        let mut body = Body::new(Vec3::new(0.5, 64., 0.5));
+        body.set_look(azalea_entity::LookDirection::new(0., 8.));
         let path = vec![step(
             BlockPos::new(0, 64, 0),
             BlockPos::new(0, 65, 1),
             MoveKind::StepUp,
         )];
-        let mut follower = Follower::new(path, LookStyle::default());
+        let mut follower = Follower::new(path);
         let frame = follower.step(0, body.generation(), &body);
         assert!(frame.held.forward, "a jump needs its forward momentum");
     }
@@ -321,7 +338,7 @@ mod tests {
             BlockPos::new(0, 64, 1),
             MoveKind::Walk,
         )];
-        let mut follower = Follower::new(path, LookStyle::default());
+        let mut follower = Follower::new(path);
         follower.step(0, body.generation(), &body);
         assert!(follower.is_done());
         assert!(follower.progress(&body).done);

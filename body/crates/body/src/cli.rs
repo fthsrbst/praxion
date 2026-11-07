@@ -5,7 +5,7 @@
 //!              --goal get_wooden_pickaxe [--goal-args 3] --run-dir runs/<id>
 //!              [--max-ticks N] [--settings body/config/reflexes.toml]
 //!              [--skills body/skills] [--start-delay-ticks N]
-//!              [--linger-ticks N] [--verbose]
+//!              [--style-seed N] [--linger-ticks N] [--verbose]
 //! ```
 //!
 //! `--forwarder` is the forwarder's game listener (the address a client would
@@ -30,6 +30,8 @@ pub struct Args {
     pub settings: Option<PathBuf>,
     pub skills: Option<PathBuf>,
     pub start_delay_ticks: u64,
+    /// The movement-style seed; the same seed gives the same personality.
+    pub style_seed: u64,
     pub linger_ticks: u64,
     pub verbose: bool,
 }
@@ -46,6 +48,7 @@ impl Args {
         let mut settings = None;
         let mut skills = None;
         let mut start_delay_ticks = 0;
+        let mut style_seed = 0;
         let mut linger_ticks = 60;
         let mut verbose = false;
 
@@ -82,6 +85,12 @@ impl Args {
                         .parse()
                         .map_err(|_| format!("--start-delay-ticks wants a number, got {text:?}"))?;
                 }
+                "--style-seed" => {
+                    let text = value(&mut args, "--style-seed")?;
+                    style_seed = text
+                        .parse()
+                        .map_err(|_| format!("--style-seed wants a number, got {text:?}"))?;
+                }
                 "--linger-ticks" => {
                     let text = value(&mut args, "--linger-ticks")?;
                     linger_ticks = text
@@ -104,6 +113,7 @@ impl Args {
             settings,
             skills,
             start_delay_ticks,
+            style_seed,
             linger_ticks,
             verbose,
         })
@@ -180,6 +190,8 @@ mod tests {
             "1200",
             "--settings",
             "body/config/reflexes.toml",
+            "--style-seed",
+            "7",
         ])
         .unwrap();
         assert_eq!(args.forwarder.port(), 25640);
@@ -189,6 +201,7 @@ mod tests {
         assert_eq!(args.run_dir, PathBuf::from("runs/x"));
         assert_eq!(args.max_ticks, Some(1200));
         assert_eq!(args.settings, Some(PathBuf::from("body/config/reflexes.toml")));
+        assert_eq!(args.style_seed, 7);
         assert_eq!(args.linger_ticks, 60);
     }
 

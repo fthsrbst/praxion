@@ -20,6 +20,10 @@ azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
 # Two crates of Azalea's lifted A* core (`astar/nodemap.rs`).
 indexmap = "2.14"
 rustc-hash = "2.1"
+# The movement style: a seeded personality (turn time, reaction) and its
+# Gaussian reaction draw.
+rand = "0.8"
+rand_distr = "0.4"
 
 [dev-dependencies]
 praxion-decoder = { path = "../decoder" }

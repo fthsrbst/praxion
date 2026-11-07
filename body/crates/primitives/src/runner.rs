@@ -11,7 +11,6 @@ use azalea_core::position::BlockPos;
 use praxion_headless::{Body, ControlFrame};
 use praxion_interpreter::{Outcome, StartAction};
 use praxion_perception::Perception;
-use praxion_planner::LookStyle;
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::World;
 
@@ -29,7 +28,6 @@ pub struct Ctx<'a> {
     pub body: &'a Body,
     pub world: &'a World,
     pub perception: &'a mut Perception,
-    pub look: LookStyle,
 }
 
 /// What the driver registers with the receipts engine after the frame is

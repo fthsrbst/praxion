@@ -8,8 +8,8 @@
 
 use praxion_headless::{Body, Click, ControlFrame, Held, Look};
 use praxion_planner::{
-    Follower, Goal, Inventory, LookStyle, MoveKind, Planner, PlanStatus, PlanningState, Step,
-    aim, look_towards,
+    Follower, Goal, Inventory, MoveKind, Planner, PlanStatus, PlanningState, Step,
+    WALK_TOLERANCE_DEG, aim, look_towards,
 };
 use praxion_planner::KnownBlocks;
 use praxion_world::{BlockPos, Vec3};
@@ -128,7 +128,7 @@ impl Motion {
         }
         let ticks = plan.cost.ceil().max(1.0) as u64 + 40;
         Some(Motion::Follow {
-            follower: Follower::new(plan.steps, LookStyle::default())
+            follower: Follower::new(plan.steps)
                 .with_max_ticks_per_step(60),
             deadline: tick + ticks,
             sprint,
@@ -161,7 +161,7 @@ impl Motion {
             cost: 1.0,
         };
         Some(Motion::Follow {
-            follower: Follower::new(vec![step], LookStyle::default()),
+            follower: Follower::new(vec![step]),
             deadline: u64::MAX,
             sprint,
         })
@@ -205,7 +205,7 @@ impl Motion {
                 if let Some(mob) = attack_target(view, *target) {
                     let target_point = mob.position + Vec3::new(0.0, 1.0, 0.0);
                     let (look, aligned) =
-                        look_towards(LookStyle::default(), body.look(), view.eye, target_point);
+                        look_towards(body.look(), view.eye, target_point, WALK_TOLERANCE_DEG);
                     frame.look = look;
                     let reach = view.horizontal_to(mob);
                     if aligned && reach <= 3.2 {

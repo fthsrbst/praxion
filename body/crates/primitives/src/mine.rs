@@ -5,7 +5,7 @@ use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
 use praxion_perception::{Answer, Caller, EntityFilter};
-use praxion_planner::{center, look_towards};
+use praxion_planner::{WALK_TOLERANCE_DEG, center, look_towards};
 
 use crate::common::{
     HandSelect, Selecting, ToolChoice, aim_precise, block_target, choose_tool, idle,
@@ -246,7 +246,7 @@ fn pickup_frame(ctx: &Ctx<'_>, target: Vec3) -> ControlFrame {
     let mut frame = idle(ctx);
     let eye = ctx.body.eye_position();
     let aim_point = Vec3::new(target.x, target.y + 0.25, target.z);
-    let (look, aligned) = look_towards(ctx.look, ctx.body.look(), eye, aim_point);
+    let (look, aligned) = look_towards(ctx.body.look(), eye, aim_point, WALK_TOLERANCE_DEG);
     frame.look = look;
     if aligned {
         frame.held.forward = true;
@@ -262,7 +262,6 @@ mod tests {
     use super::*;
     use praxion_headless::Body;
     use praxion_perception::{EntityFact, Perception};
-    use praxion_planner::LookStyle;
     use praxion_world::World;
 
     #[test]
@@ -280,7 +279,6 @@ mod tests {
                     body: &body,
                     world: &world,
                     perception: &mut perception,
-                    look: LookStyle::default(),
                 };
                 pickup_frame(&ctx, Vec3::new(0.5, 64.0, 1.5))
             };

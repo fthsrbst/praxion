@@ -33,16 +33,16 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use praxion_arbiter::{Arbiter, FrameSource, Needs};
 use praxion_eventlog::{EventKind, Outcome as ReceiptOutcome, Versions, Writer};
-use praxion_headless::{AppliedReport, Body, ControlFrame, Driver, Held, TickView};
+use praxion_headless::{AppliedReport, Body, ControlFrame, Driver, Held, Look, TickView};
 use praxion_interpreter::{
     Actuator, Decision, Facts as InterpreterFacts, InterpreterEvent, IntValue, Interpreter, Outcome,
     StartAction, Truth,
 };
 use praxion_perception::{Config as PerceptionConfig, Perception};
-use praxion_planner::{Block, KnownBlocks, LookStyle};
+use praxion_planner::{Block, Cue, Gaze, KnownBlocks};
 use praxion_primitives::{Ctx, IntentSpec, PrimitiveEvent, Runner, fact_known};
 use praxion_receipts::{Engine, Intent, ReceiptId};
-use praxion_reflexes::{EndermanGuard, Settings, View};
+use praxion_reflexes::{EndermanGuard, LatencyClass, ReflexKind, Settings, View};
 use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::{BlockPos, Vec3, World};
 
@@ -55,8 +55,18 @@ pub struct BodyOptions {
     /// Client ticks to wait after the world is usable, so the harness can set
     /// the scene (give items, place the zombie) before the skill starts.
     pub start_delay_ticks: u64,
-    pub look: LookStyle,
+    /// The movement-style seed: the same seed gives the same personality.
+    pub style_seed: u64,
     pub versions: Versions,
+}
+
+/// The owner of a tick's look request, for the gaze's reaction delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LookSource {
+    Reflex(Option<ReflexKind>),
+    Maintenance,
+    /// The running primitive, keyed by its start tick.
+    Primitive(Option<u64>),
 }
 
 /// The demo's driver.
@@ -73,6 +83,11 @@ pub struct BodyDriver {
     arbiter: Arbiter,
     settings: Settings,
     look_guard: EndermanGuard,
+    /// The body's one camera controller: every frame's look request goes
+    /// through it (architecture §5.2).
+    gaze: Gaze,
+    /// Who asked for last tick's look; a change is a new stimulus.
+    look_source: Option<LookSource>,
     /// See the module note: the arbiter needs `&mut Body`, the session owns the
     /// real one.
     mirror: Body,
@@ -119,6 +134,7 @@ impl BodyDriver {
         shared: Arc<Mutex<Shared>>,
     ) -> std::io::Result<Self> {
         let log = Writer::create(&run_dir)?;
+        let gaze = Gaze::new(options.style_seed);
         let mut driver = Self {
             options,
             shared,
@@ -132,6 +148,8 @@ impl BodyDriver {
             arbiter: Arbiter::new(0),
             settings,
             look_guard: EndermanGuard::new(),
+            gaze,
+            look_source: None,
             mirror: Body::new(Vec3::ZERO),
             started: false,
             done: false,
@@ -152,6 +170,8 @@ impl BodyDriver {
         };
         let versions = driver.options.versions.clone();
         driver.log.run_started(0, now_ns(), versions)?;
+        let style = driver.gaze.personality().describe();
+        driver.log.note(0, now_ns(), style)?;
         Ok(driver)
     }
 
@@ -477,7 +497,6 @@ impl BodyDriver {
         view: &TickView<'_>,
         world: &World,
         skill: Option<&Decision>,
-        reflex_view: &View,
         ts_ns: u64,
     ) -> ControlFrame {
         self.finish_active_primitive(view.tick, ts_ns, None);
@@ -526,7 +545,6 @@ impl BodyDriver {
                 body: &self.mirror,
                 world,
                 perception: &mut perception,
-                look: self.options.look,
             };
             self.runner.tick(&mut ctx)
         };
@@ -569,7 +587,6 @@ impl BodyDriver {
                     body: &self.mirror,
                     world,
                     perception: &mut perception,
-                    look: self.options.look,
                 };
                 fact_known(&mut ctx, &fact)
             };
@@ -581,9 +598,7 @@ impl BodyDriver {
             }
         }
 
-        let mut frame = result.frame;
-        frame.look = self.look_guard.apply(frame.look, view.body.look(), reflex_view);
-        frame
+        result.frame
     }
 
     /// The arbiter preempted the skill: finish the in-flight primitive as
@@ -607,7 +622,6 @@ impl BodyDriver {
                 body: &self.mirror,
                 world,
                 perception: &mut perception,
-                look: self.options.look,
             };
             self.runner.tick(&mut ctx)
         };
@@ -666,7 +680,7 @@ impl Driver for BodyDriver {
         }
 
         let Some(world) = view.world else {
-            return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns);
+            return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
         };
         // The arbiter wants `&mut Body`; the session owns the real one.
         self.mirror = view.body.clone();
@@ -674,7 +688,7 @@ impl Driver for BodyDriver {
 
         let settled = lock(&self.shared).outcome.is_some();
         if settled {
-            return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns);
+            return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
         }
 
         let stage = Instant::now();
@@ -688,11 +702,11 @@ impl Driver for BodyDriver {
         let begin_ns = stage.elapsed().as_nanos() as u64;
         if !self.started {
             if view.tick < first_tick.saturating_add(self.options.start_delay_ticks) {
-                return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns);
+                return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
             }
             self.start_goal(view.tick, ts_ns);
             if self.done {
-                return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns);
+                return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
             }
         }
 
@@ -755,12 +769,17 @@ impl Driver for BodyDriver {
             None
         };
 
+        let mut guarded = false;
         let mut frame = match &ticked.source {
             FrameSource::Reflex(_) | FrameSource::Maintenance(_) => {
                 ticked.source.frame().clone()
             }
             FrameSource::Skill(_) | FrameSource::Idle(_) => {
-                self.run_primitive(view, world, ticked.skill.as_ref(), &reflex_view, ts_ns)
+                let mut frame = self.run_primitive(view, world, ticked.skill.as_ref(), ts_ns);
+                let wanted = frame.look;
+                frame.look = self.look_guard.apply(wanted, view.body.look(), &reflex_view);
+                guarded = frame.look != wanted;
+                frame
             }
         };
 
@@ -800,11 +819,34 @@ impl Driver for BodyDriver {
             shared.record_stage("log", log_ns);
         }
 
+        // Why the camera moves (research §4.7): a lethal-fast reflex or the
+        // enderman guard moves at once; a new source of the look request (a
+        // new primitive or reflex) is a stimulus with a human reaction time.
+        let source = match &ticked.source {
+            FrameSource::Reflex(_) => LookSource::Reflex(ticked.reflex),
+            FrameSource::Maintenance(_) => LookSource::Maintenance,
+            FrameSource::Skill(_) | FrameSource::Idle(_) => {
+                LookSource::Primitive(self.active_primitive.as_ref().map(|p| p.start_tick))
+            }
+        };
+        let lethal = matches!(&ticked.source, FrameSource::Reflex(_))
+            && ticked
+                .reflex
+                .is_some_and(|kind| kind.latency_class(&reflex_view) == LatencyClass::LethalFast);
+        let cue = if lethal || guarded {
+            Cue::Urgent
+        } else if self.look_source.is_some_and(|last| last != source) {
+            Cue::Stimulus
+        } else {
+            Cue::Continue
+        };
+        self.look_source = Some(source);
+
         // The mirror's generation can move (a reflex start or resume); the
         // session's body is the one that will validate the frame.
         frame.tick = view.tick;
         frame.generation = view.body.generation();
-        self.finish_tick(view, frame, work_start, ts_ns)
+        self.finish_tick(view, frame, work_start, ts_ns, cue)
     }
 
     fn applied(&mut self, tick: u64, report: &AppliedReport) {
@@ -828,9 +870,33 @@ impl BodyDriver {
         mut frame: ControlFrame,
         work_start: Instant,
         ts_ns: u64,
+        cue: Cue,
     ) -> ControlFrame {
         frame.tick = view.tick;
         frame.generation = view.body.generation();
+        // Movement style is the only producer of look output (§5.2): the frame
+        // carries the request, the gaze carries the camera.
+        let request = frame.look;
+        let look = self
+            .gaze
+            .step(request, view.body.look(), cue, view.tick);
+        if let Look::Delta { dyaw, dpitch } = look
+            && (dyaw != 0.0 || dpitch != 0.0)
+        {
+            let current = view.body.look();
+            let _ = self.log.note(
+                view.tick,
+                ts_ns,
+                format!(
+                    "look yaw={:.3} pitch={:.3} dyaw={:.3} dpitch={:.3}",
+                    current.y_rot() + dyaw,
+                    current.x_rot() + dpitch,
+                    dyaw,
+                    dpitch
+                ),
+            );
+        }
+        frame.look = look;
         let work = work_start.elapsed().as_nanos() as u64;
         {
             let mut shared = lock(&self.shared);

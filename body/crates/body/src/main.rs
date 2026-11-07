@@ -80,7 +80,7 @@ fn run() -> Result<ExitCode, String> {
             skill: args.goal.clone(),
             args: goal_args,
             start_delay_ticks: args.start_delay_ticks,
-            look: praxion_planner::LookStyle::default(),
+            style_seed: args.style_seed,
             versions,
         },
         args.run_dir.clone(),

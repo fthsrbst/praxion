@@ -129,7 +129,7 @@ impl Move {
         );
         match plan.status {
             praxion_planner::PlanStatus::Success => {
-                self.follower = Some(Follower::new(plan.steps, ctx.look));
+                self.follower = Some(Follower::new(plan.steps));
             }
             praxion_planner::PlanStatus::Partial { cell } => {
                 self.tries += 1;

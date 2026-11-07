@@ -173,6 +173,10 @@ fn the_fall_guard_refuses_a_deep_step() {
         sim.body.step(&praxion_headless::Held::NONE, &sim.world);
     }
     assert!(sim.body.on_ground(), "the body stands on the edge");
+    // The follower waits for the walking pitch before it holds forward, so
+    // start the eye already there; the guard is what this test checks.
+    sim.body
+        .set_look(azalea_entity::LookDirection::new(0., 8.));
     // A reflex that wants to go south, straight into the chasm.
     let action = ReflexAction::StepBack {
         to: BlockPos::new(0, 64, 1),
@@ -388,9 +392,10 @@ fn the_single_step_fallback_refuses_lava_and_unknown_cells() {
 #[test]
 fn the_fall_guard_refuses_a_lava_next_cell() {
     let mut sim = fresh();
-    // Lava one block ahead along +z, so `next_cell_lava` is true.
+    // Lava one block ahead along +z, so `next_cell_lava` is true. Capture the
+    // view before any reflex turns the body away from it.
     sim.set_block(BlockPos::new(0, 64, 1), state(BlockKind::Lava));
-    sim.step();
+    sim.perception.begin_tick(&sim.world);
     let view = sim.view();
     assert!(view.next_cell_lava, "the lava is in the next cell");
 

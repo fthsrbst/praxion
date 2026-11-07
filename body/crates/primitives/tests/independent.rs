@@ -4,7 +4,7 @@ use azalea_core::position::Vec3;
 use praxion_headless::{Body, ControlFrame, Held};
 use praxion_interpreter::Outcome;
 use praxion_perception::Perception;
-use praxion_planner::{Goal, LookStyle};
+use praxion_planner::Goal;
 use praxion_primitives::{Ctx, Runner};
 use praxion_interpreter::StartAction;
 use praxion_rules::{ArgValue, Primitives};
@@ -20,7 +20,6 @@ fn make_ctx<'a>(
         body,
         world,
         perception,
-        look: LookStyle::default(),
     }
 }
 

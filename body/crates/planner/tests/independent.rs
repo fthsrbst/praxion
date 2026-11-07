@@ -879,11 +879,9 @@ fn flat_physics_world() -> praxion_world::World {
 #[test]
 fn independent_follower() {
     let mut rng = Rng::new(0x5555);
-    let style = LookStyle::default();
     let mut reached = 0usize;
     let mut total_ticks = 0usize;
     let mut max_deviation: f64 = 0.;
-    let mut aim_violations = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
     for i in 0..50usize {
@@ -915,7 +913,7 @@ fn independent_follower() {
         }
 
         // build follower
-        let mut follower = Follower::new(plan.steps.clone(), style);
+        let mut follower = Follower::new(plan.steps.clone());
         follower = follower.with_max_ticks_per_step(400);
 
         // physics body
@@ -926,21 +924,13 @@ fn independent_follower() {
 
         let mut ticks = 0usize;
         let mut max_dev = 0f64;
-        let mut prev_look: Option<(f32, f32)> = Some((0., 0.));
         let max_ticks = 2000usize;
         while !follower.is_done() && ticks < max_ticks {
             let frame = follower.step(ticks as u64, body.generation(), &body);
-            // aim speed check
-            if let Look::Aim { yaw, pitch } = frame.look {
-                if let Some((py, pp)) = prev_look {
-                    let dy = (yaw - py).abs();
-                    let dp = (pitch - pp).abs();
-                    let dy = dy.min(360. - dy);
-                    if dy > style.max_yaw_deg + 1e-3 || dp > style.max_pitch_deg + 1e-3 {
-                        aim_violations += 1;
-                    }
-                }
-                prev_look = Some((yaw, pitch));
+            // The follower only requests an absolute target; the speed and the
+            // gesture live in the gaze, whose tests check the profile.
+            if let Look::Delta { .. } = frame.look {
+                panic!("the follower must not emit deltas");
             }
             if let Err(_) = frame.apply(&mut body, ticks as u64) {
                 break;
@@ -979,14 +969,13 @@ fn independent_follower() {
     let _ = std::fs::write(
         "logs/t8a/follower.txt",
         format!(
-            "reached={}/50 ticks_total={} max_deviation={max_deviation:.3} aim_violations={aim_violations}\n{}",
+            "reached={}/50 ticks_total={} max_deviation={max_deviation:.3}\n{}",
             reached,
             total_ticks,
             failures.join("\n")
         ),
     );
     // require most reached; allow some failures but report
-    assert!(aim_violations == 0, "aim speed violations: {aim_violations}");
     assert!(reached >= 40, "only {reached}/50 reached; failures: {:?}", &failures[..failures.len().min(10)]);
 }
 

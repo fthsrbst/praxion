@@ -420,7 +420,7 @@ impl Explore {
                         );
                         self.goal = Some(cell);
                         self.follower = Some(
-                            Follower::new(plan.steps, ctx.look)
+                            Follower::new(plan.steps)
                                 .with_max_ticks_per_step(EXPLORE_STEP_TICKS),
                         );
                         self.idle_ticks = 0;
@@ -517,7 +517,7 @@ impl Explore {
                         );
                         self.goal = Some(goal);
                         self.follower = Some(
-                            Follower::new(plan.steps, ctx.look)
+                            Follower::new(plan.steps)
                                 .with_max_ticks_per_step(EXPLORE_STEP_TICKS),
                         );
                         self.idle_ticks = 0;
@@ -582,7 +582,7 @@ impl Explore {
                     self.path_ticks = plan.cost.ceil().max(0.) as u64;
                     self.goal = Some(cell);
                     self.follower = Some(
-                        Follower::new(plan.steps, ctx.look)
+                        Follower::new(plan.steps)
                             .with_max_ticks_per_step(EXPLORE_STEP_TICKS),
                     );
                     self.idle_ticks = 0;

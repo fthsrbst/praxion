@@ -7,7 +7,7 @@ use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Held, Look, MenuAction, MenuMode};
 use praxion_perception::{BlockFilter, BlockRegion, Caller};
-use praxion_planner::{Inventory as PlanInventory, look_towards};
+use praxion_planner::{Inventory as PlanInventory, WALK_TOLERANCE_DEG, look_towards};
 use praxion_world::{BlockDescription, BlockState, World};
 
 use crate::runner::Ctx;
@@ -18,14 +18,15 @@ pub(crate) fn idle(ctx: &Ctx<'_>) -> ControlFrame {
 
 pub(crate) fn aim(ctx: &Ctx<'_>, target: Vec3) -> (Look, bool) {
     let eye = ctx.body.eye_position();
-    look_towards(ctx.look, ctx.body.look(), eye, target)
+    look_towards(ctx.body.look(), eye, target, WALK_TOLERANCE_DEG)
 }
 
 /// Aim for an interaction: the client's crosshair must hit the intended cell,
 /// and the general 4-degree walk tolerance can be off by most of a block at
-/// four blocks of reach. The body look is set exactly (bounded only by the
-/// style's speed) until the current angle is within
-/// [`INTERACT_TOLERANCE_DEG`], and only then may the click go out.
+/// four blocks of reach. The request is absolute and unlimited; the driver's
+/// gaze applies the human speed, so the body look only reaches it after a few
+/// ticks. The click may go out once the current angle is within
+/// [`INTERACT_TOLERANCE_DEG`].
 pub(crate) fn aim_precise(ctx: &Ctx<'_>, target: Vec3) -> (Look, bool) {
     let eye = ctx.body.eye_position();
     let (yaw, pitch) = praxion_planner::aim(eye, target);
@@ -33,11 +34,7 @@ pub(crate) fn aim_precise(ctx: &Ctx<'_>, target: Vec3) -> (Look, bool) {
     let aligned = praxion_planner::wrap_degrees(yaw - current.y_rot()).abs()
         <= INTERACT_TOLERANCE_DEG
         && (pitch - current.x_rot()).abs() <= INTERACT_TOLERANCE_DEG;
-    if aligned {
-        (Look::None, true)
-    } else {
-        (Look::Aim { yaw, pitch }, false)
-    }
+    (Look::Aim { yaw, pitch }, aligned)
 }
 
 /// The aim error a dig or place accepts before it clicks, in degrees. At four
