@@ -27,3 +27,12 @@ runs/
 
 # Root build scratch (clean-checkout verifies)
 /target/
+
+# Round-0 machine-local downloads, decompiled Mojang sources and build logs (never publish)
+spikes/round0/azalea/
+spikes/round0/client/
+spikes/round0/datagen/
+spikes/round0/dl/
+spikes/round0/jdk/
+spikes/round0/src/
+spikes/round0/*.log

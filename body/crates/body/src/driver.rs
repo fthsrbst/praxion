@@ -47,7 +47,7 @@ use praxion_primitives::{Ctx, IntentSpec, PrimitiveEvent, Runner, fact_known};
 use praxion_receipts::{Engine, Intent, ReceiptId};
 use praxion_reflexes::{EndermanGuard, Settings, View};
 use praxion_rules::{ArgValue, FactCall, Program};
-use praxion_world::{World, Vec3};
+use praxion_world::{BlockPos, Vec3, World};
 
 use crate::summary::{write_summary, Shared};
 
@@ -82,6 +82,9 @@ pub struct BodyDriver {
     started: bool,
     done: bool,
     pending: Option<IntentSpec>,
+    /// The block a registered place or dig intent changes, so its confirmed
+    /// receipt can update the known map at once.
+    block_intent: Option<(u64, BlockPos)>,
     last_report: Option<(u64, AppliedReport)>,
     observe_receipt: Option<(ReceiptId, FactCall)>,
     settled_intent: Option<u64>,
@@ -136,6 +139,7 @@ impl BodyDriver {
             started: false,
             done: false,
             pending: None,
+            block_intent: None,
             last_report: None,
             observe_receipt: None,
             settled_intent: None,
@@ -211,7 +215,7 @@ impl BodyDriver {
             eprintln!("body: receipt advance: {error}");
         }
         self.tally_receipts();
-        self.poll_receipt();
+        self.poll_receipt(world);
     }
 
     /// Count every settlement once, by receipt id.
@@ -325,6 +329,14 @@ impl BodyDriver {
             Ok(receipt) => {
                 self.intent_counter = intent_id;
                 self.runner.registered(intent_id);
+                // The cell the receipt watches: the actuator's report, which
+                // follows the block the click actually hit.
+                self.block_intent = match &spec {
+                    IntentSpec::Dig { .. } | IntentSpec::Place { .. } => report
+                        .block_before
+                        .map(|(target, _)| (intent_id, target)),
+                    _ => None,
+                };
                 if let IntentSpec::Fact { fact, .. } = &spec {
                     self.observe_receipt = Some((receipt, fact.clone()));
                 }
@@ -333,7 +345,7 @@ impl BodyDriver {
         }
     }
 
-    fn poll_receipt(&mut self) {
+    fn poll_receipt(&mut self, world: &World) {
         let Some(intent_id) = self.runner.intent_id() else {
             return;
         };
@@ -347,6 +359,12 @@ impl BodyDriver {
             return;
         }
         self.settled_intent = Some(intent_id);
+        if outcome == ReceiptOutcome::Confirmed
+            && let Some((block_intent, pos)) = self.block_intent
+            && block_intent == intent_id
+        {
+            lock(&self.perception).note_changed(world, pos);
+        }
         self.runner
             .settle(praxion_receipts::interpreter_outcome(outcome));
     }
@@ -462,6 +480,16 @@ impl BodyDriver {
         ts_ns: u64,
     ) -> ControlFrame {
         self.finish_active_primitive(view.tick, ts_ns, None);
+        // A released continuous primitive must stop here. Before, an
+        // `explore` whose frame had finished kept walking for 289 ticks, and
+        // the parent's craft waited behind it until the table was far away
+        // (seed 303, a second table crafted). The interpreter already dropped
+        // the action, so its `preempted` outcome is not delivered.
+        if std::mem::take(&mut self.bridge.released) && self.runner.is_continuous() {
+            self.runner.cancel();
+            self.finish_active_primitive(view.tick, ts_ns, Some(Outcome::Preempted));
+            self.outcome_delivered = true;
+        }
         if let Some(action) = self.deferred_start.take()
             && !self.runner.is_active()
         {
@@ -873,6 +901,9 @@ struct BridgeActuator {
     outcome: Option<Outcome>,
     continuous: Option<StartAction>,
     cancelled: bool,
+    /// The interpreter stopped its continuous primitive (the frame finished,
+    /// or a discrete action replaced it); the driver stops the runner.
+    released: bool,
 }
 
 impl Actuator for BridgeActuator {
@@ -894,11 +925,15 @@ impl Actuator for BridgeActuator {
     }
 
     fn apply(&mut self, action: &StartAction, _tick: u64) {
+        // As in `start`: a new continuous action must never poll the outcome
+        // of the one it replaced (a released `explore` ends `preempted`).
+        self.outcome = None;
         self.continuous = Some(action.clone());
     }
 
     fn release(&mut self) {
         self.continuous = None;
+        self.released = true;
     }
 }
 

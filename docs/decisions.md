@@ -7,6 +7,12 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 All on Claude's recommendation, agreed by the user, except where marked (user).
 
+- **`explore` swims when dry land is exhausted (user, 2026-11-03).** Each call explores dry land first;
+  after 40 idle ticks with no reachable dry frontier it allows water frontiers and paths through water
+  once, with a fresh idle budget. Reason: on seed 101 the body stood on a beach between a three-block bank
+  and a lake and explored nothing for 22,000 ticks; swimming uses the planner's own moves and the drowning
+  reflex. Rules out for now: letting explore dig or pillar out of a dry pit (larger change; backlog if a
+  dry pit shows up).
 - **A thin Demo-2 slice comes before Demo-1 (user, 2026-11-03).** Right after Demo-0, the brain gets a
   first vertical slice on the protocol (headless) body: the LLM writes one new skill, admission checks
   it, the body plays it. Then Demo-1, then the rest of Demo-2. Reason: the brain needs the body port,

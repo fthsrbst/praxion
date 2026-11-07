@@ -139,7 +139,10 @@ pub fn item_count(perception: &mut Perception, world: &World, wanted: &str) -> O
     let Answer::Known { value: inventory, .. } = perception.inventory(world) else {
         return None;
     };
-    Some(count_in(&inventory, wanted))
+    // Slot 0 is the 2x2 grid's result: a preview the server computes, not an
+    // owned item. A reflex that cut a table craft short left the table shown
+    // there; `has(crafting_table)` was true and every `place` failed `no_item`.
+    Some(count_in(inventory.get(1..).unwrap_or_default(), wanted))
 }
 
 /// The count of an item or tag in a known inventory.

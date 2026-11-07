@@ -507,6 +507,9 @@ impl LiveDriver {
         if std::mem::take(&mut self.bridge.cancelled) {
             self.runner.cancel();
         }
+        if std::mem::take(&mut self.bridge.released) && self.runner.is_continuous() {
+            self.runner.cancel();
+        }
         if let Some(action) = self.bridge.start.take()
             && !self.runner.is_active()
         {
@@ -686,6 +689,9 @@ struct BridgeActuator {
     /// The interpreter asked to cancel the flight (a deadline fired); the
     /// driver stops the runner before it starts the retry.
     cancelled: bool,
+    /// The interpreter stopped its continuous primitive; the driver stops the
+    /// runner, as `praxion-body` does.
+    released: bool,
 }
 
 impl Actuator for BridgeActuator {
@@ -704,10 +710,14 @@ impl Actuator for BridgeActuator {
     }
 
     fn apply(&mut self, action: &StartAction, _tick: u64) {
+        // As in `start`: a new continuous action must never poll the outcome
+        // of the one it replaced (a released `explore` ends `preempted`).
+        self.outcome = None;
         self.continuous = Some(action.clone());
     }
 
     fn release(&mut self) {
         self.continuous = None;
+        self.released = true;
     }
 }

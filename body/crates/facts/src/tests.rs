@@ -437,3 +437,34 @@ fn night_boundaries() {
     assert!(is_night(13_000 + DAY_TICKS));
     assert_eq!(time_of_day(47_500), 23_500);
 }
+
+#[test]
+fn the_crafting_result_slot_is_not_owned() {
+    // A table shown in slot 0 (the 2x2 result preview) after a craft was cut
+    // short is not a table the body has.
+    let mut world = world();
+    let mut items = vec![ItemStack::Empty; 46];
+    items[0] = ItemStack::new(ItemKind::CraftingTable, 1);
+    items[1] = ItemStack::new(ItemKind::OakPlanks, 1);
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerSetContent(ClientboundContainerSetContent {
+            container_id: 0,
+            state_id: 0,
+            items,
+            carried_item: ItemStack::Empty,
+        }),
+    );
+    let mut perception = Perception::new(Config::default());
+    perception.begin_tick(&world);
+    let mut facts = Facts::new(&mut perception, &world);
+    assert_eq!(
+        facts.bool_fact(&call("has", vec![ArgValue::Item("crafting_table".into())])),
+        Truth::False
+    );
+    assert_eq!(
+        facts.int_fact(&call("count", vec![ArgValue::Item("oak_planks".into())])),
+        IntValue::Known(1),
+        "grid items are still owned: closing the grid returns them"
+    );
+}

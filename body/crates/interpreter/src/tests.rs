@@ -279,6 +279,27 @@ fn discrete_action_blocks_switching_until_settled() {
 }
 
 #[test]
+fn another_rule_firing_releases_the_running_continuous_action() {
+    // A child call whose own action is continuous too: before the fix only a
+    // discrete start released the running action, so the parent's `wait(2)`
+    // kept running beside the child's `wait(1)` (seed 303: an `explore`
+    // walked on after its frame had finished).
+    let program = program(
+        "skill s()\n  rules:\n    count(x) >= 1 -> do c()\n    true -> wait(2)\nskill c()\n  rules:\n    true -> wait(1)\n",
+    );
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    assert_eq!(wait_ticks(&started(&mut interpreter, &mut facts, &mut act)), 2);
+    let before = act.releases;
+    facts.ints.insert("x".into(), 1);
+    interpreter.tick(&mut facts, &mut act);
+    assert!(act.releases > before, "the child's rule released the running wait");
+}
+
+#[test]
 fn continuous_action_is_reselected_every_tick() {
     let program = program(
         "skill s()\n  rules:\n    count(x) >= 1 -> wait(1)\n    true -> wait(2)\n",

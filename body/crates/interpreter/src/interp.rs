@@ -477,6 +477,19 @@ impl Interpreter {
             self.last_rule = Some((selected_skill, index));
             self.rule_fired_this_tick = true;
 
+            // A continuous action runs only while its own rule is the one that
+            // fires (§6.1 step 3: "a higher rule becoming T switches at
+            // once"). Any other rule firing, in this frame or a deeper one,
+            // releases it first; before, a running `explore` kept walking while
+            // a `do` child or another rule took over.
+            if self
+                .continuous_action
+                .as_ref()
+                .is_some_and(|running| (running.depth, running.rule) != (depth, index))
+            {
+                self.stop_continuous(actuator);
+            }
+
             let (action, rule_max_ticks, has_until) = {
                 let frame = &self.stack[depth];
                 let skill = self

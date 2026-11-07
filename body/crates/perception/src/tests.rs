@@ -1221,3 +1221,19 @@ fn the_sight_table_agrees_with_the_old_per_cell_rule_for_every_state() {
     }
     assert_eq!(described, usize::from(BlockState::MAX_STATE) + 1);
 }
+
+#[test]
+fn a_confirmed_change_enters_the_known_map_at_once() {
+    // A placed table must be near on the tick its receipt confirms, not when
+    // the sweep next reaches its cell.
+    let table = BlockPos::new(2, 65, 0);
+    let mut world = world_with(&[]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    assert!(p.known(table).is_none());
+
+    set_block(&mut world, table, find_block("crafting_table", &[]));
+    p.note_changed(&world, table);
+    let remembered = p.known(table).expect("the change is remembered");
+    assert_eq!(remembered.state, find_block("crafting_table", &[]));
+}

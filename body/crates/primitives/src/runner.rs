@@ -261,6 +261,17 @@ impl Runner {
         self.active.is_some() && self.outcome.is_none()
     }
 
+    /// Whether the active primitive is a continuous one (`explore`,
+    /// `move_to`, `wait`): the interpreter stops those by releasing them, not
+    /// by waiting for an outcome.
+    pub fn is_continuous(&self) -> bool {
+        self.is_active()
+            && matches!(
+                self.active,
+                Some(Active::Explore(_) | Active::Move(_) | Active::Wait(_))
+            )
+    }
+
     /// Cancel the active primitive as `Preempted` (the interpreter's flight
     /// deadline fired). Without this the primitive would keep running while
     /// the interpreter retries, and the retry would be dropped as "busy".
@@ -402,10 +413,13 @@ fn item_matches(stack: &ItemStack, wanted: &str) -> bool {
     }
 }
 
+/// Owned items only: slot 0, the 2x2 grid's result, is a preview (see
+/// `praxion_facts::item_count`).
 fn count_item(world: &World, wanted: &str) -> u32 {
     world
         .inventory()
         .iter()
+        .skip(1)
         .filter(|stack| item_matches(stack, wanted))
         .map(|stack| stack.count().max(0) as u32)
         .sum()
@@ -1421,6 +1435,13 @@ struct Explore {
     /// the skill's bounded retries can try another direction instead of
     /// sleeping through the whole 1200-tick budget.
     idle_ticks: u32,
+    /// Water frontiers and paths through water are allowed. Off at first;
+    /// switched on once, when no dry frontier is reachable.
+    allow_water: bool,
+    /// Walks back to an explored cell since the last new frontier. Two such
+    /// walks on seed 101 became an endless shuttle between two cells, each
+    /// resetting the idle count, so dry land never counted as exhausted.
+    walk_backs: u32,
     /// A plan attempt may not start before this tick. Failed A* calls are the
     /// most expensive thing explore does, so a doomed candidate list is
     /// consumed a few ticks apart, not one per tick.
@@ -1445,6 +1466,17 @@ const EXPLORE_SEARCH_PERIOD_TICKS: u64 = 20;
 /// before it fails `not_found`. A closed pocket fails early instead of
 /// sleeping through the 1200-tick budget.
 const EXPLORE_IDLE_TICKS: u32 = 120;
+
+/// Idle ticks after which `explore` stops insisting on dry land and plans
+/// through water too (user decision, 2026-11-03). On seed 101 the body stood on
+/// a beach between a three-block bank and a lake: dry-only explore had no
+/// frontier for 22,000 ticks. Swimming is the planner's own move set, and the
+/// drowning reflex guards it.
+const EXPLORE_WATER_AFTER_IDLE_TICKS: u32 = 40;
+
+/// Walks back to explored cells without a new frontier after which dry land
+/// counts as exhausted too.
+const EXPLORE_WALK_BACKS_BEFORE_WATER: u32 = 2;
 
 /// Plan attempts per tick when consuming a ranked frontier list. One keeps a
 /// slow A* out of the tick's tail; the remaining candidates wait for the next
@@ -1591,6 +1623,8 @@ impl Explore {
             frontier_scan_tick: 5,
             rotation: memory.next_rotation(),
             idle_ticks: 0,
+            allow_water: false,
+            walk_backs: 0,
             next_plan_tick: 0,
             goals: 0,
             events: Vec::new(),
@@ -1718,7 +1752,9 @@ impl Explore {
                     radius: TARGET_APPROACH_RADIUS,
                 });
                 match plan.status {
-                    praxion_planner::PlanStatus::Success if !plan_crosses_water(&plan) => {
+                    praxion_planner::PlanStatus::Success
+                        if self.allow_water || !plan_crosses_water(&plan) =>
+                    {
                         self.path_ticks = plan.cost.ceil().max(0.) as u64;
                         eprintln!(
                             "explore approach target={:?} cell={:?} cost={} steps={}",
@@ -1759,7 +1795,7 @@ impl Explore {
                     &self.explored,
                     &self.rejected,
                     known,
-                    false,
+                    self.allow_water,
                 )
             } else {
                 rank_frontiers_from(
@@ -1770,7 +1806,7 @@ impl Explore {
                     &self.explored,
                     &self.rejected,
                     known,
-                    false,
+                    self.allow_water,
                 )
             };
             self.candidates = ranked.into();
@@ -1807,7 +1843,9 @@ impl Explore {
                 let goal = choice.cell;
                 let plan = self.plan_to(ctx, start, Goal::Block(goal));
                 match plan.status {
-                    praxion_planner::PlanStatus::Success if !plan_crosses_water(&plan) => {
+                    praxion_planner::PlanStatus::Success
+                        if self.allow_water || !plan_crosses_water(&plan) =>
+                    {
                         self.path_ticks = plan.cost.ceil().max(0.) as u64;
                         eprintln!(
                             "explore plan target={:?} frontier={:?} cost={} steps={} candidates={}",
@@ -1820,6 +1858,7 @@ impl Explore {
                         self.goal = Some(goal);
                         self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
                         self.idle_ticks = 0;
+                        self.walk_backs = 0;
                         self.next_plan_tick = 0;
                         self.events.push(PrimitiveEvent::ExploreFrontier {
                             cell: goal,
@@ -1837,6 +1876,23 @@ impl Explore {
             }
         }
         self.idle_ticks = self.idle_ticks.saturating_add(1);
+        // Dry land is exhausted: allow water once and rescan, with a fresh
+        // idle budget. Frontiers rejected because their only path crossed
+        // water get another chance.
+        if !self.allow_water
+            && (self.idle_ticks >= EXPLORE_WATER_AFTER_IDLE_TICKS
+                || self.walk_backs >= EXPLORE_WALK_BACKS_BEFORE_WATER)
+        {
+            eprintln!("explore target={:?}: no dry frontier, allowing water", self.target);
+            self.allow_water = true;
+            self.walk_backs = 0;
+            self.rejected.clear();
+            self.candidates.clear();
+            self.frontier_scan_tick = ctx.tick;
+            self.next_plan_tick = ctx.tick;
+            self.idle_ticks = 0;
+            return (frame, None, None);
+        }
         // A pit with no reachable frontier is not a dead end: walk back to a
         // cell a previous leg reached and scan from there. Without this the
         // body sits at the bottom of the same hole for every retry.
@@ -1854,12 +1910,13 @@ impl Explore {
                     radius: TARGET_APPROACH_RADIUS,
                 });
                 if plan.status == praxion_planner::PlanStatus::Success
-                    && !plan_crosses_water(&plan)
+                    && (self.allow_water || !plan_crosses_water(&plan))
                 {
                     self.path_ticks = plan.cost.ceil().max(0.) as u64;
                     self.goal = Some(cell);
                     self.follower = Some(Follower::new(plan.steps, ctx.look).with_max_ticks_per_step(EXPLORE_STEP_TICKS));
                     self.idle_ticks = 0;
+                    self.walk_backs += 1;
                     self.next_plan_tick = 0;
                     return (frame, None, None);
                 }
@@ -1915,7 +1972,21 @@ struct Craft {
     /// close next tick and only then finishes, so the menu does not outlive the
     /// primitive.
     close_outcome: Option<Outcome>,
+    /// Items an earlier craft left in the 2x2 grid are returned once, before
+    /// this craft plans its clicks.
+    grid: GridClear,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridClear {
+    Unchecked,
+    /// The close went out; waiting this many ticks for the grid to empty.
+    Waiting(u32),
+    Clear,
+}
+
+/// How long a craft waits for the server to return leftover grid items.
+const GRID_CLEAR_TICKS: u32 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CraftStage {
@@ -1936,6 +2007,7 @@ impl Craft {
             table: None,
             close_sent: false,
             close_outcome: None,
+            grid: GridClear::Unchecked,
         })
     }
 
@@ -1949,10 +2021,37 @@ impl Craft {
         ctx: &mut Ctx<'_>,
         started: bool,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
+        let (frame, pending, outcome) = self.tick_inner(ctx, started);
+        // A craft that fails on its own (`no_result`, `no_menu`) leaves its
+        // items in the grid or its table open just like one cut short. Route
+        // it through the close path: the close goes out next tick, then the
+        // failure is reported.
+        if let Some(Outcome::Failed(_)) = &outcome
+            && self.close_outcome.is_none()
+            && !self.close_sent
+        {
+            self.close_outcome = outcome;
+            return (frame, pending, None);
+        }
+        (frame, pending, outcome)
+    }
+
+    fn tick_inner(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        started: bool,
+    ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let mut frame = idle(ctx);
         if let Some(outcome) = self.close_outcome.clone() {
             let needs_table = self.recipe.is_some_and(|recipe| recipe.needs_table);
-            if needs_table && !self.close_sent {
+            // A table menu always closes. The inventory's own 2x2 grid closes
+            // whenever the craft did not finish cleanly: closing window 0 makes
+            // the server return what is in the grid and on the cursor. The
+            // cursor is not in the world model, and a reflex that cut a craft
+            // right after its pick-up left two logs there: the body thought
+            // it had none and went to look for trees (melee smoke test).
+            let unclean = outcome != Outcome::Confirmed || inventory_grid_in_use(ctx.world);
+            if (needs_table || unclean) && !self.close_sent {
                 frame.menu = Some(MenuAction {
                     window: menu_window(ctx.world),
                     slot: 0,
@@ -1962,6 +2061,35 @@ impl Craft {
                 self.close_sent = true;
             }
             return (frame, None, Some(outcome));
+        }
+        // Items left in the 2x2 grid or on the cursor by an earlier craft
+        // would join this recipe's slots: close window 0 once (it costs a
+        // tick and returns both), and plan only on an empty grid.
+        match self.grid {
+            GridClear::Unchecked => {
+                if ctx.world.open_container().is_none() {
+                    frame.menu = Some(MenuAction {
+                        window: 0,
+                        slot: 0,
+                        button: 0,
+                    });
+                    frame.menu_mode = MenuMode::Close;
+                    self.grid = GridClear::Waiting(0);
+                    return (frame, None, None);
+                }
+                self.grid = GridClear::Clear;
+            }
+            GridClear::Waiting(ticks) => {
+                if inventory_grid_in_use(ctx.world) {
+                    if ticks >= GRID_CLEAR_TICKS {
+                        return (frame, None, Some(Outcome::Failed("grid_busy".into())));
+                    }
+                    self.grid = GridClear::Waiting(ticks + 1);
+                    return (frame, None, None);
+                }
+                self.grid = GridClear::Clear;
+            }
+            GridClear::Clear => {}
         }
         self.wait += 1;
         if self.recipe.is_none() {
@@ -2140,6 +2268,16 @@ fn resolve_recipe(world: &World, wanted: &str) -> Option<&'static gamedata::Reci
             .iter()
             .all(|input| count_item(world, &input.item) >= input.count)
     })
+}
+
+/// Whether the inventory's 2x2 crafting grid (window 0, slots 1 to 4) holds
+/// anything. The cursor is not checked: the world model does not track it
+/// (slot -1 updates are dropped), so a leftover there is not seen (backlog).
+fn inventory_grid_in_use(world: &World) -> bool {
+    world
+        .inventory()
+        .get(1..=4)
+        .is_some_and(|slots| slots.iter().any(|stack| stack.count() > 0))
 }
 
 fn menu_window(world: &World) -> u32 {
@@ -3082,6 +3220,30 @@ mod tests {
             choose_tool(log, &inventory, &inventory[36]),
             ToolChoice::Select("wooden_axe".into())
         );
+    }
+
+    #[test]
+    fn is_continuous_matches_the_registry() {
+        // `Runner::is_continuous` lists the continuous primitives by hand; a
+        // new continuous record would otherwise never be released (review,
+        // 2026-11-03).
+        use praxion_rules::registry::{PrimitiveKind, Primitives};
+        let continuous: Vec<&str> = Primitives::standard()
+            .iter()
+            .filter(|record| record.kind == PrimitiveKind::Continuous)
+            .map(|record| record.name)
+            .collect();
+        assert_eq!(continuous, ["explore", "move_to", "wait"]);
+        for (name, arg) in [("explore", "#logs"), ("move_to", "0, 64, 0"), ("wait", "5")] {
+            let mut runner = Runner::new();
+            runner
+                .start(&StartAction {
+                    primitive: name.into(),
+                    args: vec![ArgValue::Name(arg.into())],
+                })
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(runner.is_continuous(), "{name}");
+        }
     }
 
     #[test]

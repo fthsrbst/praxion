@@ -329,6 +329,18 @@ impl Perception {
         self.config.remaining(caller, self.rays_other, self.rays_reflex)
     }
 
+    /// Write a cell the body just changed (a confirmed place or dig) to the
+    /// known map from the world, without a ray. Before, the map learnt the
+    /// change only when the sweep next probed the cell, so on the tick a
+    /// placed table was confirmed `near(crafting_table, 4)` was still false
+    /// and the skill chose to go and gather logs for another one.
+    pub fn note_changed(&mut self, world: &World, pos: BlockPos) {
+        let (Some(state), Some(eye)) = (world.block_state(pos), self.eye(world)) else {
+            return;
+        };
+        self.record_seen(world, pos, state, eye);
+    }
+
     /// Write a cell a ray reached to the known map, with the chunk revision it
     /// was checked against.
     fn record_seen(&mut self, world: &World, pos: BlockPos, state: BlockState, eye: Vec3) {

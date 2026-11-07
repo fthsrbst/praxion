@@ -46,59 +46,6 @@ def _setup_peaceful(fixture, referee, run: BodyRun) -> None:
     fixture.give(BODY, "cobblestone", 3)
 
 
-def _place_table(fixture, referee) -> None:
-    """Put a crafting table within reach so the reflex test is not a table hunt."""
-    x, y, z = referee.player_pos(BODY)
-    for dx, dz in ((1, 0), (0, 1), (-1, 0), (0, -1), (2, 0), (0, 2)):
-        cx, cy, cz = int(x) + dx, int(y), int(z) + dz
-        if referee.block_is(cx, cy, cz, "minecraft:air") and not referee.block_is(
-            cx, cy - 1, cz, "minecraft:air"
-        ):
-            fixture.setblock(cx, cy, cz, "crafting_table")
-            return
-
-
-def _summon_ground_zombie(fixture, referee) -> None:
-    """Summon a zombie six blocks away on solid ground at the player's level.
-
-    A plain ``summon`` at ``x + 6`` drops the zombie off the first cliff (seed
-    101's spawn is on a slope): it fell to y=10 and never reached the player.
-    Probe the six-block ring for two air blocks over a solid block and put the
-    zombie there, still exactly six blocks from the player.
-
-    The zombie has one health point: the reflex still has to acquire the body
-    and fight, but the fight ends in a hit or two, so the skill resumes and the
-    goal can settle. A full-health zombie keeps re-acquiring the body for the
-    whole run and the goal never finishes.
-    """
-    x, y, z = referee.player_pos(BODY)
-    ring = [(6, 0), (0, 6), (-6, 0), (0, -6), (4, 4), (4, -4), (-4, 4), (-4, -4)]
-    nbt = "{Health:1.0f,PersistenceRequired:1b}"
-
-    def air(cx: int, cy: int, cz: int) -> bool:
-        return referee.block_is(cx, cy, cz, "minecraft:air")
-
-    for dx, dz in ring:
-        for dy in (0, -1, 1):
-            cy = int(y) + dy
-            cx, cz = int(x) + dx, int(z) + dz
-            if not air(cx, cy - 1, cz) and air(cx, cy, cz) and air(cx, cy + 1, cz):
-                # Clear a one-wide, three-high corridor with a stone floor so
-                # the zombie can path to the player instead of falling off the
-                # slope or standing behind a wall.
-                px, pz = int(x), int(z)
-                fixture.fill(
-                    min(px, cx), cy, min(pz, cz), max(px, cx), cy + 2, max(pz, cz), "air"
-                )
-                fixture.fill(
-                    min(px, cx), cy - 1, min(pz, cz), max(px, cx), cy - 1, max(pz, cz),
-                    "stone",
-                )
-                fixture.summon("zombie", cx + 0.5, cy, cz + 0.5, nbt)
-                return
-    fixture.summon("zombie", x + 6, y, z, nbt)
-
-
 def _context(run: BodyRun, summary: Dict[str, Any], extra: Iterable[str] = ()) -> str:
     events = run.events()
     tail = events[-25:]
@@ -165,16 +112,34 @@ def test_stone_pickaxe_from_given_cobblestone(seed: int) -> None:
         assert run.referee.player_health(BODY) > 0.0, context
 
 
+def _arena_zombie(fixture, referee, distance: int = 12) -> None:
+    """A flat stone strip from the player to a zombie ``distance`` blocks east.
+
+    The earlier ring probe could put the zombie a block below the player in a
+    one-wide trench it never left (2026-11-03: the goal finished in 124 ticks
+    with no reflex). A flat, open strip at the player's level makes the
+    zombie's walk, and so the moment it arrives, repeatable.
+    """
+    x, y, z = referee.player_pos(BODY)
+    px, py, pz = int(x // 1), int(y // 1), int(z // 1)
+    fixture.fill(px - 2, py, pz - 3, px + distance + 2, py + 3, pz + 3, "air")
+    fixture.fill(px - 2, py - 1, pz - 3, px + distance + 2, py - 1, pz + 3, "stone")
+    fixture.summon(
+        "zombie", px + distance + 0.5, py, pz + 0.5, "{Health:1.0f,PersistenceRequired:1b}"
+    )
+
+
 def test_melee_reflex_preempts_and_the_skill_resumes() -> None:
     def setup(fixture, referee, run: BodyRun) -> None:
         fixture.advance_time(False)
-        fixture.spawn_mobs(True)
+        # Only the summoned zombie: random night spawns made the timing vary.
+        fixture.spawn_mobs(False)
         fixture.time_set(13000)
+        # No sticks and no table: the skill crafts planks, sticks and a table
+        # first, so it is still running when the zombie arrives.
         fixture.give(BODY, "oak_log", 3)
         fixture.give(BODY, "cobblestone", 3)
-        fixture.give(BODY, "stick", 1)
-        _summon_ground_zombie(fixture, referee)
-        _place_table(fixture, referee)
+        _arena_zombie(fixture, referee)
 
     with start_body(
         101,
@@ -214,8 +179,7 @@ def test_melee_reflex_preempts_and_the_skill_resumes() -> None:
         assert resumed or summary["goal"]["outcome"] == "done", (
             "the skill never resumed after the reflex\n" + context
         )
-        # The goal may legitimately fail after the interruption (no_rule on a
-        # moved world); what this test proves is preemption, resume and no death.
-        assert summary["goal"]["outcome"] in ("done",) or summary["goal"]["outcome"].startswith(
-            "failed("
-        ), context
+        # The arena is flat and the items are known, so the goal must finish:
+        # a failure here (e.g. `no_result` from a craft the reflex cut short)
+        # is a regression, not bad luck.
+        assert summary["goal"]["outcome"] == "done", context
