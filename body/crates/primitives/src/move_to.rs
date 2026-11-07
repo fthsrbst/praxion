@@ -129,7 +129,11 @@ impl Move {
         );
         match plan.status {
             praxion_planner::PlanStatus::Success => {
-                self.follower = Some(Follower::new(plan.steps));
+                let mut source = PerceptionBlocks {
+                    perception: &mut *ctx.perception,
+                    world: ctx.world,
+                };
+                self.follower = Some(Follower::new(plan.steps, &mut source, &state, ctx.style));
             }
             praxion_planner::PlanStatus::Partial { cell } => {
                 self.tries += 1;

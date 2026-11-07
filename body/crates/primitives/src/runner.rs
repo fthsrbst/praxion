@@ -11,6 +11,7 @@ use azalea_core::position::BlockPos;
 use praxion_headless::{Body, ControlFrame};
 use praxion_interpreter::{Outcome, StartAction};
 use praxion_perception::Perception;
+use praxion_planner::Personality;
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::World;
 
@@ -28,6 +29,9 @@ pub struct Ctx<'a> {
     pub body: &'a Body,
     pub world: &'a World,
     pub perception: &'a mut Perception,
+    /// The body's movement personality, so a follower it starts walks the same
+    /// way as the driver's gaze.
+    pub style: Personality,
 }
 
 /// What the driver registers with the receipts engine after the frame is

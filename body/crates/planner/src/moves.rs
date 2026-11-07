@@ -34,7 +34,7 @@ use crate::costs::{
     WALK_OFF_BLOCK_COST, WALK_ONE_BLOCK_COST, WALK_ONE_IN_WATER_COST,
 };
 use crate::state::{Inventory, Placements};
-use crate::world::{Cell, WorldView, neighbors6};
+use crate::world::{Cell, WorldView, neighbors6, offset};
 
 /// A node: the feet cell, whether the player is standing on a block this path
 /// just placed (so a second pillar step has support), and how many blocks the
@@ -206,17 +206,6 @@ pub(crate) fn successors(ctx: &mut MoveCtx, node: Node) -> Vec<PlanEdge> {
     edges
 }
 
-fn offset(pos: BlockPos, dx: i32, dy: i32, dz: i32) -> BlockPos {
-    // Saturating, so a cell at the edge of the coordinate range can never wrap
-    // around (FINDING 1). `plan` already refuses starts and goals outside the
-    // world, so this is defence in depth.
-    BlockPos::new(
-        pos.x.saturating_add(dx),
-        pos.y.saturating_add(dy),
-        pos.z.saturating_add(dz),
-    )
-}
-
 /// Azalea's base cost of one block moved from a cell (`basic.rs:24-34`,
 /// `:397-409`): the sprint cost on open ground, the in-water walk cost when the
 /// feet cell is water. Praxion does not use Azalea's `BARITONE_COMPAT` branch
@@ -238,25 +227,12 @@ fn note_unknown(ctx: &mut MoveCtx, cell: BlockPos, parent: Node) {
 /// Whether both body cells at `pos` are free. `Err(cell)` names an unknown
 /// cell that stopped the check.
 fn body_free(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
-    let head = offset(pos, 0, 1, 0);
-    match ctx.world.cell(pos) {
-        Cell::Unknown => Err(pos),
-        Cell::Blocked => Ok(false),
-        Cell::Free => match ctx.world.cell(head) {
-            Cell::Unknown => Err(head),
-            Cell::Blocked => Ok(false),
-            Cell::Free => Ok(true),
-        },
-    }
+    ctx.world.body_free(pos)
 }
 
 /// Whether `pos` has a solid floor. `Err(cell)` names an unknown cell.
 fn floor_free(ctx: &mut MoveCtx, pos: BlockPos) -> Result<bool, BlockPos> {
-    match ctx.world.floor(pos) {
-        Cell::Unknown => Err(offset(pos, 0, -1, 0)),
-        Cell::Blocked => Ok(false),
-        Cell::Free => Ok(true),
-    }
+    ctx.world.floor_free(pos)
 }
 
 fn push(

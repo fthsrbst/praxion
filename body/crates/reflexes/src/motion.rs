@@ -8,7 +8,7 @@
 
 use praxion_headless::{Body, Click, ControlFrame, Held, Look};
 use praxion_planner::{
-    Follower, Goal, Inventory, MoveKind, Planner, PlanStatus, PlanningState, Step,
+    Follower, Goal, Inventory, MoveKind, Personality, Planner, PlanStatus, PlanningState, Step,
     WALK_TOLERANCE_DEG, aim, look_towards,
 };
 use praxion_planner::KnownBlocks;
@@ -121,14 +121,15 @@ impl Motion {
         // A reflex never digs or places: those are world changes with receipts.
         planner.set_allow_world_changes(false);
         let start = body.position().to_block_pos_floor();
-        let plan = planner.plan(blocks, &PlanningState::new(Inventory::empty()), start, goal);
+        let state = PlanningState::new(Inventory::empty());
+        let plan = planner.plan(blocks, &state, start, goal);
         let reachable = matches!(plan.status, PlanStatus::Success | PlanStatus::Partial { .. });
         if !reachable || plan.steps.is_empty() {
             return None;
         }
         let ticks = plan.cost.ceil().max(1.0) as u64 + 40;
         Some(Motion::Follow {
-            follower: Follower::new(plan.steps)
+            follower: Follower::new(plan.steps, blocks, &state, Personality::default())
                 .with_max_ticks_per_step(60),
             deadline: tick + ticks,
             sprint,
@@ -161,7 +162,12 @@ impl Motion {
             cost: 1.0,
         };
         Some(Motion::Follow {
-            follower: Follower::new(vec![step]),
+            follower: Follower::new(
+                vec![step],
+                blocks,
+                &PlanningState::default(),
+                Personality::default(),
+            ),
             deadline: u64::MAX,
             sprint,
         })
@@ -183,6 +189,11 @@ impl Motion {
                 let mut frame = follower.step(tick, generation, body);
                 if *sprint && frame.held.forward {
                     frame.held.sprint = true;
+                } else if !*sprint {
+                    // The reflex flag still owns sprint: a careful step never
+                    // starts one, even though the follower may sprint on its
+                    // own flat runs.
+                    frame.held.sprint = false;
                 }
                 frame
             }

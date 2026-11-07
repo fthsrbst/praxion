@@ -20,6 +20,7 @@ fn make_ctx<'a>(
         body,
         world,
         perception,
+        style: praxion_planner::Personality::default(),
     }
 }
 

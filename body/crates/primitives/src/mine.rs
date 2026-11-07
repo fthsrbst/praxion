@@ -279,6 +279,7 @@ mod tests {
                     body: &body,
                     world: &world,
                     perception: &mut perception,
+                    style: praxion_planner::Personality::default(),
                 };
                 pickup_frame(&ctx, Vec3::new(0.5, 64.0, 1.5))
             };

@@ -184,6 +184,32 @@ impl<'a> WorldView<'a> {
         }
     }
 
+    /// Whether both body cells at `pos` are free. `Err(cell)` names an unknown
+    /// cell that stopped the check. This is the A* `Walk` move's own predicate
+    /// (`moves::walk`), shared with the route smoother.
+    pub fn body_free(&mut self, pos: BlockPos) -> Result<bool, BlockPos> {
+        let head = offset(pos, 0, 1, 0);
+        match self.cell(pos) {
+            Cell::Unknown => Err(pos),
+            Cell::Blocked => Ok(false),
+            Cell::Free => match self.cell(head) {
+                Cell::Unknown => Err(head),
+                Cell::Blocked => Ok(false),
+                Cell::Free => Ok(true),
+            },
+        }
+    }
+
+    /// Whether `pos` has a solid floor. `Err(cell)` names an unknown cell. The
+    /// other half of the A* `Walk` predicate.
+    pub fn floor_free(&mut self, pos: BlockPos) -> Result<bool, BlockPos> {
+        match self.floor(pos) {
+            Cell::Unknown => Err(offset(pos, 0, -1, 0)),
+            Cell::Blocked => Ok(false),
+            Cell::Free => Ok(true),
+        }
+    }
+
     /// Whether one of the six face neighbours of `pos` is a solid block that
     /// can support a placed block.
     pub fn has_support(&mut self, pos: BlockPos) -> Cell {
@@ -200,23 +226,24 @@ impl<'a> WorldView<'a> {
 
 }
 
+/// A cell offset. Saturating, so a cell at the edge of the coordinate range
+/// can never wrap around.
+pub(crate) fn offset(pos: BlockPos, dx: i32, dy: i32, dz: i32) -> BlockPos {
+    BlockPos::new(
+        pos.x.saturating_add(dx),
+        pos.y.saturating_add(dy),
+        pos.z.saturating_add(dz),
+    )
+}
+
 pub(crate) fn neighbors6(pos: BlockPos) -> [BlockPos; 6] {
-    // Saturating, like the moves' own `offset`: a cell at the edge of the
-    // coordinate range must never wrap into a different one.
-    let step = |dx: i32, dy: i32, dz: i32| {
-        BlockPos::new(
-            pos.x.saturating_add(dx),
-            pos.y.saturating_add(dy),
-            pos.z.saturating_add(dz),
-        )
-    };
     [
-        step(0, 1, 0),
-        step(0, -1, 0),
-        step(0, 0, -1),
-        step(0, 0, 1),
-        step(1, 0, 0),
-        step(-1, 0, 0),
+        offset(pos, 0, 1, 0),
+        offset(pos, 0, -1, 0),
+        offset(pos, 0, 0, -1),
+        offset(pos, 0, 0, 1),
+        offset(pos, 1, 0, 0),
+        offset(pos, -1, 0, 0),
     ]
 }
 

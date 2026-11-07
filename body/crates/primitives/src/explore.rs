@@ -9,7 +9,8 @@ use azalea_registry::builtin::BlockKind;
 use praxion_gamedata as gamedata;
 use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
-use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState};
+use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, Step};
+use praxion_world::World;
 
 use crate::common::{block_name, idle, plan_inventory};
 use crate::frontier::{
@@ -419,10 +420,7 @@ impl Explore {
                             plan.steps.len()
                         );
                         self.goal = Some(cell);
-                        self.follower = Some(
-                            Follower::new(plan.steps)
-                                .with_max_ticks_per_step(EXPLORE_STEP_TICKS),
-                        );
+                        self.follower = Some(self.follow(ctx, plan.steps));
                         self.idle_ticks = 0;
                         return (frame, None, None);
                     }
@@ -516,10 +514,7 @@ impl Explore {
                             choice.candidates
                         );
                         self.goal = Some(goal);
-                        self.follower = Some(
-                            Follower::new(plan.steps)
-                                .with_max_ticks_per_step(EXPLORE_STEP_TICKS),
-                        );
+                        self.follower = Some(self.follow(ctx, plan.steps));
                         self.idle_ticks = 0;
                         self.walk_backs = 0;
                         self.next_plan_tick = 0;
@@ -581,10 +576,7 @@ impl Explore {
                 {
                     self.path_ticks = plan.cost.ceil().max(0.) as u64;
                     self.goal = Some(cell);
-                    self.follower = Some(
-                        Follower::new(plan.steps)
-                            .with_max_ticks_per_step(EXPLORE_STEP_TICKS),
-                    );
+                    self.follower = Some(self.follow(ctx, plan.steps));
                     self.idle_ticks = 0;
                     self.walk_backs += 1;
                     self.next_plan_tick = 0;
@@ -599,10 +591,27 @@ impl Explore {
         (frame, None, None)
     }
 
-    fn plan_to(&self, ctx: &mut Ctx<'_>, start: BlockPos, goal: Goal) -> praxion_planner::Plan {
-        let inventory = plan_inventory(ctx.world);
-        let mut state = PlanningState::new(inventory);
+    /// The planning state a plan and its follower share: the run's inventory
+    /// and the cells explore has stalled in.
+    fn planning_state(&self, world: &World) -> PlanningState {
+        let mut state = PlanningState::new(plan_inventory(world));
         state.blacklist.extend(self.blocked.iter().copied());
+        state
+    }
+
+    /// Follow `steps` with the planning state the plan used.
+    fn follow(&self, ctx: &mut Ctx<'_>, steps: Vec<Step>) -> Follower {
+        let state = self.planning_state(ctx.world);
+        let mut source = PerceptionBlocks {
+            perception: ctx.perception,
+            world: ctx.world,
+        };
+        Follower::new(steps, &mut source, &state, ctx.style)
+            .with_max_ticks_per_step(EXPLORE_STEP_TICKS)
+    }
+
+    fn plan_to(&self, ctx: &mut Ctx<'_>, start: BlockPos, goal: Goal) -> praxion_planner::Plan {
+        let state = self.planning_state(ctx.world);
         let mut source = PerceptionBlocks {
             perception: ctx.perception,
             world: ctx.world,

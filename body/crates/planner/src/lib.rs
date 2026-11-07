@@ -41,6 +41,7 @@ mod follow;
 mod goal;
 mod look;
 mod moves;
+mod route;
 mod state;
 mod stuck;
 mod world;

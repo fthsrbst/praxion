@@ -25,8 +25,8 @@ use praxion_headless::Body;
 use praxion_perception::{Config, Perception};
 use praxion_planner::blocks::{is_passable, is_solid, is_water};
 use praxion_planner::{
-    Budget, DirectBlocks, Follower, Goal, Inventory, PerceptionBlocks, Plan, PlanStatus,
-    Planner, PlanningState, place_block_kind,
+    Budget, DirectBlocks, Follower, Goal, Inventory, PerceptionBlocks, Personality, Plan,
+    PlanStatus, Planner, PlanningState, place_block_kind,
 };
 use praxion_tee::Reader;
 use praxion_world::{BlockPos, Vec3, World};
@@ -292,7 +292,12 @@ fn drive(world: &World, plan: &Plan, goal: BlockPos) -> Result<u64, String> {
         f64::from(start.y),
         f64::from(start.z) + 0.5,
     ));
-    let mut follower = Follower::new(plan.steps.clone());
+    let mut follower = Follower::new(
+        plan.steps.clone(),
+        &mut DirectBlocks { world },
+        &PlanningState::default(),
+        Personality::default(),
+    );
     let corridor = corridor(plan);
     let max_ticks = (plan.steps.len() as u64) * 40 + 100;
 

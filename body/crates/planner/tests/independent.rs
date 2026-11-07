@@ -913,7 +913,12 @@ fn independent_follower() {
         }
 
         // build follower
-        let mut follower = Follower::new(plan.steps.clone());
+        let mut follower = Follower::new(
+            plan.steps.clone(),
+            &mut w2,
+            &state,
+            Personality::default(),
+        );
         follower = follower.with_max_ticks_per_step(400);
 
         // physics body

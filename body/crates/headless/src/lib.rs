@@ -42,7 +42,7 @@ pub use events::Event;
 pub use frame::{Click, ControlFrame, FrameError, Held, Look, MenuAction, MenuMode};
 pub use interact::{ActuatorState, AppliedReport, Outgoing, Pick, held_item, pick};
 pub use login::protocol_version;
-pub use physics::{Body, ToolFit, tool_fit};
+pub use physics::{Blocks, Body, ToolFit, tool_fit};
 pub use script::{Script, ScriptLook, Step};
 pub use session::{ConnectOptions, Session, SessionStats};
 pub use worldfeed::{ObservedPacket, WorldFeed};

@@ -37,6 +37,15 @@ const RESYNC_DEG: f32 = 2.0;
 pub struct Personality {
     pub turn_time: f32,
     pub step_deg: f32,
+    /// How far along the route the walk looks, in blocks.
+    pub look_ahead: f32,
+    /// The yaw change under which a steering gesture is not started, in
+    /// degrees.
+    pub deadband_deg: f32,
+    /// Whether this body sprints on long flat runs.
+    pub sprints: bool,
+    /// Ticks after forward starts before sprint may begin.
+    pub sprint_delay_ticks: u32,
 }
 
 impl Personality {
@@ -44,12 +53,43 @@ impl Personality {
         Self {
             turn_time: rng.gen_range(0.8..1.2),
             step_deg: STEP,
+            look_ahead: rng.gen_range(1.8..3.0),
+            deadband_deg: rng.gen_range(4.0..12.0),
+            sprints: rng.gen_bool(0.8),
+            sprint_delay_ticks: if rng.gen_bool(0.25) {
+                0
+            } else {
+                (20.0_f32 * rng.gen_range(0.1_f32..0.8)).round() as u32
+            },
         }
     }
 
     /// One compact line for the event log.
     pub fn describe(&self) -> String {
-        format!("gaze turn_time={:.3} step={:.2}", self.turn_time, self.step_deg)
+        format!(
+            "gaze turn_time={:.3} step={:.2} look_ahead={:.2} deadband={:.1} \
+             sprints={} sprint_delay={}",
+            self.turn_time,
+            self.step_deg,
+            self.look_ahead,
+            self.deadband_deg,
+            self.sprints,
+            self.sprint_delay_ticks
+        )
+    }
+}
+
+impl Default for Personality {
+    /// Mid values for callers without a seed (reflexes, tests).
+    fn default() -> Self {
+        Self {
+            turn_time: 1.0,
+            step_deg: STEP,
+            look_ahead: 2.4,
+            deadband_deg: 8.0,
+            sprints: true,
+            sprint_delay_ticks: 0,
+        }
     }
 }
 

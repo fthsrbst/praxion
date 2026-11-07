@@ -545,6 +545,7 @@ impl BodyDriver {
                 body: &self.mirror,
                 world,
                 perception: &mut perception,
+                style: self.gaze.personality(),
             };
             self.runner.tick(&mut ctx)
         };
@@ -587,6 +588,7 @@ impl BodyDriver {
                     body: &self.mirror,
                     world,
                     perception: &mut perception,
+                    style: self.gaze.personality(),
                 };
                 fact_known(&mut ctx, &fact)
             };
@@ -622,6 +624,7 @@ impl BodyDriver {
                 body: &self.mirror,
                 world,
                 perception: &mut perception,
+                style: self.gaze.personality(),
             };
             self.runner.tick(&mut ctx)
         };

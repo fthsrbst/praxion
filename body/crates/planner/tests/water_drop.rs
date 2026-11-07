@@ -27,7 +27,7 @@ use azalea_registry::{
 use azalea_world::Chunk;
 use praxion_headless::Body;
 use praxion_planner::{
-    DirectBlocks, Follower, Goal, MoveKind, PlanStatus, Planner, PlanningState,
+    DirectBlocks, Follower, Goal, MoveKind, Personality, PlanStatus, Planner, PlanningState,
 };
 use praxion_world::{BlockPos, Vec3, World};
 
@@ -152,7 +152,13 @@ fn the_body_drops_into_the_pond_and_crosses_it() {
     );
 
     let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
-    let mut follower = Follower::new(plan.steps.clone());
+    let mut route_world = DirectBlocks { world: &world };
+    let mut follower = Follower::new(
+        plan.steps.clone(),
+        &mut route_world,
+        &state,
+        Personality::default(),
+    );
     let max_ticks = (plan.steps.len() as u64) * 60 + 200;
     for tick in 0..max_ticks {
         let frame = follower.step(tick, body.generation(), &body);
