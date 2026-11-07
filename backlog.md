@@ -25,8 +25,10 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   part 1 (`Gaze`, 15e512d) and part 2 (walking: string-pulled route, pursuit carrot, deadband
   steering, sprint; briefs `logs/simplify/c2-walk.md`, `c2b-fix.md`) done.
 - A5 clippy and small duplicates done (brief `logs/simplify/a5-clippy.md`; 8 justified `allow`s).
-- Remaining: a live harness run to see and
-  measure the new movement (research §6); idle gaze and pitch noise (research §4.6); one walkthrough for
+- Live run 2026-11-07 (seed 303, `get_stone_pickaxe`, run `runs/test-body-8036648a954f4c128a6d9645bbb6eb73`):
+  done in about 1300 play ticks, 18/18 receipts confirmed, no reflexes, no deaths, no place timeouts,
+  peak yaw 28.8 deg/tick (no snaps). Owner's visual verdict pending.
+- Remaining: compare against human traces (research §6); idle gaze and pitch noise (research §4.6); one walkthrough for
   the user.
 - Walking limits: diagonal A* steps are not string-pulled (a naive version broke the narrowing
   corridor test); the hazard window measures to a step's end, so a Descend edge can sit up to one block
