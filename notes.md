@@ -6,6 +6,14 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-07, Claude Opus 5.5: movement style and worker notes
+- Gaze (15e512d), walking (00ea434) and clippy/duplicates (b75d50f) landed. Physics following tests got
+  no slower (terrain 2210 -> 2190 ticks). The real test of "less robotic" is a live `watch` run, not yet done.
+- Proposal: next movement pieces in order: diagonal string-pulling (needs a fix for narrowing corridors),
+  idle gaze and pitch noise (research §4.6), then measure against human traces (research §6).
+- Worker hygiene: a DeepSeek worker overwrote and deleted an untracked `final_test.log` at the repo root
+  despite "touch only body/". Briefs now say "no log files anywhere".
+
 ## 2026-11-07 - OpenCode DeepSeek V4.1 Flash - s9d: per-rule failure counts and leaving a peak
 
 - **Per-rule failure counts (decision 2026-11-02) are in.** A frame keeps a `BTreeMap<rule, count>`;
