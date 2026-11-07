@@ -33,6 +33,54 @@ def _cmd_serve(args) -> int:
     return 0
 
 
+def _cmd_watch(args) -> int:
+    """Run the body on a fresh seed and let a real Minecraft client watch it."""
+    from .body import start_body
+    from .logtail import LogTail, PlayerJoined
+
+    def setup(fixture, referee, run) -> None:
+        fixture.time_set("day")
+        fixture.difficulty("peaceful")  # the viewer plays in survival beside the body
+
+    run = start_body(
+        args.seed, args.goal, setup=setup, max_ticks=args.max_ticks,
+        start_delay_ticks=args.wait_seconds * 20, linger_ticks=200, keep=True,
+    )
+    server = run.server
+    print(f"Join in Minecraft 26.3: Multiplayer > Direct Connection > 127.0.0.1:{server.port}", flush=True)
+    print(f"The body starts in {args.wait_seconds} s. run_dir={run.run_dir}", flush=True)
+    tail = LogTail(server.log_path)
+    viewer = args.viewer
+    code = 0
+    try:
+        while True:
+            for event in tail.poll():
+                # 26.3 logs "System chat: <name>" for a join; keep the bare name.
+                name = event.name.split(": ")[-1].strip() if isinstance(event, PlayerJoined) else ""
+                if name and name != "Praxion" and viewer is None:
+                    viewer = name
+                    # Normal mode: put the viewer next to the body once.
+                    server.rcon.command(f"tp {viewer} Praxion")
+                    print(f"viewer joined: {viewer}", flush=True)
+            if viewer is not None and args.spectate:
+                # Re-issued: the spectate lock can drop (backlog, 2026-11-03).
+                server.rcon.command(f"gamemode spectator {viewer}")
+                server.rcon.command(f"spectate Praxion {viewer}")
+            summary = run.summary()
+            if summary is not None and summary.get("goal", {}).get("outcome") not in (None, "running"):
+                print(f"outcome: {summary['goal']}", flush=True)
+                break
+            if run.process.poll() is not None:
+                break
+            time.sleep(2)
+    except KeyboardInterrupt:
+        code = 3
+    finally:
+        run.stop()
+        print(f"kept run directory: {run.run_dir}", flush=True)
+    return code
+
+
 def _query(client: RconClient, fact: list[str]) -> str:
     """Resolve a named fact to a server query, or return a raw command's reply."""
     if not fact:
@@ -122,6 +170,18 @@ def main(argv=None) -> int:
     p_serve.add_argument("--keep", action="store_true",
                          help="keep the run directory after stopping")
     p_serve.set_defaults(func=_cmd_serve)
+
+    p_watch = sub.add_parser("watch", help="run the body live and spectate it from a real client")
+    p_watch.add_argument("--seed", type=int, default=303)
+    p_watch.add_argument("--goal", default="get_stone_pickaxe")
+    p_watch.add_argument("--max-ticks", type=int, default=24000)
+    p_watch.add_argument("--wait-seconds", type=int, default=90,
+                         help="seconds the body waits so you can join first")
+    p_watch.add_argument("--viewer", default=None,
+                         help="your in-game name (default: the first player who joins)")
+    p_watch.add_argument("--spectate", action="store_true",
+                         help="put the viewer in spectator mode, locked to the body's view")
+    p_watch.set_defaults(func=_cmd_watch)
 
     p_query = sub.add_parser("query", help="query a named fact or run a raw rcon command")
     p_query.add_argument("--port", type=int, default=None,

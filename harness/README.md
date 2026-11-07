@@ -53,6 +53,11 @@ python -m praxion_harness query --rcon-port 34567 gamerule keep_inventory
 python -m praxion_harness query --rcon-port 34567 player Steve health
 python -m praxion_harness query --rcon-port 34567 raw list
 
+# Watch the body play from a real Minecraft 26.3 client (Direct Connection to the printed address).
+# The body waits --wait-seconds so you can join; you are teleported next to it, in your own mode.
+python -m praxion_harness watch --seed 303 --goal get_stone_pickaxe --wait-seconds 240
+python -m praxion_harness watch --spectate   # lock your view to the body instead
+
 # Delete stale harness run dirs (only test-*, measure-*, explore-*).
 python -m praxion_harness clean-runs
 python -m praxion_harness clean-runs --older-than-hours 24 --dry-run
