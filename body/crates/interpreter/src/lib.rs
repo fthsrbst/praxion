@@ -2,8 +2,7 @@
 //!
 //! The interpreter has no game types. It asks a [`Facts`] implementation for
 //! three-valued facts and drives an [`Actuator`] with primitive calls. The
-//! fake world (level 1) and, later, the headless protocol body implement the
-//! same two traits.
+//! headless protocol body implements the same two traits.
 //!
 //! Each [`Interpreter::tick`] runs the §6.1 order:
 //!
@@ -95,7 +94,6 @@ pub struct RunAction {
     pub primitive: String,
     pub args: Vec<ArgValue>,
     pub kind: PrimitiveKind,
-    pub max_ticks: u32,
 }
 
 /// One frame of the call stack in a [`Decision::Run`].

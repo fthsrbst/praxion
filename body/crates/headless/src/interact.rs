@@ -76,8 +76,6 @@ pub struct ActuatorState {
     /// Ticks before a new destroy may start after a finished one (vanilla's
     /// `mine_delay = 5`, `mining.rs:690`).
     mine_delay: u32,
-    /// The block position the last `StartDestroyBlock` named, for the receipt.
-    last_start: Option<BlockPos>,
 }
 
 #[derive(Clone, Debug)]
@@ -433,7 +431,6 @@ pub fn plan(
             report.block_hit = Some(target);
             report.block_face = Some(block.direction);
             report.block_before = Some((target, world.block(target)));
-            state.last_start = Some(target);
             let block_state = world.block(target);
             let progress = if creative {
                 1.

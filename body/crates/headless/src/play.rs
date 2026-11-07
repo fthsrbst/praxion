@@ -487,12 +487,6 @@ async fn play_until(
                     let _ = conn.writer.shutdown().await;
                     Flow::Closed(Error::LocalDisconnect)
                 }
-                Some(Command::Send(packet)) => {
-                    match login::send(&mut conn.writer, packet, ctx.trace).await {
-                        Ok(()) => Flow::Continue,
-                        Err(error) => Flow::Closed(error),
-                    }
-                }
             },
             packet = conn.reader.read() => match packet {
                 Ok(packet) => {

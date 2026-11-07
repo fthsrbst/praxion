@@ -1,6 +1,6 @@
 [package]
 name = "praxion-gamedata"
-description = "26.3 recipes and loot tables shared by the primitive registry and the fake world"
+description = "26.3 recipes and loot tables shared by the primitive registry and the body"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

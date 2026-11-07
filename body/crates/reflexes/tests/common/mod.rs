@@ -382,10 +382,6 @@ impl Sim {
     pub fn distance_to(&self, pos: Vec3) -> f64 {
         self.body.position().distance_to(pos)
     }
-
-    pub fn moved_drop(&self, start_y: f64) -> f64 {
-        start_y - self.body.position().y
-    }
 }
 
 /// The settings the matrix uses: fast air, a low hard threshold, no waiting.

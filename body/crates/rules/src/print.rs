@@ -2,7 +2,7 @@
 //! the printer emits the canonical form, with parentheses only where the
 //! precedence rules need them.
 
-use crate::ast::{Action, ActionKind, ArgValue, Expr, ExprKind, Rule, Skill};
+use crate::ast::{Action, ActionKind, Expr, ExprKind, Rule, Skill};
 
 /// Prints a whole ruleset.
 pub fn print(skills: &[Skill]) -> String {
@@ -162,18 +162,6 @@ fn escape_string(value: &str, out: &mut String) {
             c => out.push(c),
         }
     }
-}
-
-/// Prints one argument value (a parameter default).
-pub fn print_arg_value(value: &ArgValue) -> String {
-    value.to_string()
-}
-
-/// A small helper for tests and callers that want a single rule.
-pub fn print_one_rule(rule: &Rule) -> String {
-    let mut out = String::new();
-    print_rule(rule, &mut out);
-    out
 }
 
 #[cfg(test)]

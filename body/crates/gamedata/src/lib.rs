@@ -1,4 +1,4 @@
-//! Game data shared by the primitive registry and the fake world.
+//! Game data shared by the primitive registry and the body.
 //!
 //! Everything here is generated at build time from the pinned 26.3 server jar
 //! (`third_party/minecraft/server-26.3.jar`):
@@ -8,7 +8,7 @@
 //! * `ITEM_TAGS` and `BLOCK_TAGS` hold every item and block tag with tag
 //!   references resolved to concrete names;
 //! * `BLOCKS` and `ENTITIES` hold the loot tables of the blocks and mobs the
-//!   core skills and the fake world use.
+//!   core skills use.
 //!
 //! The generated files live in `OUT_DIR`; `build.rs` is the only reader of the
 //! jar. Nothing is hand-copied, so a recipe or tag the jar does not have cannot

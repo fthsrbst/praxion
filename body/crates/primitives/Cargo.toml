@@ -10,26 +10,15 @@ publish = false
 name = "praxion_primitives"
 path = "src/lib.rs"
 
-[[bin]]
-name = "praxion-live"
-path = "src/bin/live.rs"
-
 [dependencies]
 azalea-block = { path = "../../../third_party/azalea/azalea-block" }
 azalea-core = { path = "../../../third_party/azalea/azalea-core" }
-azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
 azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
-azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
-praxion-eventlog = { path = "../eventlog" }
 praxion-gamedata = { path = "../gamedata" }
-praxion-decoder = { path = "../decoder" }
 praxion-headless = { path = "../headless" }
 praxion-interpreter = { path = "../interpreter" }
 praxion-perception = { path = "../perception" }
 praxion-planner = { path = "../planner" }
-praxion-receipts = { path = "../receipts" }
 praxion-rules = { path = "../rules" }
 praxion-world = { path = "../world" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"

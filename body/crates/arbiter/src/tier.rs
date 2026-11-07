@@ -203,23 +203,6 @@ impl IntentStack {
         true
     }
 
-    /// Pop one done entry. The brain may pop only `done` or `suspended`
-    /// entries (§5.4); `done` is all Demo-0 needs.
-    pub fn pop_done(&mut self) -> Option<Intent> {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.state == IntentState::Done)?;
-        Some(self.entries.remove(index))
-    }
-
-    /// The newest entry at a tier, for the owner's resume decision.
-    pub fn newest_at(&self, tier: Tier) -> Option<&Intent> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| entry.tier == tier && entry.state != IntentState::Done)
-    }
 }
 
 /// A need the arbiter balances. Hunger is the only one Demo-0 exercises; sleep

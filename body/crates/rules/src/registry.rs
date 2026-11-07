@@ -188,11 +188,6 @@ pub struct PrimitiveRecord {
 }
 
 impl PrimitiveRecord {
-    /// The type expected at argument `index`.
-    pub fn arg_type(&self, index: usize) -> Option<ArgType> {
-        self.params.get(index).map(|p| p.ty)
-    }
-
     /// The declared effects for this call, resolving an argument-dependent
     /// primitive (craft, mine, attack) by its first argument.
     pub fn effects_for(&self, args: &[ArgValue]) -> &Effects {

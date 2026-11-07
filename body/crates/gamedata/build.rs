@@ -3,8 +3,8 @@
 //! It reads three things from the jar and writes `loot.rs`, `tags.rs` and
 //! `recipes.rs` into `OUT_DIR`:
 //!
-//! * the loot tables for the blocks and mobs the core skills and the fake world
-//!   use (the existing generator);
+//! * the loot tables for the blocks and mobs the core skills use (the existing
+//!   generator);
 //! * every item and block tag, with tag references resolved recursively;
 //! * every shaped and shapeless crafting recipe, with its pattern, its keys and
 //!   its tag-aware ingredients.

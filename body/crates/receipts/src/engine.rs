@@ -1049,10 +1049,6 @@ impl Engine {
         self.open.contains_key(&receipt_id)
     }
 
-    pub fn open_count(&self) -> usize {
-        self.open.len()
-    }
-
     /// How many settlements are still retained for the late-evidence scan.
     pub fn settled_count(&self) -> usize {
         self.settled.len()

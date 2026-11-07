@@ -11,8 +11,6 @@ praxion-headless = { path = "../headless" }
 praxion-perception = { path = "../perception" }
 praxion-planner = { path = "../planner" }
 praxion-world = { path = "../world" }
-azalea-block = { path = "../../../third_party/azalea/azalea-block" }
-azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
 azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
@@ -20,9 +18,9 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "1.1.8"
 
 [dev-dependencies]
-praxion-decoder = { path = "../decoder" }
-praxion-tee = { path = "../tee" }
+azalea-block = { path = "../../../third_party/azalea/azalea-block" }
 azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 azalea-world = { path = "../../../third_party/azalea/azalea-world" }
 uuid = "1.23.4"

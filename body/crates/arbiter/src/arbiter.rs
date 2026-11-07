@@ -71,14 +71,6 @@ impl FrameSource {
         }
     }
 
-    pub fn into_frame(self) -> ControlFrame {
-        match self {
-            FrameSource::Reflex(frame)
-            | FrameSource::Maintenance(frame)
-            | FrameSource::Skill(frame)
-            | FrameSource::Idle(frame) => frame,
-        }
-    }
 }
 
 /// Everything the driver needs after one arbiter tick.

@@ -600,7 +600,6 @@ impl Interpreter {
                         primitive: name.clone(),
                         args: values.clone(),
                         kind,
-                        max_ticks,
                     };
                     let start = StartAction {
                         primitive: name.clone(),

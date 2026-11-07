@@ -18,13 +18,10 @@ path = "src/bin/praxion-decode.rs"
 praxion-tee = { path = "../tee" }
 praxion-world = { path = "../world" }
 azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
-azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 
 [dev-dependencies]
-azalea-block = { path = "../../../third_party/azalea/azalea-block" }
-azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
+azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
-azalea-world = { path = "../../../third_party/azalea/azalea-world" }

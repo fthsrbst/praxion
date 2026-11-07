@@ -304,11 +304,6 @@ impl ReflexState {
         }
         self.arrows.update(&view.arrows);
     }
-
-    /// Forget the visibility ages. Used when the body resumes after a reflex.
-    pub fn clear_visibility(&mut self) {
-        self.visible_since = [None; 7];
-    }
 }
 
 /// The pure evaluation of one reflex. `None` means the trigger is not present

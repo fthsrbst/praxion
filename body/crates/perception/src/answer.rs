@@ -91,10 +91,6 @@ impl<T> Answer<T> {
         Answer::Known { value, provenance, age_ticks }
     }
 
-    pub fn unknown(reason: Reason) -> Self {
-        Answer::Unknown(reason)
-    }
-
     pub fn is_known(&self) -> bool {
         matches!(self, Answer::Known { .. })
     }
@@ -124,16 +120,6 @@ impl<T> Answer<T> {
         match self {
             Answer::Known { .. } => None,
             Answer::Unknown(reason) => Some(*reason),
-        }
-    }
-
-    /// Map the value of a `Known` answer, keeping provenance and age.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Answer<U> {
-        match self {
-            Answer::Known { value, provenance, age_ticks } => {
-                Answer::Known { value: f(value), provenance, age_ticks }
-            }
-            Answer::Unknown(reason) => Answer::Unknown(reason),
         }
     }
 }

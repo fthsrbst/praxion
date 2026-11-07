@@ -17,7 +17,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -269,26 +268,9 @@ impl Session {
         }
     }
 
-    /// Send a packet to the server. Only valid in play state.
-    pub fn send(&self, packet: ServerboundGamePacket) -> Result<(), Error> {
-        self.commands
-            .send(Command::Send(packet))
-            .map_err(|_| Error::LocalDisconnect)
-    }
-
     /// Ask the session to close the connection. The `Disconnected` event follows.
     pub fn disconnect(&self) {
         let _ = self.commands.send(Command::Disconnect);
-    }
-
-    /// The next event, if one is already waiting.
-    pub fn try_recv_event(&self) -> Option<Event> {
-        self.events.try_recv().ok()
-    }
-
-    /// Block until the next event, or `None` when the session is gone.
-    pub fn recv_event(&self) -> Option<Event> {
-        self.events.recv().ok()
     }
 
     /// Wait at most `timeout` for the next event. `None` means nothing arrived.

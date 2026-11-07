@@ -174,14 +174,6 @@ impl Replay {
     pub fn is_complete(&self) -> bool {
         self.error.is_none()
     }
-
-    /// The gap-free prefix, or the error together with the events before it.
-    pub fn into_result(self) -> Result<Vec<Event>, (ReadError, Vec<Event>)> {
-        match self.error {
-            None => Ok(self.events),
-            Some(error) => Err((error, self.events)),
-        }
-    }
 }
 
 /// Replay a reader to the end or to its first error.

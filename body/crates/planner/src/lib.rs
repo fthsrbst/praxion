@@ -112,10 +112,6 @@ impl Plan {
         cells
     }
 
-    pub fn is_success(&self) -> bool {
-        self.status == PlanStatus::Success
-    }
-
     /// The typed reason the plan did not succeed.
     pub fn unreachable(&self) -> Option<Unreachable> {
         match self.status {

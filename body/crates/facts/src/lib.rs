@@ -154,11 +154,6 @@ pub fn count_in(inventory: &[ItemStack], wanted: &str) -> u32 {
         .sum()
 }
 
-/// Whether an item or tag is in the inventory, or `None` when unknown.
-pub fn has_item(perception: &mut Perception, world: &World, wanted: &str) -> Option<bool> {
-    item_count(perception, world, wanted).map(|count| count > 0)
-}
-
 /// A block or block tag within `radius`, or `None` when the eye cell is not
 /// known yet.
 ///

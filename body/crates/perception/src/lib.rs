@@ -63,8 +63,6 @@ pub struct Sweep {
     pub rays: u32,
     /// Cells whose visibility was tested.
     pub probes: usize,
-    /// Cells a ray reached and the sweep wrote to the known map.
-    pub seen: usize,
 }
 
 /// An entity fact returned by a query.
@@ -358,10 +356,6 @@ impl Perception {
             Caller::Reflex => self.rays_reflex = self.rays_reflex.saturating_add(1),
             Caller::Other => self.rays_other = self.rays_other.saturating_add(1),
         }
-    }
-
-    pub fn entity_checks_this_tick(&self) -> usize {
-        self.entity_checked.len()
     }
 
     /// Entities over [`Config::entity_cap`] this tick. Each one answered
@@ -1068,7 +1062,6 @@ impl Perception {
                         Ok(()) => {
                             self.known
                                 .record_seen(pos, state, self.tick, revision, focus);
-                            stats.seen += 1;
                         }
                         Err(Reason::OutOfSight) => {
                             self.known.record_miss(pos, self.tick, revision, focus);

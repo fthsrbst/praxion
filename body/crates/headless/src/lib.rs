@@ -7,7 +7,7 @@
 //!        TCP -> handshake -> login -> configuration -> play
 //!        play loop: apply a ControlFrame, step physics, send the tick's packets
 //!   -> Event::Joined / Died / Disconnected
-//! Session::send(ServerboundGamePacket) / disconnect()  ->  command channel
+//! Session::disconnect()  ->  command channel
 //! ```
 //!
 //! The session keeps the player's physics state and the last movement packet it

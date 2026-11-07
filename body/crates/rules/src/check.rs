@@ -41,10 +41,6 @@ impl Program {
         self.skills.values()
     }
 
-    pub fn skill_names(&self) -> impl Iterator<Item = &str> {
-        self.skills.keys().map(String::as_str)
-    }
-
     pub fn facts(&self) -> &Facts {
         &self.facts
     }

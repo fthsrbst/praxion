@@ -1,7 +1,5 @@
 //! The two directions of the session's channel: events out, commands in.
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
-
 /// Something the session tells its owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -19,8 +17,6 @@ pub enum Event {
 /// Something the owner tells the session.
 #[derive(Debug)]
 pub(crate) enum Command {
-    /// Write this packet to the server, in play state.
-    Send(ServerboundGamePacket),
     /// Close the connection and end the session thread.
     Disconnect,
 }

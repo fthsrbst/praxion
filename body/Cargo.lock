@@ -1935,23 +1935,15 @@ name = "praxion-arbiter"
 version = "0.0.0"
 dependencies = [
  "azalea-block",
- "azalea-buf",
- "azalea-core",
  "azalea-entity",
- "azalea-protocol",
  "azalea-registry",
- "azalea-world",
- "praxion-decoder",
  "praxion-eventlog",
  "praxion-headless",
  "praxion-interpreter",
- "praxion-perception",
  "praxion-planner",
  "praxion-reflexes",
  "praxion-rules",
- "praxion-tee",
  "praxion-world",
- "uuid",
 ]
 
 [[package]]
@@ -1980,14 +1972,11 @@ dependencies = [
 name = "praxion-decoder"
 version = "0.0.0"
 dependencies = [
- "azalea-block",
  "azalea-buf",
  "azalea-core",
- "azalea-entity",
  "azalea-inventory",
  "azalea-protocol",
  "azalea-registry",
- "azalea-world",
  "flate2",
  "praxion-tee",
  "praxion-world",
@@ -2016,15 +2005,6 @@ dependencies = [
  "praxion-rules",
  "praxion-world",
  "uuid",
-]
-
-[[package]]
-name = "praxion-fakeworld"
-version = "0.0.0"
-dependencies = [
- "praxion-gamedata",
- "praxion-interpreter",
- "praxion-rules",
 ]
 
 [[package]]
@@ -2124,7 +2104,6 @@ dependencies = [
  "praxion-tee",
  "praxion-world",
  "rustc-hash",
- "uuid",
 ]
 
 [[package]]
@@ -2133,22 +2112,15 @@ version = "0.0.0"
 dependencies = [
  "azalea-block",
  "azalea-core",
- "azalea-entity",
  "azalea-inventory",
- "azalea-protocol",
  "azalea-registry",
- "praxion-decoder",
- "praxion-eventlog",
  "praxion-gamedata",
  "praxion-headless",
  "praxion-interpreter",
  "praxion-perception",
  "praxion-planner",
- "praxion-receipts",
  "praxion-rules",
  "praxion-world",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2181,11 +2153,9 @@ dependencies = [
  "azalea-protocol",
  "azalea-registry",
  "azalea-world",
- "praxion-decoder",
  "praxion-headless",
  "praxion-perception",
  "praxion-planner",
- "praxion-tee",
  "praxion-world",
  "serde",
  "toml",

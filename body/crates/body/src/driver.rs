@@ -25,9 +25,6 @@
 //! (merged into the reflex's frame), and an action the interpreter selects on
 //! the same tick starts one tick later. Otherwise the abandoned primitive would
 //! keep the actuator busy and the skill's retry would be dropped.
-//!
-//! The primitive/receipt plumbing follows `praxion-primitives`' `LiveDriver`,
-//! which runs the same contract for one skill without reflexes.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;

@@ -15,8 +15,6 @@ pub enum QueryKind {
     BlocksIn,
     Entity,
     EntitiesNear,
-    NearestBlock,
-    NearestEntity,
     EntityHealth,
 }
 
@@ -27,8 +25,6 @@ impl QueryKind {
             QueryKind::BlocksIn => "blocks_in",
             QueryKind::Entity => "entity",
             QueryKind::EntitiesNear => "entities_near",
-            QueryKind::NearestBlock => "nearest_block",
-            QueryKind::NearestEntity => "nearest_entity",
             QueryKind::EntityHealth => "entity_health",
         }
     }

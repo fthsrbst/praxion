@@ -898,7 +898,7 @@ impl Place {
             }
         }
         if self.target.is_none() {
-            self.target = place_target(ctx, &self.block, &self.rejected);
+            self.target = place_target(ctx, &self.rejected);
             if self.target.is_none() {
                 self.waited += 1;
                 if self.waited > 40 {
@@ -1028,11 +1028,7 @@ fn cell_centre(pos: BlockPos) -> Vec3 {
 /// server's block update arriving a few ticks later).
 const PLACE_CLEAR_CLICKS: u32 = 20;
 
-fn place_target(
-    ctx: &mut Ctx<'_>,
-    wanted: &str,
-    rejected: &[BlockPos],
-) -> Option<(BlockPos, Direction)> {
+fn place_target(ctx: &mut Ctx<'_>, rejected: &[BlockPos]) -> Option<(BlockPos, Direction)> {
     let eye = ctx.body.eye_position();
     let eye_cell = eye.to_block_pos_floor();
     let body_box = ctx.body.bounding_box();
@@ -1076,7 +1072,6 @@ fn place_target(
             best = Some((distance, fact.pos, direction));
         }
     }
-    let _ = wanted;
     best.map(|(_, pos, direction)| (pos, direction))
 }
 
@@ -2897,12 +2892,7 @@ fn plan_inventory(world: &World) -> PlanInventory {
     PlanInventory { hotbar }
 }
 
-/// The block a `craft` result is taken from, for tests and diagnostics.
-pub fn answer_is_known<T>(answer: &Answer<T>) -> bool {
-    answer.is_known()
-}
-
-/// A block description, used by the live driver's summary.
+/// A block description, used by diagnostics.
 pub fn block_name(state: azalea_block::BlockState) -> String {
     BlockDescription::of(state).name().to_owned()
 }
