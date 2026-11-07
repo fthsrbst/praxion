@@ -230,8 +230,7 @@ impl BodyDriver {
         }
     }
 
-    /// Registers the pending primitive intent from the previous tick, exactly
-    /// like `praxion-primitives`' live driver.
+    /// Registers the pending primitive intent from the previous tick.
     fn register_pending(&mut self, tick: u64, world: &World) {
         let Some(spec) = self.pending.take() else {
             return;
@@ -251,7 +250,12 @@ impl BodyDriver {
                 Some(
                     Intent::dig(intent_id, target, seq, report_tick)
                         .with_window(*window)
-                        .with_initial_block(before),
+                        .with_initial_block(before)
+                        // The block update can already be in the world when
+                        // the intent registers (the feed applies packets
+                        // before the driver sees them); the observed state
+                        // then proves the dig without a later packet.
+                        .with_observed_block(world.block_state(target)),
                 )
             }
             IntentSpec::Place { block, window, .. } => {
