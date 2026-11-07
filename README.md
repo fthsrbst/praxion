@@ -11,9 +11,12 @@ in a growing library. The more it plays, the less it needs to think from scratch
 
 ## Status
 
-Design phase. No code has been committed yet. Research is in [`docs/research/`](docs/research/);
-agreed decisions are in [`docs/decisions.md`](docs/decisions.md); the architecture draft (awaiting review)
-is in [`docs/architecture.md`](docs/architecture.md).
+Demo-0 is in progress. The body is a Rust workspace under [`body/`](body/): forwarder, decoder,
+world model, perception, reflexes, arbiter, rule-list interpreter and primitives, driven by a
+headless packet client. The test harness is Python under [`harness/`](harness/), and `setup.py`
+prepares the pinned Minecraft, Azalea and Rust inputs. Research is in
+[`docs/research/`](docs/research/); agreed decisions are in [`docs/decisions.md`](docs/decisions.md);
+the architecture is in [`docs/architecture.md`](docs/architecture.md).
 
 ## License
 

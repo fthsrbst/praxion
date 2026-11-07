@@ -1,7 +1,7 @@
-# SETUP.md — one-command setup for the 2.7 spikes and Demo-0 inputs
+# SETUP.md — one-command setup for the Demo-0 body and the 2.7 spikes
 
-Everything the session 2.7 experiments and the first Demo-0 work need on a fresh machine, in one
-idempotent command. Windows 11 + Git Bash is the main target; macOS works too (no `hands` crate,
+Everything the first Demo-0 work and the session 2.7 experiments need on a fresh machine, in one
+idempotent command (including the body release build). Windows 11 + Git Bash is the main target; macOS works too (no `hands` crate,
 no dlltool fix).
 
 ```sh
@@ -25,7 +25,9 @@ the standard library only.
 | `spikes/.cargo/config.toml`, `body/.cargo/config.toml` | Generated toolchain fix (linker and dlltool) | no (ignored) |
 
 Product code never depends on `spikes/`; it reads the pinned inputs from `third_party/` and
-`local/paths.toml`. `spikes/` only keeps the experiment code and its run directory.
+`local/paths.toml`. Some product tests read machine-local captures and truth files under `spikes/`
+(`decoder`, `perception`, `planner`, `receipts`); those tests skip when the ignored files are
+absent. `spikes/` keeps only the experiment code and its run directory.
 
 ## What it does (ten steps, in order)
 
@@ -40,7 +42,7 @@ Product code never depends on `spikes/`; it reads the pinned inputs from `third_
 | 7 | Local paths | `local/paths.toml` with the five absolute paths |
 | 8 | Server | `third_party/minecraft/server-26.3.jar` (sha1 and size verified), `spikes/round0/server/`, its `server.properties` keys |
 | 9 | Client files | nothing; checks the launcher's 26.3 install (version JSON and jar sha1) |
-| 10 | Build | `cargo build --release` in `proxy`, `decode` and (Windows only) `hands` |
+| 10 | Build | `cargo build --release` in `body/` (the `praxion-body`, `praxion-forwarder` and `praxion-headless` binaries the harness runs), in `spikes/decode` and (Windows only) in `spikes/hands` |
 
 Every step checks first. On a finished machine all of them print `ok: ...` and nothing changes.
 The build step delegates freshness to cargo, which is a no-op when the binaries are current.
@@ -51,7 +53,7 @@ The build step delegates freshness to cargo, which is a no-op when the binaries 
 |---|---|
 | `--check` | report every step as ok / missing / wrong, change nothing, exit 1 if anything is missing or wrong |
 | `--no-build` | skip step 10 (`cargo build` and `cargo test`) |
-| `--test` | after building, run `cargo test --release` in every crate |
+| `--test` | after building, run `cargo test --release` in the body workspace and every spike crate |
 | `--accept-eula` | write `eula=true` in `spikes/round0/server/eula.txt` (read https://aka.ms/MinecraftEULA first) |
 | `--java PATH` | use this Java 25 binary instead of the launcher runtime |
 

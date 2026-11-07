@@ -523,16 +523,20 @@ One repository with the layers enforced by tooling [D]. Agent layers do not impo
 version-pack layers [D]. Only the directories Demo-0 needs are created first:
 
 ```
-body/        Rust workspace: forwarder, decoder, perception, world, reflexes, arbiter,
-             interpreter, primitives, planner, actuator (headless first), receipts, ruleset, event log
-harness/     test server control, referee, fixtures, server checklist
-versions/    version manifest, Azalea patches and generated data tables
+body/        Rust workspace, one crate per directory under body/crates/: arbiter, body, decoder,
+             eventlog, facts, forwarder, gamedata, headless, interpreter, manifest, perception,
+             planner, primitives, receipts, reflexes, rules, tee, world
+harness/     test server control, referee, fixtures, server checklist, body smoke test
+versions/    version manifest and Azalea patches
 docs/        decisions, sessions, research, reviews, this file
 spikes/      experiment code (session 2.7)
 setup.py     one-command setup; writes local/paths.toml (machine-local, ignored)
 third_party/ pinned downloads and clones: Azalea, server jar, toolchain shim (ignored)
 runs/        harness run directories, one fresh world per seed (ignored)
 ```
+
+`gamedata/build.rs` writes the generated item, block, tag and recipe tables into Cargo's `OUT_DIR`
+at build time; they are build output, not committed files under `versions/`.
 
 Other directories are added when their demo needs them: `brain/` and the interface for Demo-1 and
 Demo-2. Learned skills live outside the repository, in a per-installation data directory [D].

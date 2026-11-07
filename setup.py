@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command, idempotent setup for the session 2.7 experiment spikes.
+"""One-command, idempotent setup for the Demo-0 body, its pinned inputs and the 2.7 spikes.
 
 Run from anywhere:  python setup.py [--check] [--no-build] [--test] [--accept-eula] [--java PATH]
 
@@ -7,8 +7,7 @@ Every step checks first and skips with an "ok: ..." line when it is already done
 run on a finished machine changes nothing. --check only reports and changes nothing.
 
 Third-party inputs live under third_party/ (ignored, machine-local) and the Azalea patches under
-versions/patches/ (committed); nothing product code needs lives in the throwaway spikes/ folder.
-See SETUP.md.
+versions/patches/ (committed); product code does not need the throwaway spikes/ folder. See SETUP.md.
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 MIN_PYTHON = (3, 11)
@@ -49,6 +48,11 @@ SPIKES = REPO / "spikes"
 THIRD_PARTY = REPO / "third_party"
 LOCAL_DIR = REPO / "local"
 
+# The harness owns the only Python reader of the version manifest; reuse it instead of keeping a
+# second copy of the schema here. It is stdlib-only, so this costs no dependency.
+sys.path.insert(0, str(REPO / "harness"))
+from praxion_harness.manifest import ManifestError, load as load_manifest_file  # noqa: E402
+
 
 def rel(path: Path) -> str:
     """Path relative to the repository root, or the absolute path when it lies outside."""
@@ -61,63 +65,20 @@ def rel(path: Path) -> str:
 # --------------------------------------------------------------------------- version manifest
 #
 # Every pinned version, hash and URL lives in versions/manifest.toml: the one pin source, shared
-# with body/ (praxion-manifest) and harness/ (praxion_harness). Nothing pinned is written again
-# here, and each value's source is the comment above it in that file. MANIFEST_SCHEMA lists what
-# this script reads and the type it must have, so a broken edit fails at startup, not mid-run.
+# with body/ (praxion-manifest) and harness/ (praxion_harness). The harness reader validates every
+# key and type, so a broken edit fails here at startup, not mid-run. The three dicts below are the
+# setup's read-only view of the pinned sections.
 
 MANIFEST_PATH = REPO / "versions" / "manifest.toml"
 
-MANIFEST_SCHEMA = {
-    "minecraft": (
-        ("version", str),
-        ("protocol", int),
-        ("server_jar_sha1", str),
-        ("server_jar_size", int),
-        ("client_jar_sha1", str),
-        ("version_manifest_url", str),
-    ),
-    "azalea": (("repo", str), ("commit", str), ("patches_glob", str)),
-    "rust": (("toolchain", str), ("windows_target", str), ("rustup_dist_url", str)),
-}
-
-
-def type_name(value) -> str:
-    return "bool" if isinstance(value, bool) else type(value).__name__
-
-
-def load_manifest() -> dict:
-    """versions/manifest.toml, parsed and checked against MANIFEST_SCHEMA."""
-    try:
-        data = tomllib.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise SetupError(f"cannot read {rel(MANIFEST_PATH)}: {exc}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise SetupError(f"invalid TOML in {rel(MANIFEST_PATH)}: {exc}") from exc
-
-    for section, fields in MANIFEST_SCHEMA.items():
-        table = data.get(section)
-        if not isinstance(table, dict):
-            raise SetupError(f"{rel(MANIFEST_PATH)} has no [{section}] table")
-        for key, expected in fields:
-            if key not in table:
-                raise SetupError(f"{rel(MANIFEST_PATH)} is missing {section}.{key}")
-            value = table[key]
-            if isinstance(value, bool) or not isinstance(value, expected):
-                raise SetupError(
-                    f"{rel(MANIFEST_PATH)}: {section}.{key} must be {expected.__name__}, "
-                    f"found {type_name(value)}"
-                )
-    return data
-
-
 try:
-    MANIFEST = load_manifest()
-except SetupError as exc:  # nothing below can run without the pins
+    MANIFEST = load_manifest_file(MANIFEST_PATH)
+except ManifestError as exc:  # nothing below can run without the pins
     sys.stderr.write(f"setup.py: {exc}\n")
     raise SystemExit(2)
-MINECRAFT = MANIFEST["minecraft"]
-AZALEA = MANIFEST["azalea"]
-RUST_PIN = MANIFEST["rust"]
+MINECRAFT = asdict(MANIFEST.minecraft)
+AZALEA = asdict(MANIFEST.azalea)
+RUST_PIN = asdict(MANIFEST.rust)
 
 # --------------------------------------------------------------------------- paths and constants
 
@@ -1000,21 +961,25 @@ def step_client(ctx: Ctx) -> Step:
 
 
 def step_build(ctx: Ctx) -> Step:
-    crates: list[tuple[str, list[str]]] = [("proxy", ["proxy", "pingbench"]), ("decode", ["decode"])]
-    if IS_WINDOWS:
-        crates.append(("hands", ["hands"]))
+    # The harness runs these three body binaries; building the workspace builds them all.
+    body_binaries = ["praxion-body", "praxion-forwarder", "praxion-headless"]
+    # spikes/proxy is retired: body/crates/forwarder replaced it.
+    spike_crates = ["decode"] + (["hands"] if IS_WINDOWS else [])
     suffix = ".exe" if IS_WINDOWS else ""
 
     if ctx.opts.check:
         missing = [
-            f"{crate}/{binary}{suffix}"
-            for crate, binaries in crates
-            for binary in binaries
-            if not (SPIKES / crate / "target" / "release" / f"{binary}{suffix}").is_file()
+            rel(SPIKES / crate / "target" / "release" / f"{crate}{suffix}")
+            for crate in spike_crates
+            if not (SPIKES / crate / "target" / "release" / f"{crate}{suffix}").is_file()
+        ] + [
+            rel(REPO / "body" / "target" / "release" / f"{binary}{suffix}")
+            for binary in body_binaries
+            if not (REPO / "body" / "target" / "release" / f"{binary}{suffix}").is_file()
         ]
         if missing:
             return Step("build", MISSING, "release binaries missing: " + ", ".join(missing))
-        return Step("build", OK, "release binaries present (" + ", ".join(crate for crate, _ in crates) + ")")
+        return Step("build", OK, "release binaries present (" + ", ".join([*spike_crates, "body"]) + ")")
 
     if ctx.opts.no_build:
         return Step("build", SKIP, "--no-build")
@@ -1022,12 +987,14 @@ def step_build(ctx: Ctx) -> Step:
     if not ctx.toolchain_ready:
         return Step("build", MISSING, "pinned toolchain not installed (step 2)")
 
-    for crate, _ in crates:
+    for crate in spike_crates:
         cargo_build(ctx, ["build", "--release"], SPIKES / crate, f"cargo build in spikes/{crate}")
-    detail = "built " + ", ".join(crate for crate, _ in crates)
+    cargo_build(ctx, ["build", "--release"], REPO / "body", "cargo build in body")
+    detail = "built " + ", ".join([*spike_crates, "body"])
     if ctx.opts.test:
-        for crate, _ in crates:
+        for crate in spike_crates:
             cargo_build(ctx, ["test", "--release"], SPIKES / crate, f"cargo test in spikes/{crate}")
+        cargo_build(ctx, ["test", "--release"], REPO / "body", "cargo test in body")
         detail += " and ran tests"
     return Step("build", DONE, detail)
 
@@ -1052,7 +1019,7 @@ STEPS = [
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="setup.py",
-        description="One-command, idempotent setup for the Praxion session 2.7 spikes and Demo-0 inputs.",
+        description="One-command, idempotent setup for the Praxion Demo-0 body, its pinned inputs and the 2.7 spikes.",
         epilog=(
             "Run it again at any time; finished steps print 'ok: ...' and are skipped. "
             "Details: SETUP.md"
@@ -1060,7 +1027,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--check", action="store_true", help="only report the state of every step; change nothing")
     parser.add_argument("--no-build", action="store_true", help="skip cargo build (and cargo test)")
-    parser.add_argument("--test", action="store_true", help="also run cargo test --release in every crate")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="also run cargo test --release in the body workspace and every spike crate",
+    )
     parser.add_argument(
         "--accept-eula",
         action="store_true",

@@ -91,6 +91,8 @@ praxion-body --forwarder 127.0.0.1:25640 --tee 127.0.0.1:25641 \
   referee can read the inventory while the body is still in the world.
 - `--run-dir` gets `events.jsonl` (the first event is `run_started` with the
   manifest pins and the git commit) and `summary.json`.
+- `--verbose` shows the body's debug diagnostics (packet traces); `RUST_LOG`
+  overrides the level, for example `RUST_LOG=praxion_body=debug`.
 
 Exit codes: `0` goal `done`, `1` `failed(kind)`, `2` `--max-ticks`, `3`
 Ctrl+C. Every exit disconnects cleanly.
