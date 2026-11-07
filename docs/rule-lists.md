@@ -68,7 +68,7 @@ is at most six rules too.
 
 ## Facts and primitives
 
-Facts come from the perception layer; the fake world and the real body answer
+Facts come from the perception layer; the headless body and the real body answer
 the same calls.
 
 | Fact | Type | Meaning |
@@ -218,7 +218,7 @@ remains the basic log skill.
 
 ## Worked example, tick by tick
 
-`get_wood(2)` in the fake world, seed 0. The skill is:
+`get_wood(2)` walked through tick by tick. The skill is:
 
 ```
 skill get_wood(n: int = 1)
@@ -228,7 +228,7 @@ skill get_wood(n: int = 1)
     true -> mine(oak_log)
 ```
 
-The fake world's `mine` takes 6 ticks and its record's default `max_ticks` is
+In this example `mine` takes 6 ticks and its record's default `max_ticks` is
 240. Both mines drop one log; there are oak trees nearby (so `near(oak_log, 5)`
 is true and the explore rule is skipped) and the inventory starts empty.
 
@@ -297,9 +297,5 @@ re-selected from the top, so the skill keeps trying.
 
 ```sh
 cd body
-cargo test -p praxion-rules -p praxion-interpreter -p praxion-fakeworld
+cargo test -p praxion-rules -p praxion-interpreter
 ```
-
-The fake-world tests run every core skill on 50 seeds from an empty inventory,
-then repeat with undo-perturbations (a crafted item removed, a placed table
-broken) and assert zero duplicate placements and zero wasted crafts.

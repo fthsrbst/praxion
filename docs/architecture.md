@@ -41,7 +41,7 @@ Engineering principle 3 needs a gate for "first code". Proposed, in dependency o
 
 | Slice | Contents | Proves |
 |---|---|---|
-| Demo-0 | protocol test body (headless packet actuator), decoder, world model, hand-written rule-list core, reflexes, referee, fake world | the core survives a scripted first night on fresh seeds, with no SendInput and no LLM |
+| Demo-0 | protocol test body (headless packet actuator), decoder, world model, hand-written rule-list core, reflexes, referee | the core survives a scripted first night on fresh seeds, with no SendInput and no LLM |
 | Demo-1 | Demo-0 through the real client: SendInput actuator, movement style (human camera, speed and timing, session 13), take-over, command gesture, body-side control verbs, indicator | the first demo, without learning, that moves like a person (movement statistics and the blind test, §9) |
 | Demo-2 | brain: Jev and LLM clients, curriculum, skill writer and admission, memory briefing | Praxion writes and admits its own skills |
 
@@ -290,7 +290,7 @@ Rules [D]:
 | Generation | incremented only by the body: owner change, take-over, new user command, reflex preemption; directives of an old generation are rejected. A command is stamped with the generation the body returns in `command_accepted{id, generation}` (the body increments first, then accepts). If a reflex or take-over bumps the generation under a running directive, the body settles it `preempted`, keeps the intent entry and emits `replan_needed{intent_id}`. One counter only; session 7's "owner token" and "epoch" are this generation [D]. After a body restart the generation continues from the event log [D] |
 | Directives | stamped with generation, tick, state hash [D] and model; adopted only if the generation is unchanged and the guards hold on the actual state |
 | Transport | length-prefixed JSON over loopback TCP; remote access needs a pre-shared key [D]; MessagePack only if measured necessary |
-| Fakes | the same port serves the real body, the fake world and replays |
+| Fakes | the same port serves the real body and replays |
 
 **Intent stack** [D]: the body owns one stack, persisted in the event log. Each entry is
 `{intent_id, tier, skill_ref, args, state}`, with `state` one of `running`, `suspended`,
@@ -422,7 +422,7 @@ primitive dig
   cost:           expected ticks
 ```
 
-A fake-world conformance test compares declared effects with measured ones. Shortcomings of a
+A conformance test compares declared effects with measured ones. Shortcomings of a
 primitive surface as a failure kind `suspected_primitive`. These are reported to the user, never
 patched by the LLM [D].
 
@@ -493,15 +493,15 @@ restart.
 
 ## 9. Testing and observability
 
-**Three levels** [D], with most tests at the bottom. What each level can test [D]:
+**Two levels** [D], with most tests at the bottom. What each level can test [D]:
 
-| Capability | L1 fake world | L2 protocol body | L3 real body |
-|---|---|---|---|
-| Rule-list semantics, guards, arbiter | yes | yes | yes |
-| Decoder and perception | from captures | yes | yes |
-| Movement physics and timing | no | approximate (gated by E16) | yes |
-| Input timing, focus, menus, take-over | no | no | yes |
-| Naturalness | no | no | yes |
+| Capability | L2 protocol body | L3 real body |
+|---|---|---|
+| Rule-list semantics, guards, arbiter | yes | yes |
+| Decoder and perception | yes | yes |
+| Movement physics and timing | approximate (gated by E16) | yes |
+| Input timing, focus, menus, take-over | no | yes |
+| Naturalness | no | yes |
 
 - **Verdicts** [D]: a referee reads server facts; Praxion's own report never decides a verdict.
 - **Claims** [D]: rest on many fresh seeds with confidence intervals and an analysis written before
@@ -525,7 +525,7 @@ version-pack layers [D]. Only the directories Demo-0 needs are created first:
 ```
 body/        Rust workspace: forwarder, decoder, perception, world, reflexes, arbiter,
              interpreter, primitives, planner, actuator (headless first), receipts, ruleset, event log
-harness/     test server control, referee, fixtures, fake world, server checklist
+harness/     test server control, referee, fixtures, server checklist
 versions/    version manifest, Azalea patches and generated data tables
 docs/        decisions, sessions, research, reviews, this file
 spikes/      experiment code (session 2.7)
