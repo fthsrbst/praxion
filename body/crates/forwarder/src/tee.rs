@@ -205,7 +205,7 @@ impl Tee {
         let clone = match self.clone_subscriber(&stream) {
             Ok(clone) => clone,
             Err(error) => {
-                eprintln!("forwarder: tee subscriber {size} cannot be cloned: {error}");
+                log::warn!("forwarder: tee subscriber {size} cannot be cloned: {error}");
                 let _ = stream.shutdown(Shutdown::Both);
                 return;
             }
@@ -328,7 +328,7 @@ impl Tee {
             let stream = match incoming {
                 Ok(stream) => stream,
                 Err(error) => {
-                    eprintln!("forwarder: tee accept failed: {error}");
+                    log::warn!("forwarder: tee accept failed: {error}");
                     thread::sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -339,7 +339,7 @@ impl Tee {
                 .unwrap_or_else(|_| "unknown".into());
             let step = catch_unwind(AssertUnwindSafe(|| self.subscribe(stream, &peer)));
             if step.is_err() {
-                eprintln!("forwarder: tee listener panicked while accepting {peer}; continuing");
+                log::warn!("forwarder: tee listener panicked while accepting {peer}; continuing");
             }
         }
     }
@@ -371,7 +371,7 @@ impl Tee {
                 self.write_item(item, &mut current);
             }));
             if step.is_err() {
-                eprintln!("forwarder: tee writer panicked while writing; dropping subscriber");
+                log::warn!("forwarder: tee writer panicked while writing; dropping subscriber");
                 // A panic before the writer assigned `current` (for example while writing a new
                 // subscriber's header) still has to unregister that generation: otherwise live
                 // records keep queueing against a dead socket.
@@ -399,7 +399,7 @@ impl Tee {
                 }
                 let mut stream = stream;
                 if let Err(error) = write_header(&mut stream) {
-                    eprintln!("forwarder: tee header write failed: {error}");
+                    log::warn!("forwarder: tee header write failed: {error}");
                     self.clear_subscriber(item.generation);
                     return;
                 }
@@ -411,7 +411,7 @@ impl Tee {
                         data: Vec::new(),
                     };
                     if let Err(error) = write_record(&mut stream, &gap) {
-                        eprintln!("forwarder: tee gap write failed: {error}");
+                        log::warn!("forwarder: tee gap write failed: {error}");
                         self.clear_subscriber(item.generation);
                         return;
                     }
@@ -437,7 +437,7 @@ impl Tee {
                 };
                 let error = write_record(stream, &record).err();
                 if let Some(error) = error {
-                    eprintln!("forwarder: tee write failed: {error}");
+                    log::warn!("forwarder: tee write failed: {error}");
                     let generation = item.generation;
                     let _ = stream.shutdown(Shutdown::Both);
                     *current = None;
@@ -516,12 +516,12 @@ fn supervise(name: &'static str, mut body: impl FnMut() + Send + 'static) {
         match step {
             Ok(()) => break,
             Err(_) => {
-                eprintln!("forwarder: {name} panicked; restarting it");
+                log::warn!("forwarder: {name} panicked; restarting it");
                 thread::sleep(Duration::from_millis(100));
             }
         }
     });
     if let Err(error) = spawned {
-        eprintln!("forwarder: cannot start {name}: {error}; continuing without it");
+        log::warn!("forwarder: cannot start {name}: {error}; continuing without it");
     }
 }

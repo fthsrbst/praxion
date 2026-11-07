@@ -131,7 +131,7 @@ pub(crate) async fn login(
             }
             ClientboundLoginPacket::LoginFinished(p) => {
                 if trace {
-                    eprintln!(
+                    log::debug!(
                         "<- login_finished ({}, {})",
                         p.game_profile.name, p.game_profile.uuid
                     );
@@ -158,7 +158,7 @@ where
 {
     let packet = packet.into_variant();
     if trace {
-        eprintln!("-> {}", packet.name());
+        log::debug!("-> {}", packet.name());
     }
     writer.write(packet).await?;
     Ok(())
@@ -197,7 +197,7 @@ where
         *byte = action;
     }
     if trace {
-        eprintln!("-> player_action {action} {pos:?} {direction:?} seq {seq}");
+        log::debug!("-> player_action {action} {pos:?} {direction:?} seq {seq}");
     }
     writer.raw.write(&bytes).await.map_err(Error::Io)
 }
@@ -230,7 +230,7 @@ where
         }
     };
     if trace {
-        eprintln!("<- {}", packet.name());
+        log::debug!("<- {}", packet.name());
     }
     Ok(packet)
 }

@@ -123,7 +123,7 @@ fn run(file: std::fs::File, rx: Receiver<Event>) {
             }
         }));
         if step.is_err() {
-            eprintln!("forwarder: stats thread panicked while writing an event; continuing");
+            log::warn!("forwarder: stats thread panicked while writing an event; continuing");
         }
     }
     let _ = out.flush();
@@ -132,7 +132,7 @@ fn run(file: std::fs::File, rx: Receiver<Event>) {
 fn write_line<W: Write>(out: &mut W, line: &str) {
     if writeln!(out, "{line}").is_err() || out.flush().is_err() {
         // Keep reading events so the channel does not grow; the disk is the broken part.
-        eprintln!("forwarder: stats write failed; events are counted but not written");
+        log::warn!("forwarder: stats write failed; events are counted but not written");
     }
 }
 

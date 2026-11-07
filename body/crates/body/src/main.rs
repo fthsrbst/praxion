@@ -18,10 +18,13 @@ const POLL: Duration = Duration::from_millis(50);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
+    // `--verbose` shows the debug diagnostics (packet traces); RUST_LOG overrides.
+    let level = if std::env::args().any(|a| a == "--verbose") { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
     match run() {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("praxion-body: {message}");
+            log::error!("praxion-body: {message}");
             ExitCode::FAILURE
         }
     }
@@ -193,7 +196,7 @@ fn run() -> Result<ExitCode, String> {
 
 fn write_summary(args: &Args, shared: &Arc<Mutex<Shared>>) {
     if let Err(error) = summary::write_summary(&args.run_dir, &lock(shared)) {
-        eprintln!("praxion-body: cannot write summary.json: {error}");
+        log::warn!("praxion-body: cannot write summary.json: {error}");
     }
 }
 

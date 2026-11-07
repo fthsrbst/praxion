@@ -128,7 +128,7 @@ fn default_protocol() -> u32 {
     match Manifest::load_default() {
         Ok(manifest) => manifest.minecraft.protocol,
         Err(error) => {
-            eprintln!(
+            log::warn!(
                 "forwarder: cannot read versions/manifest.toml ({error}); assuming protocol {FALLBACK_PROTOCOL}"
             );
             FALLBACK_PROTOCOL
@@ -171,7 +171,7 @@ impl Forwarder {
             Some(path) => match Stats::open(path) {
                 Ok(stats) => stats,
                 Err(error) => {
-                    eprintln!(
+                    log::warn!(
                         "forwarder: cannot open stats file {} ({error}); running without stats",
                         path.display()
                     );
@@ -210,7 +210,7 @@ impl Forwarder {
             let client = match incoming {
                 Ok(client) => client,
                 Err(error) => {
-                    eprintln!("forwarder: accept failed: {error}");
+                    log::warn!("forwarder: accept failed: {error}");
                     thread::sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -233,7 +233,7 @@ impl Forwarder {
                 .name(format!("conn-{conn}"))
                 .spawn(move || handle_client(client, conn, peer, config, thread_tee, thread_stats));
             if let Err(error) = spawned {
-                eprintln!("forwarder: cannot start conn {conn}: {error}");
+                log::warn!("forwarder: cannot start conn {conn}: {error}");
                 tee.closed(conn);
                 stats.send(Event::Closed {
                     conn,
@@ -277,7 +277,7 @@ fn handle_client(
         );
     }));
     if result.is_err() {
-        eprintln!("forwarder: conn {conn} {peer} panicked; closing both directions");
+        log::warn!("forwarder: conn {conn} {peer} panicked; closing both directions");
         let _ = client.shutdown(Shutdown::Both);
         if let Some(upstream) = &upstream {
             let _ = upstream.shutdown(Shutdown::Both);
@@ -319,7 +319,7 @@ fn handle_client_inner(
     let upstream = match TcpStream::connect_timeout(&config.upstream, UPSTREAM_CONNECT_TIMEOUT) {
         Ok(upstream) => upstream,
         Err(error) => {
-            eprintln!("forwarder: conn {conn} cannot reach upstream: {error}");
+            log::warn!("forwarder: conn {conn} cannot reach upstream: {error}");
             refuse(client, conn, peer, "upstream", tee, stats);
             return;
         }
@@ -342,7 +342,7 @@ fn handle_client_inner(
         let ts = now_ns();
         let mut upstream_out = &*upstream;
         if let Err(error) = upstream_out.write_all(&buffered) {
-            eprintln!("forwarder: conn {conn} cannot forward the handshake: {error}");
+            log::warn!("forwarder: conn {conn} cannot forward the handshake: {error}");
             close_pair(client, &upstream);
             finish(conn, 0, 0, tee, stats);
             return;
@@ -391,7 +391,7 @@ fn handle_client_inner(
             (buffered.len() as u64 + c2s, s2c)
         }
         (c2s, s2c) => {
-            eprintln!("forwarder: conn {conn} could not start both copy threads");
+            log::warn!("forwarder: conn {conn} could not start both copy threads");
             if let Ok(c2s) = c2s {
                 let _ = c2s.join();
             }
@@ -439,7 +439,7 @@ fn forward_dir(
                 #[cfg(not(test))]
                 let half_close = to.shutdown(Shutdown::Write);
                 if let Err(error) = half_close {
-                    eprintln!(
+                    log::warn!(
                         "forwarder: conn {conn} cannot half-close the {kind:?} side ({error}); \
                          closing both directions"
                     );
@@ -481,7 +481,7 @@ fn refuse(
     tee: &Tee,
     stats: &Stats,
 ) {
-    eprintln!("forwarder: conn {conn} {peer} refused: {reason}");
+    log::warn!("forwarder: conn {conn} {peer} refused: {reason}");
     stats.send(Event::Refused {
         conn,
         peer: peer.to_string(),

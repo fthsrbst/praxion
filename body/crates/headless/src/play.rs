@@ -160,7 +160,7 @@ impl PlayState {
                         };
                     }
                     if applied.clicks > 0 {
-                        eprintln!("clicks: {:?}", frame.clicks);
+                        log::debug!("clicks: {:?}", frame.clicks);
                     }
                 }
                 Err(error) => {
@@ -168,7 +168,7 @@ impl PlayState {
                     stats
                         .frames_dropped
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!("frame dropped: {error}");
+                    log::warn!("frame dropped: {error}");
                     self.held = Held::NONE;
                 }
             }
@@ -324,7 +324,7 @@ impl PlayState {
                         }
                     }
                 };
-                eprintln!("movement refused: {reason}");
+                log::warn!("movement refused: {reason}");
             }
         }
 
@@ -526,7 +526,7 @@ async fn handle(
     ctx: &Context<'_>,
 ) -> Result<Flow, Error> {
     if ctx.trace {
-        eprintln!("<- {}", packet.name());
+        log::debug!("<- {}", packet.name());
     }
     // The first play packet means the server is ticking with us; in vanilla this
     // packet is always `login`.
@@ -546,7 +546,7 @@ async fn handle(
             login::send(writer, ServerboundPong { id: p.id }, ctx.trace).await?;
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            eprintln!("player_position {:?} relative={:?}", p.change, p.relative);
+            log::debug!("player_position {:?} relative={:?}", p.change, p.relative);
             state.body.teleport(&p.change, &p.relative);
             state
                 .movement

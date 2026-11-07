@@ -1,3 +1,4 @@
 # Same channel as rust.toolchain in versions/manifest.toml; spikes/setup.py checks they agree.
 [toolchain]
 channel = "nightly-2026-08-20"
+components = ["clippy", "rustfmt"]

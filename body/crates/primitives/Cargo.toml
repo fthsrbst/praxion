@@ -15,6 +15,7 @@ azalea-block = { path = "../../../third_party/azalea/azalea-block" }
 azalea-core = { path = "../../../third_party/azalea/azalea-core" }
 azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+log = "0.4"
 praxion-gamedata = { path = "../gamedata" }
 praxion-headless = { path = "../headless" }
 praxion-interpreter = { path = "../interpreter" }

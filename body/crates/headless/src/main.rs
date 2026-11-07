@@ -33,10 +33,13 @@ const USAGE: &str = "usage: praxion-headless --server 127.0.0.1:PORT [--name Bot
                      [--tee 127.0.0.1:PORT] [--script walk.json]";
 
 fn main() -> ExitCode {
+    // `--verbose` shows the debug diagnostics (packet traces); RUST_LOG overrides.
+    let level = if std::env::args().any(|a| a == "--verbose") { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
     match run(std::env::args().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("praxion-headless: {message}");
+            log::error!("praxion-headless: {message}");
             ExitCode::FAILURE
         }
     }

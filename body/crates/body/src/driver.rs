@@ -174,7 +174,7 @@ impl BodyDriver {
         let _ = self.log.flush();
         let shared = lock(&self.shared);
         if let Err(error) = write_summary(&self.run_dir, &shared) {
-            eprintln!("body: cannot write summary.json: {error}");
+            log::warn!("body: cannot write summary.json: {error}");
         }
     }
 
@@ -205,11 +205,11 @@ impl BodyDriver {
                 .engine
                 .observe(&mut self.log, view.tick, ts_ns, &packet.packet, world)
             {
-                eprintln!("body: receipt observe: {error}");
+                log::warn!("body: receipt observe: {error}");
             }
         }
         if let Err(error) = self.engine.advance(&mut self.log, view.tick, ts_ns) {
-            eprintln!("body: receipt advance: {error}");
+            log::warn!("body: receipt advance: {error}");
         }
         self.tally_receipts();
         self.poll_receipt(world);
@@ -342,7 +342,7 @@ impl BodyDriver {
                     self.observe_receipt = Some((receipt, fact.clone()));
                 }
             }
-            Err(error) => eprintln!("body: register intent: {error}"),
+            Err(error) => log::warn!("body: register intent: {error}"),
         }
     }
 

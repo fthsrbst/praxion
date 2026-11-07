@@ -103,7 +103,7 @@ fn run<R: std::io::Read>(
         let record = match record {
             Ok(record) => record,
             Err(error) => {
-                eprintln!("world feed: {error}");
+                log::warn!("world feed: {error}");
                 return;
             }
         };
@@ -126,7 +126,7 @@ fn apply(
         Event::Opened { conn_id, .. } => world.opened(*conn_id),
         Event::Closed { conn_id, .. } => world.closed(*conn_id),
         Event::Desync(desync) => {
-            eprintln!(
+            log::warn!(
                 "world feed: connection {} desynchronised: {}",
                 desync.conn_id, desync.reason
             );

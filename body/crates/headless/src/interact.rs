@@ -384,7 +384,7 @@ pub fn plan(
                     mining.finishing += 1;
                 }
                 if mining.ticks % 20 == 0 {
-                    eprintln!(
+                    log::debug!(
                         "mine progress {:?} {:.4} ticks={} on_ground={} world={:?}",
                         mining.pos,
                         mining.progress,
@@ -395,7 +395,7 @@ pub fn plan(
                 }
                 if mining.progress >= 1. && mining.finishing >= 3 {
                     let seq = stop_seq;
-                    eprintln!("mine stop {:?} seq={}", mining.pos, seq);
+                    log::debug!("mine stop {:?} seq={}", mining.pos, seq);
                     packets.push(Outgoing::PlayerAction {
                         action: 3,
                         pos: mining.pos,
@@ -419,7 +419,7 @@ pub fn plan(
         }
         if !keep_mining && state.mining.is_none() && state.mine_delay == 0 {
             let seq = state.next_seq();
-            eprintln!("mine start {:?} seq={}", target, seq);
+            log::debug!("mine start {:?} seq={}", target, seq);
             packets.push(Outgoing::PlayerAction {
                 action: 0,
                 pos: target,
