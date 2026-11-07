@@ -1687,7 +1687,7 @@ impl Explore {
                         .unwrap_or_else(|| "unknown".to_owned())
                 };
                 eprintln!(
-                    "explore stall cells feet={} below={} head={} next={:?} next_cell={} next_below={}",
+                    "explore stall cells feet={} below={} head={} next={:?} next_cell={} next_below={} next_head={}",
                     cell(feet),
                     cell(BlockPos::new(feet.x, feet.y - 1, feet.z)),
                     cell(BlockPos::new(feet.x, feet.y + 1, feet.z)),
@@ -1699,6 +1699,10 @@ impl Explore {
                     follower
                         .next_cell()
                         .map(|next| cell(BlockPos::new(next.x, next.y - 1, next.z)))
+                        .unwrap_or_else(|| "-".to_owned()),
+                    follower
+                        .next_cell()
+                        .map(|next| cell(BlockPos::new(next.x, next.y + 1, next.z)))
                         .unwrap_or_else(|| "-".to_owned()),
                 );
                 self.follower = None;
@@ -1729,6 +1733,17 @@ impl Explore {
                 };
                 return (built, pending, None);
             }
+        }
+
+        // A plan starts from the feet cell. While the body is in the air that
+        // cell is a space it is falling through, not a place it stands: a plan
+        // made mid-fall believed in a floor that was not there and the body
+        // stalled under its first step (seed 303, body at y=77.25 planning a
+        // step to y=78 over air). Wait for solid ground; falling is progress,
+        // not idling.
+        if !ctx.body.on_ground() && !ctx.body.is_in_water() {
+            self.idle_ticks = 0;
+            return (frame, None, None);
         }
 
         // A target the known map already holds is approached directly. The
