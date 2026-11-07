@@ -78,7 +78,6 @@ fn section_key(pos: BlockPos) -> SectionKey {
     (pos.x >> 4, pos.y >> 4, pos.z >> 4)
 }
 
-#[cfg(test)]
 fn section_base(key: SectionKey) -> BlockPos {
     BlockPos::new(key.0 * 16, key.1 * 16, key.2 * 16)
 }
@@ -265,6 +264,62 @@ impl KnownMap {
             }),
             Cell::Miss { .. } => None,
         }
+    }
+
+    /// The nearest seen cell within `radius` of `center` that `accept` takes,
+    /// by squared cell distance (ties broken by position, so the answer is
+    /// deterministic). Sections are visited nearest first and the search stops
+    /// once no unvisited section can hold a nearer cell, so the cost follows
+    /// what is remembered, not the volume of the radius.
+    pub(crate) fn nearest_seen(
+        &self,
+        center: BlockPos,
+        radius: u32,
+        mut accept: impl FnMut(BlockPos, BlockState) -> bool,
+    ) -> Option<BlockPos> {
+        let r2 = i64::from(radius) * i64::from(radius);
+        let axis = |c: i32, lo: i32| i64::from((lo - c).max(c - (lo + 15)).max(0));
+        let mut sections: Vec<(i64, SectionKey)> = self
+            .sections
+            .keys()
+            .map(|&key| {
+                let base = section_base(key);
+                let (dx, dy, dz) =
+                    (axis(center.x, base.x), axis(center.y, base.y), axis(center.z, base.z));
+                (dx * dx + dy * dy + dz * dz, key)
+            })
+            .filter(|&(d2, _)| d2 <= r2)
+            .collect();
+        sections.sort_unstable();
+        let mut best: Option<(i64, (i32, i32, i32), BlockPos)> = None;
+        for (section_d2, key) in sections {
+            if best.is_some_and(|(d2, ..)| section_d2 > d2) {
+                break;
+            }
+            let base = section_base(key);
+            for (index, cell) in &self.sections[&key].cells {
+                let Cell::Seen { state, .. } = *cell else { continue };
+                let pos = BlockPos::new(
+                    base.x + i32::from(index & 15),
+                    base.y + i32::from((index >> 8) & 15),
+                    base.z + i32::from((index >> 4) & 15),
+                );
+                let (dx, dy, dz) = (
+                    i64::from(pos.x - center.x),
+                    i64::from(pos.y - center.y),
+                    i64::from(pos.z - center.z),
+                );
+                let d2 = dx * dx + dy * dy + dz * dz;
+                let rank = (d2, (pos.x, pos.y, pos.z));
+                if d2 > r2 || best.is_some_and(|(b, p, _)| (b, p) <= rank) {
+                    continue;
+                }
+                if accept(pos, state) {
+                    best = Some((d2, rank.1, pos));
+                }
+            }
+        }
+        best.map(|(.., pos)| pos)
     }
 
     /// Whether the sweep should spend a ray on this cell now: nothing is

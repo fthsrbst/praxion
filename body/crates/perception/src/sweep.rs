@@ -30,6 +30,14 @@ impl Perception {
     /// whose sighting is stale is probed again. A cell no ray reaches is only
     /// remembered as a miss, never as a block fact.
     pub fn sweep(&mut self, world: &World) -> Sweep {
+        // The view scan reaches the sight range along the current look; it
+        // runs on its own period and spends from the same caller share.
+        if self
+            .tick
+            .is_multiple_of(self.config.view_scan_period.max(1))
+        {
+            self.scan_view(world);
+        }
         let mut stats = Sweep::default();
         let Some(eye) = self.valid_eye(world) else {
             return stats;

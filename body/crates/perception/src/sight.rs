@@ -324,7 +324,25 @@ pub(crate) fn line_of_sight(
     if delta.length_squared() < EPS {
         return false;
     }
+    first_blocking_cell(world, from, delta, Some(target), table, Some(crossed)).is_none()
+}
 
+/// The first cell the segment `from`..`from + delta` reaches whose sight class
+/// is not [`Sight::Pass`], or `None` when nothing blocks it. A gap in the world
+/// stops the walk and is returned too: the ray cannot see past it. When
+/// `target` is set, the walk stops at that cell without testing it.
+///
+/// This is the one DDA walk: [`line_of_sight`] asks whether it reaches a
+/// target, and the view scan asks which cell it hits first.
+pub(crate) fn first_blocking_cell(
+    world: &World,
+    from: Vec3,
+    delta: Vec3,
+    target: Option<BlockPos>,
+    table: &mut SightTable,
+    mut crossed: Option<&mut CrossedChunks>,
+) -> Option<BlockPos> {
+    let from_cell = from.to_block_pos_floor();
     let mut cell = from_cell;
     let mut step = [0i32; 3];
     let mut t_max = [f64::INFINITY; 3];
@@ -351,25 +369,29 @@ pub(crate) fn line_of_sight(
     let mut reader = CellReader::new();
     let mut section_pos = ChunkSectionPos::from(from_cell);
     reader.enter(world, section_pos);
-    crossed.record(world, ChunkPos::new(section_pos.x, section_pos.z));
+    if let Some(crossed) = crossed.as_deref_mut() {
+        crossed.record(world, ChunkPos::new(section_pos.x, section_pos.z));
+    }
 
     // No more cell boundaries than this; a guard against a numerical stall.
     let max_steps = (delta.x.abs() + delta.y.abs() + delta.z.abs()).ceil() as usize + 8;
     for _ in 0..max_steps.min(1024) {
-        if cell == target {
-            return true;
+        if target == Some(cell) {
+            return None;
         }
         if !reader.holds(cell) {
             section_pos = ChunkSectionPos::from(cell);
             reader.enter(world, section_pos);
-            crossed.record(world, ChunkPos::new(section_pos.x, section_pos.z));
+            if let Some(crossed) = crossed.as_deref_mut() {
+                crossed.record(world, ChunkPos::new(section_pos.x, section_pos.z));
+            }
         }
         match reader.held_state(cell) {
             Some(state) => {
                 let sight = table.sight(state);
                 match sight {
                     Sight::Pass => {}
-                    Sight::Opaque => return false,
+                    Sight::Opaque => return Some(cell),
                     Sight::Boxes(index) => {
                         let origin = Vec3::new(
                             f64::from(cell.x),
@@ -388,7 +410,7 @@ pub(crate) fn line_of_sight(
                                 origin.z + bx.max.z,
                             );
                             if ray_hits_aabb(from, delta, min, max) {
-                                return false;
+                                return Some(cell);
                             }
                         }
                     }
@@ -399,7 +421,7 @@ pub(crate) fn line_of_sight(
                 // The eye cell itself is always ours; any other gap in the
                 // world stops the proof.
                 if cell != from_cell {
-                    return false;
+                    return Some(cell);
                 }
             }
         }
@@ -412,11 +434,11 @@ pub(crate) fn line_of_sight(
             2
         };
         if !t_max[axis].is_finite() {
-            return true;
+            return None;
         }
         let t = t_max[axis];
         if t > 1.0 + EPS {
-            return true;
+            return None;
         }
         match axis {
             0 => cell.x += step[0],
@@ -425,7 +447,7 @@ pub(crate) fn line_of_sight(
         }
         t_max[axis] += t_delta[axis];
     }
-    false
+    Some(cell)
 }
 
 /// Segment-versus-AABB in the unit interval `t ∈ [0, 1]`. Bounds are

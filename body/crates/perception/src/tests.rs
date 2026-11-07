@@ -3,6 +3,7 @@
 //! enough to pin the rules.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use azalea_block::{BlockState, BlockTrait};
 use azalea_buf::AzBuf;
@@ -13,6 +14,7 @@ use azalea_core::{
     game_type::GameMode,
     position::{ChunkPos, Vec3},
 };
+use azalea_entity::LookDirection;
 use azalea_physics::collision::BlockWithShape;
 use azalea_protocol::packets::{
     common::CommonPlayerSpawnInfo,
@@ -20,7 +22,7 @@ use azalea_protocol::packets::{
         ClientboundAddEntity, ClientboundForgetLevelChunk, ClientboundGamePacket,
         ClientboundLevelChunkWithLight, ClientboundLogin, ClientboundSetEntityData,
         ClientboundSetHealth, ClientboundSetTime, ClientboundSound, ClientboundSoundEntity,
-        ServerboundGamePacket, ServerboundMovePlayerPos,
+        ServerboundGamePacket, ServerboundMovePlayerPos, ServerboundMovePlayerRot,
         c_level_chunk_with_light::ClientboundLevelChunkPacketData,
         c_set_time::ClockState,
         c_sound::SoundSource,
@@ -117,6 +119,16 @@ fn set_player(world: &mut World, feet: Vec3) {
     );
 }
 
+fn set_rotation(world: &mut World, yaw: f32, pitch: f32) {
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerRot(ServerboundMovePlayerRot {
+            look_direction: LookDirection::new(yaw, pitch),
+            flags: Default::default(),
+        }),
+    );
+}
+
 fn set_block(world: &mut World, pos: BlockPos, state: BlockState) {
     world.apply_clientbound_play(
         0,
@@ -156,9 +168,15 @@ fn world_across_chunks(chunks: i32, blocks: &[(BlockPos, BlockState)]) -> World 
 /// The 3 x 3 chunks around the origin, so a radius-8 sweep at (0.5, ., 0.5)
 /// never runs past a loaded chunk.
 fn world_around(blocks: &[(BlockPos, BlockState)]) -> World {
+    world_area(1, blocks)
+}
+
+/// Chunks `-radius..=radius` on both axes, so a 64-block view scan reaches
+/// loaded chunks in every direction.
+fn world_area(radius: i32, blocks: &[(BlockPos, BlockState)]) -> World {
     let mut world = base_world();
-    for x in -1..=1 {
-        for z in -1..=1 {
+    for x in -radius..=radius {
+        for z in -radius..=radius {
             if x == 0 && z == 0 {
                 continue;
             }
@@ -1131,6 +1149,137 @@ fn the_sweep_never_spends_the_reflex_reserve() {
         "the reflex reserve is untouched"
     );
     assert!(p.rays_remaining(Caller::Other) == 0);
+}
+
+#[test]
+fn a_log_in_view_enters_the_known_map_after_one_scan() {
+    let log_state = find_block("oak_log", &[]);
+    let log = BlockPos::new(50, 65, 0);
+    let mut world = world_area(4, &[(log, log_state)]);
+    // Looking east (+X), straight at the log 50 blocks away.
+    set_rotation(&mut world, 270.0, 0.0);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    p.scan_view(&world);
+    assert_eq!(
+        p.known(log).map(|seen| seen.state),
+        Some(log_state),
+        "a log 50 blocks ahead must be seen"
+    );
+}
+
+#[test]
+fn a_log_behind_the_look_stays_unknown() {
+    let log = BlockPos::new(50, 65, 0);
+    let mut world = world_area(4, &[(log, find_block("oak_log", &[]))]);
+    // Looking west (-X), away from the log.
+    set_rotation(&mut world, 90.0, 0.0);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    p.scan_view(&world);
+    assert_eq!(p.known(log), None, "the scan reports only what is in view");
+}
+
+#[test]
+fn the_view_scan_never_spends_the_reflex_reserve() {
+    let world = world_area(1, &[]);
+    let config = Config {
+        ray_budget: 10,
+        reflex_reserve: 4,
+        ..Config::default()
+    };
+    let mut p = Perception::new(config);
+    p.begin_tick(&world);
+    p.scan_view(&world);
+    assert_eq!(
+        p.rays_used_this_tick(),
+        6,
+        "the scan spends only the unreserved share"
+    );
+    assert_eq!(p.rays_remaining(Caller::Reflex), 4);
+    assert_eq!(p.rays_remaining(Caller::Other), 0);
+}
+
+#[test]
+fn the_sweep_runs_the_view_scan_on_its_period() {
+    let log = BlockPos::new(50, 65, 0);
+    let mut world = world_area(4, &[(log, find_block("oak_log", &[]))]);
+    set_rotation(&mut world, 270.0, 0.0);
+    let config = Config {
+        sweep_radius: 1,
+        ..Config::default()
+    };
+    let mut p = Perception::new(config);
+    for _ in 0..9 {
+        p.begin_tick(&world);
+        p.sweep(&world);
+    }
+    assert_eq!(p.known(log), None, "no scan before the period");
+    p.begin_tick(&world);
+    p.sweep(&world);
+    assert!(
+        p.known(log).is_some(),
+        "the tenth tick scans the current view"
+    );
+}
+
+#[test]
+#[ignore = "timing measurement: cargo test -p praxion-perception --release -- --ignored bench_view_scan --nocapture"]
+fn bench_view_scan() {
+    let world = world_area(4, &flat_floor(62, 64));
+    let mut p = Perception::new(Config::default());
+    let mut samples = Vec::new();
+    for _ in 0..50 {
+        p.begin_tick(&world);
+        let started = Instant::now();
+        p.scan_view(&world);
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p50 = samples[samples.len() / 2];
+    let max = *samples.last().expect("samples");
+    println!(
+        "view scan: p50 {p50:.3} ms, max {max:.3} ms over {} scans",
+        samples.len()
+    );
+}
+
+#[test]
+#[ignore = "timing measurement: cargo test -p praxion-perception --release -- --ignored bench_nearest_known_worst_case --nocapture"]
+fn bench_nearest_known_worst_case() {
+    let world = world_with(&[]);
+    let config = Config {
+        memory_capacity: 3_000_000,
+        ..Config::default()
+    };
+    let mut p = Perception::new(config);
+    p.begin_tick(&world);
+    let eye_cell = p.eye_cell(&world).expect("eye");
+    let focus = section_key_of(eye_cell);
+    let air = BlockState::AIR;
+    let radius = 64;
+    for x in eye_cell.x - radius..=eye_cell.x + radius {
+        for y in eye_cell.y - radius..=eye_cell.y + radius {
+            for z in eye_cell.z - radius..=eye_cell.z + radius {
+                p.known
+                    .record_seen(BlockPos::new(x, y, z), air, 1, 0, focus);
+            }
+        }
+    }
+    let stone = stone();
+    let mut samples = Vec::new();
+    for _ in 0..3 {
+        let started = Instant::now();
+        let found = p.nearest_known(&world, radius as u32, |_| false, |state| state == stone);
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(found.is_none(), "the full map holds no stone");
+    }
+    samples.sort_by(f64::total_cmp);
+    let p50 = samples[samples.len() / 2];
+    let max = *samples.last().expect("samples");
+    println!(
+        "nearest_known(radius 64, full map, no match): p50 {p50:.3} ms, max {max:.3} ms"
+    );
 }
 
 #[test]

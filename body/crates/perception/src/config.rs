@@ -45,6 +45,10 @@ pub const DEFAULT_SWEEP_STALE_TICKS: u64 = 100;
 /// hidden cells cannot starve the sweep.
 pub const DEFAULT_SWEEP_RETRY_TICKS: u64 = 40;
 
+/// Ticks between view scans. A scan covers half the fan, so two scans cover
+/// the whole current view.
+pub const DEFAULT_VIEW_SCAN_PERIOD: u64 = 10;
+
 /// Largest block volume a `blocks_in` request may name.
 pub const DEFAULT_MAX_REGION_BLOCKS: u64 = 1_000_000;
 
@@ -72,6 +76,8 @@ pub struct Config {
     pub sweep_stale_ticks: u64,
     /// Delay before a cell no ray reached is probed again.
     pub sweep_retry_ticks: u64,
+    /// Ticks between view scans.
+    pub view_scan_period: u64,
     pub max_region_blocks: u64,
     pub max_list_results: usize,
 }
@@ -91,6 +97,7 @@ impl Default for Config {
             sweep_radius: DEFAULT_SWEEP_RADIUS,
             sweep_stale_ticks: DEFAULT_SWEEP_STALE_TICKS,
             sweep_retry_ticks: DEFAULT_SWEEP_RETRY_TICKS,
+            view_scan_period: DEFAULT_VIEW_SCAN_PERIOD,
             max_region_blocks: DEFAULT_MAX_REGION_BLOCKS,
             max_list_results: DEFAULT_MAX_LIST_RESULTS,
         }
