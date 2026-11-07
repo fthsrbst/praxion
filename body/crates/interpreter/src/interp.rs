@@ -25,6 +25,9 @@ pub const MAX_PRIMITIVE_FAILURES: u32 = 3;
 /// depth cap makes this unreachable for a checked program.
 const MAX_SELECTION_STEPS: usize = 64;
 
+/// The failure kind a primitive reports when it runs out of ticks.
+const TIMEOUT_KIND: &str = "timeout";
+
 #[derive(Clone, Debug)]
 struct Frame {
     skill: String,
@@ -35,8 +38,10 @@ struct Frame {
     /// A rule that failed this tick and may not fire again until the next one.
     /// Set by a child skill's `failed(kind)`.
     ineligible: Option<usize>,
-    /// A primitive of this rule failed this tick; the rule retries next tick
-    /// instead of the skill failing.
+    /// A primitive or child of this rule failed this tick; the rule retries
+    /// next tick instead of the skill failing. Kept apart from `ineligible`
+    /// because a primitive failure sets only this one: the same rule stays the
+    /// highest true rule and the frame waits for its retry.
     retry: Option<usize>,
     /// Consecutive failures per rule index, primitive or child skill. A rule's
     /// own success clears only its entry; another rule firing leaves it alone.
@@ -221,34 +226,8 @@ impl Interpreter {
         {
             self.continuous = false;
             self.continuous_action = None;
-            match outcome {
-                Outcome::Confirmed => self.succeeded_rule(selected.depth, selected.rule),
-                Outcome::Failed(kind) => {
-                    if let Some(kind) = self.fail_rule(selected.depth, selected.rule, kind)
-                        && let Some(decision) =
-                            self.fail_skill(selected.depth, kind, actuator)
-                    {
-                        return decision;
-                    }
-                }
-                Outcome::Timeout => {
-                    if let Some(kind) =
-                        self.fail_rule(selected.depth, selected.rule, "timeout".into())
-                        && let Some(decision) =
-                            self.fail_skill(selected.depth, kind, actuator)
-                    {
-                        return decision;
-                    }
-                }
-                Outcome::Preempted => {
-                    if let Some(kind) =
-                        self.fail_rule(selected.depth, selected.rule, "preempted".into())
-                        && let Some(decision) =
-                            self.fail_skill(selected.depth, kind, actuator)
-                    {
-                        return decision;
-                    }
-                }
+            if let Some(decision) = self.settle(outcome, selected.depth, selected.rule, actuator) {
+                return decision;
             }
         }
 
@@ -258,48 +237,22 @@ impl Interpreter {
             match actuator.poll(self.tick) {
                 Some(outcome) => {
                     self.in_flight = None;
-                    match outcome {
-                        Outcome::Confirmed => self.succeeded(&flight),
-                        Outcome::Failed(kind) => {
-                            if let Some(kind) = self.fail_flight(&flight, kind) {
-                                if let Some(decision) =
-                                    self.fail_skill(flight.depth, kind, actuator)
-                                {
-                                    return decision;
-                                }
-                            }
-                        }
-                        Outcome::Timeout => {
-                            if let Some(kind) =
-                                self.fail_flight(&flight, "timeout".into())
-                            {
-                                if let Some(decision) =
-                                    self.fail_skill(flight.depth, kind, actuator)
-                                {
-                                    return decision;
-                                }
-                            }
-                        }
-                        Outcome::Preempted => {
-                            if let Some(kind) =
-                                self.fail_flight(&flight, "preempted".into())
-                            {
-                                if let Some(decision) =
-                                    self.fail_skill(flight.depth, kind, actuator)
-                                {
-                                    return decision;
-                                }
-                            }
-                        }
+                    if let Some(decision) =
+                        self.settle(outcome, flight.depth, flight.rule, actuator)
+                    {
+                        return decision;
                     }
                 }
                 None if self.tick >= flight.deadline => {
                     let _ = actuator.cancel();
                     self.in_flight = None;
-                    if let Some(kind) = self.fail_flight(&flight, "timeout".into()) {
-                        if let Some(decision) = self.fail_skill(flight.depth, kind, actuator) {
-                            return decision;
-                        }
+                    if let Some(decision) = self.settle(
+                        Outcome::Timeout,
+                        flight.depth,
+                        flight.rule,
+                        actuator,
+                    ) {
+                        return decision;
                     }
                 }
                 None => {
@@ -377,35 +330,7 @@ impl Interpreter {
             }
             let depth = self.stack.len() - 1;
 
-            // A commitment (`until`) keeps the current rule selected while its
-            // own guard is T and the `until` guard is not T (F or U), bounded
-            // by `max_ticks`. It is released the moment either stops holding.
-            let mut forced = None;
-            if let Some(until) = self.until {
-                if until.depth >= self.stack.len() {
-                    self.until = None;
-                } else if until.depth == depth {
-                    let frame = &self.stack[depth];
-                    let skill = self
-                        .program
-                        .skill(&frame.skill)
-                        .expect("a frame always names a checked skill");
-                    let rule = &skill.rules[until.rule];
-                    let own = self.eval_bool(&rule.guard, frame, facts);
-                    let released = rule
-                        .until
-                        .as_ref()
-                        .map(|guard| self.eval_bool(guard, frame, facts) == Truth::True)
-                        .unwrap_or(true);
-                    if self.tick >= until.deadline || own != Truth::True || released {
-                        self.until = None;
-                    } else {
-                        forced = Some(until.rule);
-                    }
-                }
-                // A deeper frame is a child of a committed call; leave the
-                // commitment on its parent frame.
-            }
+            let forced = self.forced_rule(depth, facts);
 
             // Step 3: the highest rule whose guard is T fires.
             let mut fired = forced;
@@ -473,171 +398,210 @@ impl Interpreter {
                 continue;
             };
 
-            let selected_skill = self.stack[depth].skill.clone();
-            self.last_rule = Some((selected_skill, index));
-            self.rule_fired_this_tick = true;
-
-            // A continuous action runs only while its own rule is the one that
-            // fires (§6.1 step 3: "a higher rule becoming T switches at
-            // once"). Any other rule firing, in this frame or a deeper one,
-            // releases it first; before, a running `explore` kept walking while
-            // a `do` child or another rule took over.
-            if self
-                .continuous_action
-                .as_ref()
-                .is_some_and(|running| (running.depth, running.rule) != (depth, index))
-            {
-                self.stop_continuous(actuator);
-            }
-
-            let (action, rule_max_ticks, has_until) = {
-                let frame = &self.stack[depth];
-                let skill = self
-                    .program
-                    .skill(&frame.skill)
-                    .expect("a frame always names a checked skill");
-                let rule = &skill.rules[index];
-                (rule.action.kind.clone(), rule.max_ticks, rule.until.is_some())
-            };
-            let default_ticks = match &action {
-                ActionKind::Primitive { name, .. } => self
-                    .program
-                    .primitives()
-                    .get(name)
-                    .map(|record| record.default_max_ticks)
-                    .unwrap_or(DEFAULT_MAX_TICKS),
-                _ => DEFAULT_MAX_TICKS,
-            };
-            let max_ticks = rule_max_ticks.unwrap_or(default_ticks);
-            self.ensure_until(depth, index, has_until, max_ticks);
-
-            match action {
-                ActionKind::Done => {
-                    self.stop_continuous(actuator);
-                    if depth == 0 {
-                        self.finished = true;
-                        self.events.push(InterpreterEvent::FrameDone {
-                            skill: self.stack[0].skill.clone(),
-                            depth: 1,
-                        });
-                        return Decision::Done;
-                    }
-                    let call_rule = self.stack[depth].call_rule.unwrap_or(0);
-                    self.events.push(InterpreterEvent::FrameDone {
-                        skill: self.stack[depth].skill.clone(),
-                        depth: (depth + 1) as u32,
-                    });
-                    self.stack.pop();
-                    // A completed child is a success of the calling rule, so
-                    // it clears only that rule's failure count.
-                    if let Some(parent) = self.stack.get_mut(depth - 1) {
-                        parent.failures.remove(&call_rule);
-                    }
-                    // A commitment owned by this frame ends with it; a parent's
-                    // commitment survives a child completing.
-                    if matches!(&self.until, Some(until) if until.depth >= depth) {
-                        self.until = None;
-                    }
-                    return Decision::Waiting("child done".into());
-                }
-                ActionKind::Fail(kind) => {
-                    self.stop_continuous(actuator);
-                    if let Some(decision) = self.fail_skill(depth, kind, actuator) {
-                        return decision;
-                    }
-                    continue;
-                }
-                ActionKind::Do {
-                    skill: callee,
-                    args,
-                } => {
-                    let values = {
-                        let frame = &self.stack[depth];
-                        let target = self
-                            .program
-                            .skill(&callee)
-                            .expect("a `do` always names a checked skill");
-                        args.iter()
-                            .zip(&target.params)
-                            .map(|(arg, param)| self.resolve_value(arg, param.ty, frame))
-                            .collect::<Vec<_>>()
-                    };
-                    if self.stack.len() >= self.program.max_depth() {
-                        self.finished = true;
-                        self.stop_continuous(actuator);
-                        return Decision::Failed("depth".into());
-                    }
-                    self.events.push(InterpreterEvent::FramePushed {
-                        skill: callee.clone(),
-                        depth: (self.stack.len() + 1) as u32,
-                        args: values.iter().map(log_arg).collect(),
-                    });
-                    self.stack.push(Frame {
-                        skill: callee,
-                        args: values,
-                        call_rule: Some(index),
-                        ineligible: None,
-                        retry: None,
-                        failures: BTreeMap::new(),
-                    });
-                    continue;
-                }
-                ActionKind::Primitive { name, args } => {
-                    let record = self
-                        .program
-                        .primitives()
-                        .get(&name)
-                        .expect("an action always names a checked primitive");
-                    let kind = record.kind;
-                    let values = {
-                        let frame = &self.stack[depth];
-                        args.iter()
-                            .zip(&record.params)
-                            .map(|(arg, param)| self.resolve_arg(arg, param.ty, frame))
-                            .collect::<Vec<_>>()
-                    };
-                    let run = RunAction {
-                        primitive: name.clone(),
-                        args: values.clone(),
-                        kind,
-                    };
-                    let start = StartAction {
-                        primitive: name.clone(),
-                        args: values,
-                    };
-                    let frame_path = self.frame_path(index);
-                    if kind == PrimitiveKind::Discrete {
-                        self.stop_continuous(actuator);
-                        let _duration = actuator.start(&start, self.tick);
-                        self.in_flight = Some(InFlight {
-                            depth,
-                            rule: index,
-                            primitive: name,
-                            deadline: self.tick + u64::from(max_ticks),
-                        });
-                        return Decision::Run {
-                            action: run,
-                            frame_path,
-                        };
-                    }
-                    actuator.apply(&start, self.tick);
-                    self.continuous = true;
-                    self.continuous_action = Some(Continuous {
-                        depth,
-                        rule: index,
-                    });
-                    return Decision::Run {
-                        action: run,
-                        frame_path,
-                    };
-                }
+            if let Some(decision) = self.dispatch_action(depth, index, actuator) {
+                return decision;
             }
         }
     }
 
-    /// Records a successful discrete action and clears its rule's count.
-    fn succeeded(&mut self, flight: &InFlight) {
-        self.succeeded_rule(flight.depth, flight.rule);
+    /// The rule a live `until` commitment forces this tick, if any. The
+    /// commitment keeps the current rule selected while its own guard is T and
+    /// the `until` guard is not T (F or U), bounded by `max_ticks`. It is
+    /// released the moment either stops holding. A deeper frame is a child of
+    /// a committed call, so the commitment stays on its parent frame.
+    fn forced_rule(&mut self, depth: usize, facts: &mut dyn Facts) -> Option<usize> {
+        let until = self.until?;
+        if until.depth >= self.stack.len() {
+            self.until = None;
+            return None;
+        }
+        if until.depth < depth {
+            return None;
+        }
+        let frame = &self.stack[depth];
+        let skill = self
+            .program
+            .skill(&frame.skill)
+            .expect("a frame always names a checked skill");
+        let rule = &skill.rules[until.rule];
+        let own = self.eval_bool(&rule.guard, frame, facts);
+        let released = rule
+            .until
+            .as_ref()
+            .map(|guard| self.eval_bool(guard, frame, facts) == Truth::True)
+            .unwrap_or(true);
+        if self.tick >= until.deadline || own != Truth::True || released {
+            self.until = None;
+            None
+        } else {
+            Some(until.rule)
+        }
+    }
+
+    /// Runs the action of the rule that just fired. `None` means keep selecting
+    /// this tick: a `do` pushed a child frame, or a `fail` popped one.
+    fn dispatch_action(
+        &mut self,
+        depth: usize,
+        index: usize,
+        actuator: &mut dyn Actuator,
+    ) -> Option<Decision> {
+        let selected_skill = self.stack[depth].skill.clone();
+        self.last_rule = Some((selected_skill, index));
+        self.rule_fired_this_tick = true;
+
+        // A continuous action runs only while its own rule is the one that
+        // fires (§6.1 step 3: "a higher rule becoming T switches at once").
+        // Any other rule firing, in this frame or a deeper one, releases it
+        // first; before, a running `explore` kept walking while a `do` child or
+        // another rule took over.
+        if self
+            .continuous_action
+            .as_ref()
+            .is_some_and(|running| (running.depth, running.rule) != (depth, index))
+        {
+            self.stop_continuous(actuator);
+        }
+
+        let (action, rule_max_ticks, has_until) = {
+            let frame = &self.stack[depth];
+            let skill = self
+                .program
+                .skill(&frame.skill)
+                .expect("a frame always names a checked skill");
+            let rule = &skill.rules[index];
+            (rule.action.kind.clone(), rule.max_ticks, rule.until.is_some())
+        };
+        let default_ticks = match &action {
+            ActionKind::Primitive { name, .. } => self
+                .program
+                .primitives()
+                .get(name)
+                .map(|record| record.default_max_ticks)
+                .unwrap_or(DEFAULT_MAX_TICKS),
+            _ => DEFAULT_MAX_TICKS,
+        };
+        let max_ticks = rule_max_ticks.unwrap_or(default_ticks);
+        self.ensure_until(depth, index, has_until, max_ticks);
+
+        match action {
+            ActionKind::Done => {
+                self.stop_continuous(actuator);
+                if depth == 0 {
+                    self.finished = true;
+                    self.events.push(InterpreterEvent::FrameDone {
+                        skill: self.stack[0].skill.clone(),
+                        depth: 1,
+                    });
+                    return Some(Decision::Done);
+                }
+                let call_rule = self.stack[depth].call_rule.unwrap_or(0);
+                self.events.push(InterpreterEvent::FrameDone {
+                    skill: self.stack[depth].skill.clone(),
+                    depth: (depth + 1) as u32,
+                });
+                self.stack.pop();
+                // A completed child is a success of the calling rule, so it
+                // clears only that rule's failure count.
+                if let Some(parent) = self.stack.get_mut(depth - 1) {
+                    parent.failures.remove(&call_rule);
+                }
+                // A commitment owned by this frame ends with it; a parent's
+                // commitment survives a child completing.
+                if matches!(&self.until, Some(until) if until.depth >= depth) {
+                    self.until = None;
+                }
+                Some(Decision::Waiting("child done".into()))
+            }
+            ActionKind::Fail(kind) => {
+                self.stop_continuous(actuator);
+                self.fail_skill(depth, kind, actuator)
+            }
+            ActionKind::Do {
+                skill: callee,
+                args,
+            } => {
+                let values = {
+                    let frame = &self.stack[depth];
+                    let target = self
+                        .program
+                        .skill(&callee)
+                        .expect("a `do` always names a checked skill");
+                    args.iter()
+                        .zip(&target.params)
+                        .map(|(arg, param)| self.resolve_value(arg, param.ty, frame))
+                        .collect::<Vec<_>>()
+                };
+                if self.stack.len() >= self.program.max_depth() {
+                    self.finished = true;
+                    self.stop_continuous(actuator);
+                    return Some(Decision::Failed("depth".into()));
+                }
+                self.events.push(InterpreterEvent::FramePushed {
+                    skill: callee.clone(),
+                    depth: (self.stack.len() + 1) as u32,
+                    args: values.iter().map(log_arg).collect(),
+                });
+                self.stack.push(Frame {
+                    skill: callee,
+                    args: values,
+                    call_rule: Some(index),
+                    ineligible: None,
+                    retry: None,
+                    failures: BTreeMap::new(),
+                });
+                None
+            }
+            ActionKind::Primitive { name, args } => {
+                let record = self
+                    .program
+                    .primitives()
+                    .get(&name)
+                    .expect("an action always names a checked primitive");
+                let kind = record.kind;
+                let values = {
+                    let frame = &self.stack[depth];
+                    args.iter()
+                        .zip(&record.params)
+                        .map(|(arg, param)| self.resolve_arg(arg, param.ty, frame))
+                        .collect::<Vec<_>>()
+                };
+                let run = RunAction {
+                    primitive: name.clone(),
+                    args: values.clone(),
+                    kind,
+                };
+                let start = StartAction {
+                    primitive: name.clone(),
+                    args: values,
+                };
+                let frame_path = self.frame_path(index);
+                if kind == PrimitiveKind::Discrete {
+                    self.stop_continuous(actuator);
+                    let _duration = actuator.start(&start, self.tick);
+                    self.in_flight = Some(InFlight {
+                        depth,
+                        rule: index,
+                        primitive: name,
+                        deadline: self.tick + u64::from(max_ticks),
+                    });
+                    return Some(Decision::Run {
+                        action: run,
+                        frame_path,
+                    });
+                }
+                actuator.apply(&start, self.tick);
+                self.continuous = true;
+                self.continuous_action = Some(Continuous {
+                    depth,
+                    rule: index,
+                });
+                Some(Decision::Run {
+                    action: run,
+                    frame_path,
+                })
+            }
+        }
     }
 
     fn succeeded_rule(&mut self, depth: usize, rule: usize) {
@@ -646,34 +610,63 @@ impl Interpreter {
         }
     }
 
-    /// Records a primitive failure. Returns the failure kind when the rule has
-    /// failed [`MAX_PRIMITIVE_FAILURES`] times in a row, meaning its skill
-    /// fails; otherwise marks the rule to retry next tick.
-    fn fail_flight(&mut self, flight: &InFlight, kind: String) -> Option<String> {
-        self.fail_rule(flight.depth, flight.rule, kind)
+    /// Attributes a settled outcome to `rule` in the frame at `depth`: a success
+    /// clears that rule's count; a failure counts it and fails the skill when
+    /// the rule reaches [`MAX_PRIMITIVE_FAILURES`]. Returns the decision when
+    /// the skill fails.
+    fn settle(
+        &mut self,
+        outcome: Outcome,
+        depth: usize,
+        rule: usize,
+        actuator: &mut dyn Actuator,
+    ) -> Option<Decision> {
+        let kind = match outcome {
+            Outcome::Confirmed => {
+                self.succeeded_rule(depth, rule);
+                return None;
+            }
+            Outcome::Failed(kind) => kind,
+            Outcome::Timeout => TIMEOUT_KIND.into(),
+            Outcome::Preempted => "preempted".into(),
+        };
+        let kind = self.fail_rule(depth, rule, kind)?;
+        self.fail_skill(depth, kind, actuator)
+    }
+
+    /// Counts one failure of `rule` in the frame at `depth`. Returns `true`
+    /// when the rule reached [`MAX_PRIMITIVE_FAILURES`], meaning its skill
+    /// fails; a reached limit clears the frame's counts so the next skill
+    /// failure starts from zero. Callers mark the rule to retry below the
+    /// limit.
+    fn count_failure(&mut self, depth: usize, rule: usize) -> bool {
+        let max = self.max_primitive_failures;
+        let frame = &mut self.stack[depth];
+        let count = frame.failures.entry(rule).or_insert(0);
+        *count += 1;
+        if *count >= max {
+            // The skill fails; do not retry this rule.
+            frame.failures.clear();
+            true
+        } else {
+            false
+        }
     }
 
     fn fail_rule(&mut self, depth: usize, rule: usize, kind: String) -> Option<String> {
         self.last_failure = Some(kind.clone());
         let mut failed = false;
         if depth < self.stack.len() {
-            let max = self.max_primitive_failures;
-            let frame = &mut self.stack[depth];
-            let count = frame.failures.entry(rule).or_insert(0);
-            *count += 1;
-            if *count >= max {
-                // The skill fails; do not retry this rule.
-                frame.failures.clear();
-                failed = true;
-            } else {
+            failed = self.count_failure(depth, rule);
+            if !failed {
                 // A primitive failure is retried on the next tick: the world
                 // did not change, so the same rule is still the highest true
                 // one.
-                frame.retry = Some(rule);
+                self.stack[depth].retry = Some(rule);
             }
         }
         self.clear_until_at(depth, rule);
-        if failed { Some(kind) } else { None }
+        failed.then_some(kind)
     }
 
     /// Fails the skill whose frame is `depth`, mirroring `fail(kind)`: a child
@@ -721,15 +714,7 @@ impl Interpreter {
         kind: String,
         actuator: &mut dyn Actuator,
     ) -> Option<Decision> {
-        let max = self.max_primitive_failures;
-        let count = {
-            let count = self.stack[depth].failures.entry(rule).or_insert(0);
-            *count += 1;
-            *count
-        };
-        if count >= max {
-            // The skill fails; do not retry this rule.
-            self.stack[depth].failures.clear();
+        if self.count_failure(depth, rule) {
             return self.fail_skill(depth, kind, actuator);
         }
         self.stack[depth].ineligible = Some(rule);

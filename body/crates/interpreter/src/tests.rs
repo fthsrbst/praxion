@@ -1,157 +1,19 @@
 //! Interpreter semantics (§6.1), against a small mock world.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use praxion_rules::{ArgValue, FactCall, Program};
+use praxion_rules::{ArgValue, FactCall};
 
 use crate::{
     Actuator, Decision, Facts, IntValue, Interpreter, Outcome, StartAction, Truth, kleene_and,
     kleene_not, kleene_or,
 };
 
-#[derive(Clone, Debug)]
-struct Mock {
-    bools: BTreeMap<String, bool>,
-    ints: BTreeMap<String, i64>,
-    unknown: BTreeSet<String>,
-    duration: u64,
-    outcome: Option<Outcome>,
-    /// Per-primitive terminal outcomes, ahead of `outcome`, so a test can make
-    /// two rules fail with different kinds.
-    outcomes: BTreeMap<String, Outcome>,
-    /// The terminal outcome a continuous action reports, for the tests of the
-    /// explore/continuous path.
-    continuous_outcome: Option<Outcome>,
-    flight: Option<(u64, Outcome)>,
-    starts: Vec<StartAction>,
-    applies: Vec<StartAction>,
-    cancels: u32,
-    releases: u32,
-}
+#[path = "../tests/common/mod.rs"]
+mod common;
 
-impl Default for Mock {
-    fn default() -> Self {
-        Self {
-            bools: BTreeMap::new(),
-            ints: BTreeMap::new(),
-            unknown: BTreeSet::new(),
-            duration: 1,
-            outcome: None,
-            outcomes: BTreeMap::new(),
-            continuous_outcome: None,
-            flight: None,
-            starts: Vec::new(),
-            applies: Vec::new(),
-            cancels: 0,
-            releases: 0,
-        }
-    }
-}
-
-impl Facts for Mock {
-    fn bool_fact(&mut self, call: &FactCall) -> Truth {
-        if self.unknown.contains(&call.name) {
-            return Truth::Unknown(call.clone());
-        }
-        let value = match call.name.as_str() {
-            "has" | "near" => call
-                .args
-                .first()
-                .and_then(ArgValue::name)
-                .and_then(|name| self.bools.get(name))
-                .copied()
-                .unwrap_or(false),
-            _ => false,
-        };
-        if value {
-            Truth::True
-        } else {
-            Truth::False
-        }
-    }
-
-    fn int_fact(&mut self, call: &FactCall) -> IntValue {
-        if self.unknown.contains(&call.name) {
-            return IntValue::Unknown(call.clone());
-        }
-        match call.name.as_str() {
-            "count" => IntValue::Known(
-                call.args
-                    .first()
-                    .and_then(ArgValue::name)
-                    .and_then(|name| self.ints.get(name))
-                    .copied()
-                    .unwrap_or(0),
-            ),
-            _ => IntValue::Unknown(call.clone()),
-        }
-    }
-}
-
-impl Actuator for Mock {
-    fn start(&mut self, action: &StartAction, tick: u64) -> u32 {
-        self.starts.push(action.clone());
-        let outcome = self
-            .outcomes
-            .get(&action.primitive)
-            .cloned()
-            .or_else(|| self.outcome.clone())
-            .unwrap_or(Outcome::Confirmed);
-        self.flight = Some((tick + self.duration, outcome));
-        self.duration as u32
-    }
-
-    fn poll(&mut self, tick: u64) -> Option<Outcome> {
-        match &self.flight {
-            Some((settle_at, _)) if tick >= *settle_at => {
-                let (_, outcome) = self.flight.take().expect("checked above");
-                Some(outcome)
-            }
-            _ => None,
-        }
-    }
-
-    fn cancel(&mut self) -> Option<Outcome> {
-        if self.flight.take().is_some() {
-            self.cancels += 1;
-            Some(Outcome::Preempted)
-        } else {
-            None
-        }
-    }
-
-    fn apply(&mut self, action: &StartAction, tick: u64) {
-        self.applies.push(action.clone());
-        if let Some(outcome) = self.continuous_outcome.clone() {
-            self.flight = Some((tick + self.duration, outcome));
-        }
-    }
-
-    fn release(&mut self) {
-        self.releases += 1;
-    }
-}
-
-fn program(source: &str) -> Program {
-    praxion_rules::load(source).unwrap_or_else(|errors| {
-        panic!(
-            "program did not load: {:?}",
-            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
-        )
-    })
-}
+use common::*;
 
 fn started(interpreter: &mut Interpreter, facts: &mut Mock, actuator: &mut Mock) -> Decision {
     interpreter.tick(facts, actuator)
-}
-
-fn wait_ticks(decision: &Decision) -> i64 {
-    match decision {
-        Decision::Run { action, .. } if action.primitive == "wait" => {
-            action.args[0].as_int().expect("wait takes an int")
-        }
-        other => panic!("expected a wait run, got {other:?}"),
-    }
 }
 
 #[test]
