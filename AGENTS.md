@@ -159,3 +159,7 @@ Generate images whenever they help (diagrams, concept art, UI mockups, doc illus
 
 - Small, focused commits with imperative messages (`Add ...`, `Fix ...`).
 - Never push, create a remote repository or open a pull request without the user's approval.
+- Keep branches to a minimum. Work on `main` unless the user asks for a branch. Once a branch is merged
+  into `main`, delete it locally and on the remote in the same change (`git branch -d <b>`,
+  `git push origin --delete <b>`). At the start of a session run `git fetch --all --prune` and list
+  `git branch -a`; report any branch that is not `main` and clean up the merged ones.
