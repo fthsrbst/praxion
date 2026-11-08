@@ -138,9 +138,17 @@ where
 
         if success(node) {
             let best_path = index;
+            // A success whose route cannot be rebuilt is not a route. Reporting
+            // it as `Success` with no movements let callers read a lost path as
+            // "the body is already there": explore froze for 24,000 ticks on
+            // seed 101. Treat it as an exhausted search instead.
+            let (status, movements) = match reconstruct_path(nodes, best_path, successors) {
+                Some(movements) => (SearchStatus::Success, movements),
+                None => (SearchStatus::Exhausted, Vec::new()),
+            };
             return Search {
-                movements: reconstruct_path(nodes, best_path, successors),
-                status: SearchStatus::Success,
+                movements,
+                status,
                 cost: g_score,
                 nodes_expanded: num_nodes,
                 elapsed: start_time.elapsed(),
@@ -206,7 +214,8 @@ where
 
     let best_path_idx = determine_best_path_idx(best_paths, 0);
     Search {
-        movements: reconstruct_path(nodes, best_paths[best_path_idx], successors),
+        movements: reconstruct_path(nodes, best_paths[best_path_idx], successors)
+            .unwrap_or_default(),
         status,
         cost: best_path_scores[best_path_idx],
         nodes_expanded: num_nodes,
@@ -229,7 +238,7 @@ fn reconstruct_path<P, M, SuccessorsFn>(
     nodes: NodeMap<P>,
     mut current_index: u32,
     mut successors: SuccessorsFn,
-) -> Vec<Movement<P, M>>
+) -> Option<Vec<Movement<P, M>>>
 where
     P: Eq + Hash + Copy + Debug,
     SuccessorsFn: FnMut(P) -> Vec<Edge<P, M>>,
@@ -253,8 +262,9 @@ where
         }
         let Some(found_successor) = best_successor else {
             // A successor stopped being possible while reconstructing the path.
-            // Return what was rebuilt so far; the caller sees a short path.
-            return vec![];
+            // The rebuilt route is incomplete, so the caller must not see a
+            // success (see the success branch above).
+            return None;
         };
 
         path.push(Movement {
@@ -265,7 +275,7 @@ where
         current_index = node.came_from;
     }
     path.reverse();
-    path
+    Some(path)
 }
 
 pub struct Node {
@@ -361,5 +371,42 @@ mod tests {
         );
         assert_eq!(search.status, SearchStatus::Budget);
         assert!(search.nodes_expanded <= 3, "{}", search.nodes_expanded);
+    }
+
+    /// A goal node was reached, but the edge that led to it is gone when the
+    /// path is rebuilt. That used to be reported as `Success` with no
+    /// movements, which callers read as "already there" (explore froze on
+    /// seed 101). A lost route is an exhausted search, never a success.
+    #[test]
+    fn a_success_with_a_lost_successor_is_not_a_success() {
+        use std::collections::HashSet;
+
+        let mut expanded: HashSet<i32> = HashSet::new();
+        let search = a_star(
+            0,
+            |pos: i32| (3 - pos).max(0) as f32,
+            |pos: i32| {
+                // The search expands each node once; the rebuild asks again.
+                if expanded.insert(pos) {
+                    vec![Edge {
+                        movement: Movement {
+                            target: pos + 1,
+                            data: (),
+                        },
+                        cost: 1.,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            },
+            |pos: i32| pos == 3,
+            Budget::nodes(1_000),
+        );
+        assert_ne!(
+            search.status,
+            SearchStatus::Success,
+            "a path that cannot be rebuilt is not a success"
+        );
+        assert!(search.movements.is_empty());
     }
 }

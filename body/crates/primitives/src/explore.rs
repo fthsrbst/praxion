@@ -645,10 +645,28 @@ impl Explore {
                 let plan = self.plan_to(ctx, start, Goal::Block(goal));
                 match plan.status {
                     // The body already stands on this frontier: it is explored,
-                    // not a goal to walk to (no follower, no goal count).
-                    praxion_planner::PlanStatus::Success if plan.steps.is_empty() => {
+                    // not a goal to walk to (no follower, no goal count). It is
+                    // also the only cell an empty successful plan may name.
+                    praxion_planner::PlanStatus::Success
+                        if plan.steps.is_empty() && empty_plan_is_here(start, goal) =>
+                    {
                         memory.remember(goal);
                         remember(&mut self.explored, goal);
+                    }
+                    // `Goal::Block` means exactly that cell, so an empty plan to
+                    // any other cell cannot be "already there". Treat it as a
+                    // planner fault, reject the cell and keep going: a broken
+                    // empty plan must never freeze explore (seed 101 live run
+                    // 2026-11-08 marked frontiers explored without moving).
+                    praxion_planner::PlanStatus::Success if plan.steps.is_empty() => {
+                        log::warn!(
+                            "explore: empty successful plan from {:?} to {:?}; rejecting the cell",
+                            start,
+                            goal
+                        );
+                        memory.remember(goal);
+                        remember(&mut self.rejected, goal);
+                        self.next_plan_tick = ctx.tick.saturating_add(5);
                     }
                     praxion_planner::PlanStatus::Success
                         if self.allow_water || !plan_crosses_water(&plan) =>
@@ -934,6 +952,15 @@ fn cue_goal(
     nearest(cue_for(target)?, radius)
 }
 
+/// Whether an empty successful plan means the body is already at the goal.
+///
+/// `Goal::Block` names exactly one cell, so the only cell an empty success can
+/// legitimately mean is the start cell. Any other empty success is a planner
+/// fault and the frontier loop rejects it instead of treating it as explored.
+fn empty_plan_is_here(start: BlockPos, goal: BlockPos) -> bool {
+    goal == start
+}
+
 /// Whether a walking plan enters water. `explore` for wood stays on land: a
 /// swim can drown the body, and the skill layer has no safe water handling.
 fn plan_crosses_water(plan: &praxion_planner::Plan) -> bool {
@@ -1121,6 +1148,19 @@ mod tests {
         assert_eq!(cue_for("#stone"), None);
         assert_eq!(cue_for("oak_log"), None, "a block name is not a tag");
         assert_eq!(cue_goal("#logs", sweep_radius, |_, _| None), None);
+    }
+
+    #[test]
+    fn an_empty_plan_is_already_here_only_at_the_start_cell() {
+        // `explore` asks for `Goal::Block`, which means exactly one cell. An
+        // empty successful plan can only mean the body already stands on it;
+        // every other empty success is a planner fault and must be rejected,
+        // not recorded as explored.
+        let start = at(-251, 66, -103);
+        assert!(empty_plan_is_here(start, start));
+        assert!(!empty_plan_is_here(start, at(-250, 66, -103)));
+        assert!(!empty_plan_is_here(start, at(-251, 66, -104)));
+        assert!(!empty_plan_is_here(start, at(-251, 67, -103)));
     }
 
     #[test]

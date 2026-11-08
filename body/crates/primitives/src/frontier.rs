@@ -210,6 +210,16 @@ fn rank_frontiers_inner(
     let mut candidates = 0u32;
     for pos in &reachable {
         let pos = *pos;
+        // The cell the body stands in is never a frontier to walk to. Its head
+        // or a side cell can stay unknown (the view scan skips the eye cell),
+        // so it does touch the unknown map, and distance zero plus the best
+        // tier made it the first candidate on every scan. `explore` then got a
+        // successful empty plan, marked the cell explored and never moved
+        // (seed 101 live run 2026-11-08: 500 scans, 24,000 ticks, no step).
+        // TEMP-VERIFY: the regression test must fail without this guard.
+        // if pos == start {
+        //     continue;
+        // }
         if explored_set.contains(&pos) || rejected_set.contains(&pos) {
             continue;
         }
@@ -526,6 +536,40 @@ mod tests {
             "the count covers the ranked candidates"
         );
         assert!(ranked.len() <= 64, "the list is bounded");
+    }
+
+    #[test]
+    fn the_cell_the_body_stands_in_is_never_a_frontier() {
+        // The body's own head or side cell may stay unknown (the view scan
+        // skips the eye cell), so the start touches the unknown map and used
+        // to be ranked first with the best tier. Walking to where you already
+        // stand is a successful empty plan, so `explore` marked it explored
+        // again on every scan and never moved (seed 101 live run 2026-11-08).
+        let mut map = HashMap::new();
+        platform(&mut map, -1, 1, -1, 1, 64);
+        map.remove(&at(1, 64, 0)); // an unknown cell beside the start
+        for ranked in [
+            rank_frontiers(at(0, 64, 0), 8, 8, &[], &[], known(&map), true),
+            rank_frontiers_from(
+                at(0, 64, 0),
+                at(0, 64, 0),
+                8,
+                8,
+                &[],
+                &[],
+                known(&map),
+                true,
+            ),
+        ] {
+            assert!(
+                ranked.iter().all(|choice| choice.cell != at(0, 64, 0)),
+                "the start is not a walk target: {ranked:?}"
+            );
+            assert!(
+                !ranked.is_empty(),
+                "the edge cells beside the start remain frontiers"
+            );
+        }
     }
 
     #[test]

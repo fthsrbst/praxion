@@ -1204,3 +1204,43 @@ fn a_waterlogged_stair_is_not_a_route_through_water() {
         "a waterlogged block cannot be dug either"
     );
 }
+
+#[test]
+fn a_successful_plan_to_another_cell_always_has_steps() {
+    // An empty successful plan means "already there", which for `Goal::Block`
+    // is only true at the start. A rebuild that loses its route must never
+    // look like that: explore would mark the cell explored and stand still.
+    fn height(x: i32, z: i32) -> i32 {
+        let a = (x as f32 * 0.35).sin() * 2.0;
+        let b = (z as f32 * 0.27).cos() * 2.0;
+        64 + (a + b).round() as i32
+    }
+    let mut world = TestWorld::new();
+    for x in -30..=30 {
+        for z in -30..=30 {
+            let h = height(x, z);
+            for y in 60..=h {
+                world.set(x, y, z, stone());
+            }
+        }
+    }
+    let start = pos(0, height(0, 0) + 1, 0);
+    let state = state_with(&[]);
+    let mut empty_successes = Vec::new();
+    for x in (-24..=24).step_by(3) {
+        for z in (-24..=24).step_by(3) {
+            let goal = pos(x, height(x, z) + 1, z);
+            if goal == start {
+                continue;
+            }
+            let plan = plan_once(&mut world, &state, start, Goal::Block(goal));
+            if plan.status == PlanStatus::Success && plan.steps.is_empty() {
+                empty_successes.push((goal, plan.cost));
+            }
+        }
+    }
+    assert!(
+        empty_successes.is_empty(),
+        "empty successful plans to other cells: {empty_successes:?}"
+    );
+}
