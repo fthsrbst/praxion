@@ -37,7 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"body port {session.port}, run_dir {session.run_dir}", flush=True)
         brain = subprocess.Popen(
             [sys.executable, "-m", "praxion_brain", "run", "--port", str(session.port),
-             "--world", f"seed{args.seed}"],
+             # Each run is a fresh server world: its memory must be too, or
+             # failure blocks from an earlier run leak into this one.
+             "--world", session.run_dir.name],
             cwd=root / "brain",
         )
         deadline = time.monotonic() + args.minutes * 60
