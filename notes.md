@@ -6,6 +6,13 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-08, Claude Opus 5.5: autonomous run 4: the loop closes
+- Fresh seed 404, never played before, built from commit 480ed5a (console + hot load), watched by the user live and in
+  the web console. Seven rungs with no help: wood, crafting table, wooden pickaxe, cobblestone, stone pickaxe, stone
+  sword, and the furnace with `get_furnace`, the skill the brain wrote and admitted itself in run 3 (done in 313 ticks).
+  Gap found -> skill written -> admitted on 4 seeds -> used in a new world: the Demo-2 promise, end to end.
+- Next rung (coal): routed to write again. Background admission (body keeps playing) and the body cancel land next.
+
 ## 2026-11-08, Claude Opus 5.5: autonomous run 3: six rungs, then a self-written skill
 - Brain loop + body port, fresh seed 202, no help: proposer -> Jev/code routing -> body played wood, crafting
   table, wooden pickaxe, 8 cobblestone, stone pickaxe, stone sword (`runs/test-body-7ad57f43c2664f0f86d620b722cbf912`).
