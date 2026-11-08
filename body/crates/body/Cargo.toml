@@ -25,6 +25,7 @@ praxion-interpreter = { path = "../interpreter" }
 praxion-manifest = { path = "../manifest" }
 praxion-perception = { path = "../perception" }
 praxion-planner = { path = "../planner" }
+praxion-port = { path = "../port" }
 praxion-primitives = { path = "../primitives" }
 praxion-receipts = { path = "../receipts" }
 praxion-reflexes = { path = "../reflexes" }
@@ -35,3 +36,6 @@ serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[dev-dependencies]
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }

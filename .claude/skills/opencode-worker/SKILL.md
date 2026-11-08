@@ -114,9 +114,12 @@ Verified under `--auto` on macOS (2026-10-21) and Windows (2026-10-31). Windows 
    updated in the last hour (`OC_REAP_MINUTES`) whose watchdog pid (title suffix) is gone, and lists
    recent sessions without a pid suffix for a manual check. Verified 2026-11-07 (live run skipped,
    finished run reaped).
-3. Verify the result yourself. Exit 0 is not success. Success means the expected diff, no out-of-scope
+3. Run `scripts/oc-reap.sh` after every worker exit, whatever its code: on 2026-11-08 four "finished" sessions
+   kept editing in the service. Before committing a worker's diff, grep it for `TEMP`, commented-out code and
+   `todo!`: a worker stopped mid-verification left a guard commented out ("TEMP-VERIFY") and it was committed.
+4. Verify the result yourself. Exit 0 is not success. Success means the expected diff, no out-of-scope
    changes (`git status --porcelain`), and your own run of the build and tests passing.
-4. Have a different model review non-trivial output before it is committed.
+5. Have a different model review non-trivial output before it is committed.
 
 Parallel runs: two trivial runs in parallel both finished (1 s and 2 s). Heavy parallel load is unmeasured.
 Start with one run at a time and measure before fanning out.

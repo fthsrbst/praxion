@@ -12,6 +12,7 @@ use praxion_body::{
 };
 use praxion_headless::{ConnectOptions, DriverHandle, Event, Session, TICK};
 use praxion_manifest::Manifest;
+use praxion_port::{PortConfig, PortServer};
 use praxion_reflexes::Settings;
 use praxion_rules::check_candidates;
 
@@ -121,7 +122,10 @@ fn run() -> Result<ExitCode, String> {
         }
         Err(error) => return Err(error.to_string()),
     };
-    let goal_args = resolve_goal_args(&program, &args.goal, &args.goal_args)?;
+    let goal_args = match &args.goal {
+        Some(goal) => resolve_goal_args(&program, goal, &args.goal_args)?,
+        None => Vec::new(),
+    };
 
     let settings_file = args
         .settings
@@ -149,9 +153,26 @@ fn run() -> Result<ExitCode, String> {
         .to_owned();
     let shared = Arc::new(Mutex::new(Shared::new(
         run_id,
-        args.goal.clone(),
+        args.goal.clone().unwrap_or_default(),
         args.goal_args.clone(),
     )));
+
+    // The body listens when the brain is in the loop (proposal §2.1). The
+    // driver owns the event, snapshot and command channels; main keeps a
+    // handle to send `bye shutdown` at exit.
+    let port = match args.port {
+        Some(address) => {
+            let config = PortConfig {
+                body: versions.praxion.clone(),
+                run_id: lock(&shared).run_id.clone(),
+            };
+            let server = PortServer::bind(address, config)
+                .map_err(|error| format!("cannot listen on {address}: {error}"))?;
+            eprintln!("praxion-body: brain port on {}", server.local_addr());
+            Some(Arc::new(server))
+        }
+        None => None,
+    };
 
     let driver = BodyDriver::new(
         BodyOptions {
@@ -159,12 +180,14 @@ fn run() -> Result<ExitCode, String> {
             args: goal_args,
             start_delay_ticks: args.start_delay_ticks,
             style_seed: args.style_seed,
+            brain_silence: praxion_body::driver::DEFAULT_BRAIN_SILENCE,
             versions,
         },
         args.run_dir.clone(),
         program,
         settings,
         Arc::clone(&shared),
+        port.clone(),
     )
     .map_err(|error| format!("cannot start the event log: {error}"))?;
     let handle: DriverHandle = Arc::new(Mutex::new(Box::new(driver)));
@@ -181,16 +204,38 @@ fn run() -> Result<ExitCode, String> {
         .map_err(|error| format!("cannot connect through the forwarder: {error}"))?;
     eprintln!(
         "praxion-body: connected to {} through tee {}, goal {}",
-        args.forwarder, args.tee, args.goal
+        args.forwarder,
+        args.tee,
+        args.goal.as_deref().unwrap_or("(brain)")
     );
 
     let linger = Duration::from_millis(args.linger_ticks.saturating_mul(50));
     let mut settled_at: Option<Instant> = None;
+    let port_mode = port.is_some();
+    let mut exit = ExitCode::SUCCESS;
     loop {
         let done = handle.lock().map(|driver| driver.done()).unwrap_or(true);
         let ticks = lock(&shared).ticks;
 
-        if lock(&shared).outcome.is_none() {
+        if port_mode {
+            // A brain session has no single goal: it settles goal after goal.
+            // The process exits on a signal, a disconnect, or the process-wide
+            // tick cap (`--max-ticks`, a safety net, not a goal budget).
+            if let Some(max) = args.max_ticks
+                && ticks >= max
+            {
+                {
+                    let mut shared = lock(&shared);
+                    if shared.outcome.is_none() {
+                        shared.outcome = Some("max_ticks".to_owned());
+                    }
+                }
+                write_summary(&args, &shared);
+                eprintln!("praxion-body: max ticks reached ({ticks})");
+                exit = ExitCode::from(2);
+                break;
+            }
+        } else if lock(&shared).outcome.is_none() {
             if done {
                 // The driver settled the goal and wrote the first summary.
                 settled_at = Some(Instant::now());
@@ -214,9 +259,12 @@ fn run() -> Result<ExitCode, String> {
                     shared.outcome = Some("interrupted".to_owned());
                 }
             }
+            if port_mode {
+                exit = ExitCode::from(3);
+            }
             break;
         }
-        if settled_at.is_some_and(|started| started.elapsed() >= linger) {
+        if !port_mode && settled_at.is_some_and(|started| started.elapsed() >= linger) {
             break;
         }
 
@@ -231,6 +279,11 @@ fn run() -> Result<ExitCode, String> {
             }
             Some(Event::Disconnected(reason)) => {
                 eprintln!("disconnected: {reason}");
+                if port_mode {
+                    // A brain session that loses the game is not a clean end:
+                    // the caller (the harness or the supervisor) must see it.
+                    exit = ExitCode::FAILURE;
+                }
                 break;
             }
             _ => {}
@@ -260,6 +313,10 @@ fn run() -> Result<ExitCode, String> {
 
     session.disconnect();
     let _ = session.recv_event_timeout(DISCONNECT_TIMEOUT);
+    // A clean end tells the brain why the link is closing (proposal §2.2).
+    if let Some(port) = &port {
+        port.shutdown();
+    }
     let outcome = lock(&shared)
         .outcome
         .clone()
@@ -270,6 +327,9 @@ fn run() -> Result<ExitCode, String> {
         .unwrap_or_else(|_| "{}".to_owned());
     println!("{text}");
 
+    if port_mode {
+        return Ok(exit);
+    }
     Ok(match outcome.as_str() {
         "done" => ExitCode::SUCCESS,
         "max_ticks" => ExitCode::from(2),

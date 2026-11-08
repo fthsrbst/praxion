@@ -1,6 +1,7 @@
 //! Praxion's Demo-0 body process: the one binary that wires tee -> decoder ->
 //! world -> perception -> reflexes/arbiter/interpreter -> primitives -> actuator
-//! and plays one goal.
+//! and plays goals. One `--goal` runs as command `cli`; with `--port` the brain
+//! sends commands over the port and the process settles goal after goal.
 //!
 //! The wire is in [`driver`]; the counters and `summary.json` in [`summary`];
 //! paths and version pins in this module; the session loop in `main.rs`.

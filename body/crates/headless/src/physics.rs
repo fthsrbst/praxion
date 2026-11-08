@@ -215,6 +215,15 @@ impl Body {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    /// Set the generation without invalidating a frame. The body driver hands
+    /// the arbiter a mirror of the session's body and restores the owner
+    /// generation into it before every tick: the mirror's counter is a
+    /// per-tick frame token, while the owner generation the brain checks must
+    /// only move forward.
+    pub fn set_generation(&mut self, generation: u32) {
+        self.generation = generation;
+    }
+
     /// Apply a `player_position` (teleport) packet exactly as azalea's packet
     /// handler does: relative flags, then the position becomes the old position.
     pub fn teleport(&mut self, change: &PositionMoveRotation, relative: &RelativeMovements) {

@@ -34,11 +34,13 @@
 //! one `snapshot` at seq S and events with `seq > S` follow.
 //!
 //! The crate is standalone: [`PortServer`] runs the network side on its own
-//! thread, and the driver (wired in step A2) calls [`PortServer::publish`],
+//! thread, and the driver calls [`PortServer::publish`],
 //! [`PortServer::publish_snapshot`] and [`PortServer::poll_incoming`] from its
 //! tick thread. None of them waits for the network: publishing is a bounded
 //! `try_send`, and an overflow is reported with `dropped(n)` followed by a
-//! fresh snapshot.
+//! fresh snapshot. [`forwards`] is the event filter the driver applies before
+//! publishing, and [`PortServer::last_brain_message`] gives it the 3 s silence
+//! rule.
 //!
 //! # Example
 //!
@@ -61,12 +63,36 @@ mod wire;
 
 pub use frame::{FrameError, FrameReader, MAX_FRAME_SIZE, write_frame};
 pub use server::{
-    ConnectionState, PortConfig, PortServer, PortStats, PublishOutcome, DEFAULT_QUEUE_CAPACITY,
+    ConnectionState, DEFAULT_QUEUE_CAPACITY, PortConfig, PortServer, PortStats, PublishOutcome,
 };
 pub use wire::{
     BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, Snapshot,
     StackEntry,
 };
+
+/// Whether one event-log line is forwarded to the brain (proposal §2.2).
+///
+/// The filter is deliberately narrow: the brain needs the intent lifecycle,
+/// the owner changes, wakes, command receipts and the root skill frame. High
+/// rate evidence (`rule_selected`, `primitive_finished`, `explore_frontier`,
+/// receipt and ledger lines) stays in `events.jsonl` for the post-hoc digest.
+pub fn forwards(event: &praxion_eventlog::EventKind) -> bool {
+    use praxion_eventlog::EventKind;
+    match event {
+        EventKind::IntentPushed { .. }
+        | EventKind::IntentState { .. }
+        | EventKind::OwnerChanged { .. }
+        | EventKind::ReplanNeeded { .. }
+        | EventKind::WakeBrain { .. }
+        | EventKind::CommandReceipt { .. }
+        | EventKind::RunStarted { .. } => true,
+        // Notes are debug text (the gaze writes one almost every tick); they
+        // filled the 256-message queue and a goal's `settled` receipt was lost
+        // in the overflow (live port test 2026-11-08). The brain never reads them.
+        EventKind::SkillFrame { depth, .. } => *depth == 1,
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests;

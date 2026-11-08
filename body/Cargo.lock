@@ -2131,6 +2131,7 @@ dependencies = [
 name = "praxion-body"
 version = "0.0.0"
 dependencies = [
+ "azalea-registry",
  "env_logger",
  "log",
  "praxion-arbiter",
@@ -2141,6 +2142,7 @@ dependencies = [
  "praxion-manifest",
  "praxion-perception",
  "praxion-planner",
+ "praxion-port",
  "praxion-primitives",
  "praxion-receipts",
  "praxion-reflexes",

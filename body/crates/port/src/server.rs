@@ -6,7 +6,7 @@
 
 use std::io::{self, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -109,7 +109,7 @@ pub struct PortStats {
 pub struct PortServer {
     local_addr: SocketAddr,
     outbound: SyncSender<Event>,
-    incoming: Receiver<BrainMessage>,
+    incoming: Mutex<Receiver<BrainMessage>>,
     shared: Arc<Shared>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -151,21 +151,14 @@ impl PortServer {
             thread::Builder::new()
                 .name("praxion-port-accept".to_owned())
                 .spawn(move || {
-                    accept_loop(
-                        listener,
-                        config,
-                        shared,
-                        outbound_rx,
-                        incoming_tx,
-                        shutdown,
-                    );
+                    accept_loop(listener, config, shared, outbound_rx, incoming_tx, shutdown);
                 })?
         };
 
         Ok(Self {
             local_addr,
             outbound,
-            incoming,
+            incoming: Mutex::new(incoming),
             shared,
             shutdown,
             thread: Some(thread),
@@ -182,7 +175,29 @@ impl PortServer {
     /// Never blocks. The result holds `command` and `pop` messages only; the
     /// handshake, `ping` and `resync_request` are handled by the port itself.
     pub fn poll_incoming(&self) -> Vec<BrainMessage> {
-        self.incoming.try_iter().collect()
+        self.incoming
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .try_iter()
+            .collect()
+    }
+
+    /// When the brain last sent anything, including a `ping`.
+    ///
+    /// The driver logs `brain_silent` after the 3 s silence rule (proposal
+    /// §2.5). `None` means no brain has completed the handshake yet.
+    pub fn last_brain_message(&self) -> Option<Instant> {
+        *self
+            .shared
+            .last_brain
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Ask the connection thread to send `bye { reason: "shutdown" }` and stop
+    /// accepting. Idempotent; dropping the server still joins the threads.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
     }
 
     /// Queue one event-log event. Never waits for the network.
@@ -192,12 +207,19 @@ impl PortServer {
     /// lock (the connection thread holds it only to swap counters) and returns
     /// [`PublishOutcome::Dropped`].
     pub fn publish(&self, event: Event) -> PublishOutcome {
-        self.shared.latest_seq.fetch_max(event.seq, Ordering::Relaxed);
+        self.shared
+            .latest_seq
+            .fetch_max(event.seq, Ordering::Relaxed);
         self.shared.latest_tick.store(event.tick, Ordering::Relaxed);
         match self.outbound.try_send(event) {
             Ok(()) => PublishOutcome::Queued,
             Err(TrySendError::Full(dropped)) => {
-                self.shared.record_drop(dropped.seq);
+                // With no brain connected there is nobody to resynchronise:
+                // recording the drop would leave `needs_snapshot` true forever
+                // and rebuild a snapshot on every tick (review of A2-A3, 7).
+                if self.connection_state() == ConnectionState::Connected {
+                    self.shared.record_drop(dropped.seq);
+                }
                 PublishOutcome::Dropped
             }
             // The network thread is gone: the server is shutting down.
@@ -211,7 +233,11 @@ impl PortServer {
     /// settled command, and whenever [`PortServer::needs_snapshot`] is true.
     /// `snapshot.seq` must be the event-log `seq` the state reflects.
     pub fn publish_snapshot(&self, snapshot: Snapshot) {
-        let mut slot = self.shared.snapshot.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut slot = self
+            .shared
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         *slot = Some(snapshot);
         drop(slot);
         self.shared.snapshot_owed.store(true, Ordering::Release);
@@ -268,28 +294,51 @@ struct Shared {
     latest_tick: AtomicU64,
     snapshot_owed: AtomicBool,
     state: AtomicU8,
+    /// When the brain last sent anything. The driver reads it for the silence
+    /// rule; `None` until a handshake completed.
+    last_brain: Mutex<Option<Instant>>,
 }
 
 impl Shared {
     fn new() -> Self {
         Self {
             snapshot: Mutex::new(None),
-            pending: Mutex::new(Pending { dropped: 0, floor: 0, resync: false }),
+            pending: Mutex::new(Pending {
+                dropped: 0,
+                floor: 0,
+                resync: false,
+            }),
             latest_seq: AtomicU64::new(0),
             latest_tick: AtomicU64::new(0),
             snapshot_owed: AtomicBool::new(false),
             state: AtomicU8::new(ConnectionState::Disconnected.as_raw()),
+            last_brain: Mutex::new(None),
         }
     }
 
+    /// Any message from the brain counts as liveness (proposal §2.5).
+    fn note_brain_message(&self) {
+        let mut last = self
+            .last_brain
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *last = Some(Instant::now());
+    }
+
     fn latest_snapshot(&self) -> Option<Snapshot> {
-        self.snapshot.lock().unwrap_or_else(|poison| poison.into_inner()).clone()
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// Record that an event was discarded. The next snapshot must be at or
     /// after this event's `seq` for the brain to recover.
     fn record_drop(&self, seq: u64) {
-        let mut pending = self.pending.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         pending.dropped += 1;
         pending.floor = pending.floor.max(seq);
         pending.resync = true;
@@ -297,24 +346,36 @@ impl Shared {
 
     /// A `resync_request` cuts at the last event the brain has seen.
     fn request_resync(&self, last_sent: u64) {
-        let mut pending = self.pending.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         pending.floor = pending.floor.max(last_sent);
         pending.resync = true;
     }
 
     fn needs_snapshot(&self) -> bool {
-        self.pending.lock().unwrap_or_else(|poison| poison.into_inner()).resync
+        self.pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .resync
     }
 
     fn dropped(&self) -> u64 {
-        self.pending.lock().unwrap_or_else(|poison| poison.into_inner()).dropped
+        self.pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .dropped
     }
 
     /// Take the pending drop count and clear the request, but only when
     /// `snapshot_seq` covers every discarded event. `None` means "send
     /// nothing yet; wait for a newer snapshot".
     fn take_resync(&self, snapshot_seq: u64) -> Option<u64> {
-        let mut pending = self.pending.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if !pending.resync || snapshot_seq < pending.floor {
             return None;
         }
@@ -328,8 +389,15 @@ impl Shared {
     /// A new connection starts from its own baseline: old drops are covered by
     /// the snapshot the connection opens with.
     fn reset_resync(&self) {
-        let mut pending = self.pending.lock().unwrap_or_else(|poison| poison.into_inner());
-        *pending = Pending { dropped: 0, floor: 0, resync: false };
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *pending = Pending {
+            dropped: 0,
+            floor: 0,
+            resync: false,
+        };
         self.snapshot_owed.store(false, Ordering::Release);
     }
 }
@@ -368,7 +436,9 @@ fn accept_loop(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        if connection.as_ref().is_some_and(|live| live.handle.is_finished())
+        if connection
+            .as_ref()
+            .is_some_and(|live| live.handle.is_finished())
             && let Some(finished) = connection.take()
         {
             let _ = finished.handle.join();
@@ -416,11 +486,17 @@ fn serve_connection(stream: TcpStream, session: Session) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(READ_POLL));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-    session.shared.state.store(ConnectionState::Handshaking.as_raw(), Ordering::Release);
+    session
+        .shared
+        .state
+        .store(ConnectionState::Handshaking.as_raw(), Ordering::Release);
 
     let _ = pump(stream, &session);
 
-    session.shared.state.store(ConnectionState::Disconnected.as_raw(), Ordering::Release);
+    session
+        .shared
+        .state
+        .store(ConnectionState::Disconnected.as_raw(), Ordering::Release);
 }
 
 fn pump(stream: TcpStream, session: &Session) -> Result<(), FrameError> {
@@ -434,19 +510,25 @@ fn pump(stream: TcpStream, session: &Session) -> Result<(), FrameError> {
     session.shared.reset_resync();
 
     // The body speaks first (proposal §2.1).
-    write_frame(&mut writer, &BodyMessage::Hello {
-        port_version: PORT_VERSION,
-        caps: vec![Capability::Command, Capability::Snapshot, Capability::Pop],
-        body: session.config.body.clone(),
-        run_id: session.config.run_id.clone(),
-    })?;
+    write_frame(
+        &mut writer,
+        &BodyMessage::Hello {
+            port_version: PORT_VERSION,
+            caps: vec![Capability::Command, Capability::Snapshot, Capability::Pop],
+            body: session.config.body.clone(),
+            run_id: session.config.run_id.clone(),
+        },
+    )?;
 
     let handshake_started = Instant::now();
     let first = loop {
         if session.replaced.load(Ordering::Acquire) {
-            let _ = write_frame(&mut writer, &BodyMessage::Bye {
-                reason: ByeReason::Replaced,
-            });
+            let _ = write_frame(
+                &mut writer,
+                &BodyMessage::Bye {
+                    reason: ByeReason::Replaced,
+                },
+            );
             return Ok(());
         }
         match reader.read_json::<BrainMessage>() {
@@ -454,16 +536,22 @@ fn pump(stream: TcpStream, session: &Session) -> Result<(), FrameError> {
             Ok(None) => return Ok(()),
             Err(error) if error.is_incomplete() => {
                 if handshake_started.elapsed() >= HANDSHAKE_TIMEOUT {
-                    let _ = write_frame(&mut writer, &BodyMessage::Bye {
-                        reason: ByeReason::Protocol,
-                    });
+                    let _ = write_frame(
+                        &mut writer,
+                        &BodyMessage::Bye {
+                            reason: ByeReason::Protocol,
+                        },
+                    );
                     return Ok(());
                 }
             }
             Err(_) => {
-                let _ = write_frame(&mut writer, &BodyMessage::Bye {
-                    reason: ByeReason::Protocol,
-                });
+                let _ = write_frame(
+                    &mut writer,
+                    &BodyMessage::Bye {
+                        reason: ByeReason::Protocol,
+                    },
+                );
                 return Ok(());
             }
         }
@@ -472,32 +560,54 @@ fn pump(stream: TcpStream, session: &Session) -> Result<(), FrameError> {
     match first {
         BrainMessage::Hello { port_version } if port_version == PORT_VERSION => {}
         BrainMessage::Hello { .. } => {
-            let _ = write_frame(&mut writer, &BodyMessage::Bye { reason: ByeReason::Version });
+            let _ = write_frame(
+                &mut writer,
+                &BodyMessage::Bye {
+                    reason: ByeReason::Version,
+                },
+            );
             return Ok(());
         }
         _ => {
-            let _ = write_frame(&mut writer, &BodyMessage::Bye { reason: ByeReason::Protocol });
+            let _ = write_frame(
+                &mut writer,
+                &BodyMessage::Bye {
+                    reason: ByeReason::Protocol,
+                },
+            );
             return Ok(());
         }
     }
 
+    session.shared.note_brain_message();
     let initial = session.shared.latest_snapshot();
     let mut sent_seq = None;
     if let Some(snapshot) = initial {
         write_frame(&mut writer, &BodyMessage::Snapshot(snapshot.clone()))?;
         sent_seq = Some(snapshot.seq);
     }
-    session.shared.state.store(ConnectionState::Connected.as_raw(), Ordering::Release);
+    session
+        .shared
+        .state
+        .store(ConnectionState::Connected.as_raw(), Ordering::Release);
 
     loop {
         if session.replaced.load(Ordering::Acquire) {
-            let _ = write_frame(&mut writer, &BodyMessage::Bye {
-                reason: ByeReason::Replaced,
-            });
+            let _ = write_frame(
+                &mut writer,
+                &BodyMessage::Bye {
+                    reason: ByeReason::Replaced,
+                },
+            );
             return Ok(());
         }
         if session.shutdown.load(Ordering::Acquire) {
-            let _ = write_frame(&mut writer, &BodyMessage::Bye { reason: ByeReason::Shutdown });
+            let _ = write_frame(
+                &mut writer,
+                &BodyMessage::Bye {
+                    reason: ByeReason::Shutdown,
+                },
+            );
             return Ok(());
         }
 
@@ -548,12 +658,16 @@ fn handle_brain_message(
     incoming: &SyncSender<BrainMessage>,
     last_sent: Option<u64>,
 ) -> Result<bool, FrameError> {
+    shared.note_brain_message();
     match message {
         BrainMessage::Ping => {
-            write_frame(writer, &BodyMessage::Pong {
-                seq: shared.latest_seq.load(Ordering::Relaxed),
-                tick: shared.latest_tick.load(Ordering::Relaxed),
-            })?;
+            write_frame(
+                writer,
+                &BodyMessage::Pong {
+                    seq: shared.latest_seq.load(Ordering::Relaxed),
+                    tick: shared.latest_tick.load(Ordering::Relaxed),
+                },
+            )?;
         }
         BrainMessage::ResyncRequest => {
             // The snapshot may cut at the last event the brain has seen: the
@@ -591,18 +705,24 @@ fn service_snapshot(
 
     if let Some(dropped) = shared.take_resync(snapshot.seq) {
         if dropped > 0 {
-            write_frame(writer, &BodyMessage::Dropped {
-                seq: shared.latest_seq.load(Ordering::Relaxed),
-                n: dropped,
-            })?;
+            write_frame(
+                writer,
+                &BodyMessage::Dropped {
+                    seq: shared.latest_seq.load(Ordering::Relaxed),
+                    n: dropped,
+                },
+            )?;
         }
         write_frame(writer, &BodyMessage::Snapshot(snapshot.clone()))?;
         *sent_seq = Some(sent_seq.map_or(snapshot.seq, |sent| sent.max(snapshot.seq)));
-    } else if owed
-        && !shared.needs_snapshot()
-        && snapshot.seq >= sent_seq.unwrap_or(0)
-    {
-        // A wake snapshot: it must not rewind the brain below an event it has.
+    } else if owed && !shared.needs_snapshot() && snapshot.seq >= sent_seq.unwrap_or(0) {
+        // A wake snapshot must not rewind the brain below an event it has, and
+        // must not swallow an event it has not been sent yet: cut it at the
+        // last sent event, so the queued receipts still follow it.
+        let mut snapshot = snapshot.clone();
+        if let Some(sent) = *sent_seq {
+            snapshot.seq = sent;
+        }
         write_frame(writer, &BodyMessage::Snapshot(snapshot.clone()))?;
         *sent_seq = Some(sent_seq.map_or(snapshot.seq, |sent| sent.max(snapshot.seq)));
     }
@@ -617,7 +737,10 @@ fn service_events(
     session: &Session,
     sent_seq: &mut Option<u64>,
 ) -> Result<bool, FrameError> {
-    let outbound = session.outbound.lock().unwrap_or_else(|poison| poison.into_inner());
+    let outbound = session
+        .outbound
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     if session.shared.needs_snapshot() {
         while let Ok(event) = outbound.try_recv() {
@@ -632,7 +755,9 @@ fn service_events(
                 if sent_seq.is_some_and(|sent| event.seq <= sent) {
                     continue;
                 }
-                let Event { seq, tick, event, .. } = event;
+                let Event {
+                    seq, tick, event, ..
+                } = event;
                 write_frame(writer, &BodyMessage::Event { seq, tick, event })?;
                 *sent_seq = Some(sent_seq.map_or(seq, |sent| sent.max(seq)));
             }

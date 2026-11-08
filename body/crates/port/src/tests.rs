@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use praxion_eventlog::{Event, EventKind};
 
+use crate::forwards;
 use crate::frame::{FrameError, FrameReader, MAX_FRAME_SIZE, write_frame, write_payload};
 use crate::server::{ConnectionState, PortConfig, PortServer, PublishOutcome};
 use crate::wire::{
@@ -17,7 +18,10 @@ use crate::wire::{
 };
 
 fn config() -> PortConfig {
-    PortConfig { body: "praxion test".to_owned(), run_id: "run-1".to_owned() }
+    PortConfig {
+        body: "praxion test".to_owned(),
+        run_id: "run-1".to_owned(),
+    }
 }
 
 fn server() -> PortServer {
@@ -29,7 +33,9 @@ fn event(seq: u64, tick: u64) -> Event {
         seq,
         tick,
         ts_ns: seq * 1_000,
-        event: EventKind::Note { text: format!("event {seq}") },
+        event: EventKind::Note {
+            text: format!("event {seq}"),
+        },
     }
 }
 
@@ -81,23 +87,33 @@ impl Brain {
     fn connect(server: &PortServer) -> Self {
         let stream = TcpStream::connect(server.local_addr()).unwrap();
         stream.set_nodelay(true).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let reader = FrameReader::new(stream.try_clone().unwrap());
-        let mut brain = Self { writer: stream, reader };
+        let mut brain = Self {
+            writer: stream,
+            reader,
+        };
         // The body speaks first (proposal §2.1).
         match brain.receive() {
-            BodyMessage::Hello { port_version, caps, .. } => {
+            BodyMessage::Hello {
+                port_version, caps, ..
+            } => {
                 assert_eq!(port_version, PORT_VERSION);
-                assert_eq!(caps, vec![
-                    Capability::Command,
-                    Capability::Snapshot,
-                    Capability::Pop
-                ]);
+                assert_eq!(
+                    caps,
+                    vec![Capability::Command, Capability::Snapshot, Capability::Pop]
+                );
             }
             other => panic!("expected hello, got {other:?}"),
         }
-        brain.send(&BrainMessage::Hello { port_version: PORT_VERSION });
+        brain.send(&BrainMessage::Hello {
+            port_version: PORT_VERSION,
+        });
         brain
     }
 
@@ -269,7 +285,9 @@ fn every_message_round_trips() {
         BodyMessage::Snapshot(snapshot(5)),
         BodyMessage::Dropped { seq: 5, n: 3 },
         BodyMessage::Pong { seq: 5, tick: 6 },
-        BodyMessage::Bye { reason: ByeReason::Shutdown },
+        BodyMessage::Bye {
+            reason: ByeReason::Shutdown,
+        },
     ];
     for message in body {
         let json = serde_json::to_string(&message).unwrap();
@@ -277,7 +295,9 @@ fn every_message_round_trips() {
     }
 
     let brain = [
-        BrainMessage::Hello { port_version: PORT_VERSION },
+        BrainMessage::Hello {
+            port_version: PORT_VERSION,
+        },
         BrainMessage::Command(Command {
             id: "c-1".to_owned(),
             skill: "s".to_owned(),
@@ -288,13 +308,19 @@ fn every_message_round_trips() {
             condition: None,
             budget_ticks: None,
         }),
-        BrainMessage::Pop { id: "c-2".to_owned(), intent_id: 3 },
+        BrainMessage::Pop {
+            id: "c-2".to_owned(),
+            intent_id: 3,
+        },
         BrainMessage::ResyncRequest,
         BrainMessage::Ping,
     ];
     for message in brain {
         let json = serde_json::to_string(&message).unwrap();
-        assert_eq!(serde_json::from_str::<BrainMessage>(&json).unwrap(), message);
+        assert_eq!(
+            serde_json::from_str::<BrainMessage>(&json).unwrap(),
+            message
+        );
     }
 }
 
@@ -311,7 +337,9 @@ fn the_handshake_succeeds() {
 fn a_version_mismatch_is_refused() {
     let server = server();
     let stream = TcpStream::connect(server.local_addr()).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut reader = FrameReader::new(stream.try_clone().unwrap());
     let mut writer = stream;
 
@@ -320,10 +348,18 @@ fn a_version_mismatch_is_refused() {
         reader.read_json::<BodyMessage>().unwrap(),
         Some(BodyMessage::Hello { .. })
     ));
-    write_frame(&mut writer, &BrainMessage::Hello { port_version: PORT_VERSION + 1 }).unwrap();
+    write_frame(
+        &mut writer,
+        &BrainMessage::Hello {
+            port_version: PORT_VERSION + 1,
+        },
+    )
+    .unwrap();
     assert_eq!(
         reader.read_json::<BodyMessage>().unwrap(),
-        Some(BodyMessage::Bye { reason: ByeReason::Version })
+        Some(BodyMessage::Bye {
+            reason: ByeReason::Version
+        })
     );
     assert_eq!(reader.read_json::<BodyMessage>().unwrap(), None);
 }
@@ -332,7 +368,9 @@ fn a_version_mismatch_is_refused() {
 fn a_first_frame_that_is_not_hello_gets_a_protocol_bye() {
     let server = server();
     let stream = TcpStream::connect(server.local_addr()).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut reader = FrameReader::new(stream.try_clone().unwrap());
     let mut writer = stream;
 
@@ -343,7 +381,9 @@ fn a_first_frame_that_is_not_hello_gets_a_protocol_bye() {
     write_frame(&mut writer, &BrainMessage::Ping).unwrap();
     assert_eq!(
         reader.read_json::<BodyMessage>().unwrap(),
-        Some(BodyMessage::Bye { reason: ByeReason::Protocol })
+        Some(BodyMessage::Bye {
+            reason: ByeReason::Protocol
+        })
     );
     assert_eq!(reader.read_json::<BodyMessage>().unwrap(), None);
 }
@@ -357,14 +397,19 @@ fn a_second_brain_replaces_the_first() {
     let mut second = Brain::connect(&server);
     assert_eq!(
         first.receive(),
-        BodyMessage::Bye { reason: ByeReason::Replaced }
+        BodyMessage::Bye {
+            reason: ByeReason::Replaced
+        }
     );
     assert_eq!(first.reader.read_json::<BodyMessage>().unwrap(), None);
     wait_for(|| server.connection_state() == ConnectionState::Connected);
 
     server.publish(event(4, 9));
     let message = second.receive();
-    assert!(matches!(message, BodyMessage::Event { seq: 4, .. }), "{message:?}");
+    assert!(
+        matches!(message, BodyMessage::Event { seq: 4, .. }),
+        "{message:?}"
+    );
     assert_eq!(server.connection_state(), ConnectionState::Connected);
 }
 
@@ -374,7 +419,10 @@ fn events_arrive_in_seq_order_and_commands_reach_the_driver() {
     let mut brain = Brain::connect(&server);
 
     for seq in 0..10 {
-        assert_eq!(server.publish(event(seq, 100 + seq)), PublishOutcome::Queued);
+        assert_eq!(
+            server.publish(event(seq, 100 + seq)),
+            PublishOutcome::Queued
+        );
     }
     for seq in 0..10 {
         match brain.receive() {
@@ -458,7 +506,14 @@ fn a_resync_request_is_answered_with_a_snapshot_then_deltas() {
     server.publish(event(6, 60));
     let message = brain.receive_until(|message| matches!(message, BodyMessage::Event { .. }));
     assert!(
-        matches!(message, BodyMessage::Event { seq: 6, tick: 60, .. }),
+        matches!(
+            message,
+            BodyMessage::Event {
+                seq: 6,
+                tick: 60,
+                ..
+            }
+        ),
         "expected event 6, got {message:?}"
     );
 }
@@ -486,20 +541,128 @@ fn a_brain_can_reconnect_after_a_drop() {
     server.publish(event(2, 3));
     assert!(matches!(
         second.receive(),
-        BodyMessage::Event { seq: 2, tick: 3, .. }
+        BodyMessage::Event {
+            seq: 2,
+            tick: 3,
+            ..
+        }
     ));
     assert_eq!(server.connection_state(), ConnectionState::Connected);
 }
 
 #[test]
-fn publish_never_blocks_when_the_queue_is_full() {
+fn only_the_forwarded_kinds_cross_the_port() {
+    assert!(forwards(&EventKind::CommandReceipt {
+        command_id: "c-1".to_owned(),
+        state: "accepted".to_owned(),
+        intent_id: Some(1),
+        generation: Some(2),
+        outcome: None,
+        failure_kind: None,
+        reason: None,
+        condition: None,
+    }));
+    assert!(forwards(&EventKind::OwnerChanged {
+        generation: 2,
+        owner: "skill:1".to_owned(),
+    }));
+    assert!(forwards(&EventKind::SkillFrame {
+        skill: "root".to_owned(),
+        depth: 1,
+        outcome: "pushed".to_owned(),
+        failure_kind: None,
+    }));
+    assert!(!forwards(&EventKind::SkillFrame {
+        skill: "child".to_owned(),
+        depth: 2,
+        outcome: "pushed".to_owned(),
+        failure_kind: None,
+    }));
+    assert!(!forwards(&EventKind::RuleSelected {
+        skill: "root".to_owned(),
+        rule: 0,
+    }));
+    assert!(!forwards(&EventKind::PrimitiveFinished {
+        primitive: "mine".to_owned(),
+        args: vec![],
+        outcome: "confirmed".to_owned(),
+        failure_kind: None,
+        ticks: 4,
+    }));
+    assert!(!forwards(&EventKind::ReceiptSettled {
+        receipt_id: 1,
+        intent_id: 1,
+        outcome: praxion_eventlog::Outcome::Confirmed,
+        evidence: vec![],
+        note: None,
+    }));
+    assert!(!forwards(&EventKind::Ledger {
+        query: "q".to_owned(),
+        fact: "f".to_owned(),
+        count: 1,
+        first_tick: 1,
+        last_tick: 2,
+    }));
+    // Debug notes flooded the queue and lost a receipt.
+    assert!(!forwards(&EventKind::Note {
+        text: "look yaw=1.2".to_owned(),
+    }));
+}
+
+#[test]
+fn any_brain_message_moves_the_liveness_clock() {
+    let server = server();
+    assert!(server.last_brain_message().is_none());
+    let mut brain = Brain::connect(&server);
+    wait_for(|| server.last_brain_message().is_some());
+    let first = server.last_brain_message().expect("the hello counts");
+    brain.send(&BrainMessage::Ping);
+    wait_for(|| server.last_brain_message() != Some(first));
+}
+
+#[test]
+fn a_wake_snapshot_does_not_swallow_a_queued_event() {
+    let server = server();
+    let mut brain = Brain::connect(&server);
+    server.publish(event(1, 10));
+    assert!(matches!(brain.receive(), BodyMessage::Event { seq: 1, .. }));
+
+    // The driver logs event 2 and publishes a state that already covers it in
+    // the same tick. The brain has only seen seq 1, so the wake snapshot must
+    // be cut there and event 2 must follow.
+    server.publish_snapshot(snapshot(2));
+    server.publish(event(2, 20));
+
+    let mut wake_seq = None;
+    let mut saw_event_two = false;
+    for _ in 0..3 {
+        match brain.receive() {
+            BodyMessage::Snapshot(state) => wake_seq = Some(state.seq),
+            BodyMessage::Event { seq: 2, .. } => {
+                saw_event_two = true;
+                break;
+            }
+            BodyMessage::Event { seq: 1, .. } => {}
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+    assert!(saw_event_two, "the queued event must follow the wake snapshot");
+    if let Some(seq) = wake_seq {
+        assert!(seq <= 1, "the wake snapshot is cut at the last sent event, got {seq}");
+    }
+}
+
+#[test]
+fn a_full_queue_with_no_brain_never_asks_for_a_snapshot() {
     // Capacity 1 and no connection: the second event cannot be queued and is
-    // counted instead of waiting for the network.
+    // dropped without waiting for the network. Nobody is connected to resync,
+    // so the drop must not leave `needs_snapshot` set forever.
     let server =
         PortServer::bind_with_capacity("127.0.0.1:0".parse().unwrap(), config(), 1).unwrap();
     assert_eq!(server.publish(event(0, 1)), PublishOutcome::Queued);
     assert_eq!(server.publish(event(1, 2)), PublishOutcome::Dropped);
-    assert!(server.needs_snapshot());
+    assert!(!server.needs_snapshot());
+    assert_eq!(server.stats().dropped, 0);
 }
 
 // --------------------------------------------------------------------------- //
@@ -547,16 +710,37 @@ fn body_golden_frames() -> Vec<(&'static str, BodyMessage)> {
         ),
         ("rust_snapshot.bin", BodyMessage::Snapshot(snapshot(3))),
         ("rust_dropped.bin", BodyMessage::Dropped { seq: 812, n: 37 }),
-        ("rust_pong.bin", BodyMessage::Pong { seq: 812, tick: 4521 }),
-        ("rust_bye_replaced.bin", BodyMessage::Bye { reason: ByeReason::Replaced }),
-        ("rust_bye_protocol.bin", BodyMessage::Bye { reason: ByeReason::Protocol }),
+        (
+            "rust_pong.bin",
+            BodyMessage::Pong {
+                seq: 812,
+                tick: 4521,
+            },
+        ),
+        (
+            "rust_bye_replaced.bin",
+            BodyMessage::Bye {
+                reason: ByeReason::Replaced,
+            },
+        ),
+        (
+            "rust_bye_protocol.bin",
+            BodyMessage::Bye {
+                reason: ByeReason::Protocol,
+            },
+        ),
     ]
 }
 
 /// Frames the Python client writes for the same scenarios.
 fn brain_golden_frames() -> Vec<(&'static str, BrainMessage)> {
     vec![
-        ("brain_hello.bin", BrainMessage::Hello { port_version: PORT_VERSION }),
+        (
+            "brain_hello.bin",
+            BrainMessage::Hello {
+                port_version: PORT_VERSION,
+            },
+        ),
         (
             "brain_command.bin",
             BrainMessage::Command(Command {
@@ -570,7 +754,13 @@ fn brain_golden_frames() -> Vec<(&'static str, BrainMessage)> {
                 budget_ticks: Some(6000),
             }),
         ),
-        ("brain_pop.bin", BrainMessage::Pop { id: "c-0008".to_owned(), intent_id: 3 }),
+        (
+            "brain_pop.bin",
+            BrainMessage::Pop {
+                id: "c-0008".to_owned(),
+                intent_id: 3,
+            },
+        ),
         ("brain_resync_request.bin", BrainMessage::ResyncRequest),
         ("brain_ping.bin", BrainMessage::Ping),
     ]
@@ -606,7 +796,10 @@ fn python_brain_frames_replay_exactly() {
             .read_json::<BrainMessage>()
             .unwrap()
             .unwrap_or_else(|| panic!("{name} holds no frame"));
-        assert_eq!(message, expected, "{name} does not decode to the expected message");
+        assert_eq!(
+            message, expected,
+            "{name} does not decode to the expected message"
+        );
         assert_eq!(
             reader.read_json::<BrainMessage>().unwrap(),
             None,
@@ -614,7 +807,9 @@ fn python_brain_frames_replay_exactly() {
         );
         let mut reencoded = Vec::new();
         write_frame(&mut reencoded, &message).unwrap();
-        assert_eq!(reencoded, golden, "{name} is not canonical for the Rust decoder");
+        assert_eq!(
+            reencoded, golden,
+            "{name} is not canonical for the Rust decoder"
+        );
     }
 }
-

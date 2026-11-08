@@ -34,6 +34,17 @@ pub struct StageTimes {
     pub max_ms: f64,
 }
 
+/// One settled command, for the summary's `goals` list.
+#[derive(Clone, Debug, Serialize)]
+pub struct GoalResult {
+    /// The brain's command id, or `cli` for a `--goal` run.
+    pub command_id: String,
+    pub skill: String,
+    pub args: Vec<String>,
+    /// `done` or `failed(...)`.
+    pub outcome: String,
+}
+
 /// The counters shared by the driver (in the session thread) and the process
 /// (the event loop). A mutex, not atomics: the driver writes every tick and the
 /// process reads a few times a second.
@@ -44,6 +55,10 @@ pub struct Shared {
     pub args: Vec<String>,
     /// `None` while the goal is still running.
     pub outcome: Option<String>,
+    /// One entry per settled command, oldest first. The top-level [`Summary`]
+    /// `goal` stays the last one, so a harness that waits for `goal.outcome`
+    /// keeps working in a multi-goal process.
+    pub goals: Vec<GoalResult>,
     /// Client ticks observed, as `tick + 1`.
     pub ticks: u64,
     pub work_ns: Vec<u64>,
@@ -65,6 +80,7 @@ impl Shared {
             skill: skill.into(),
             args,
             outcome: None,
+            goals: Vec::new(),
             ticks: 0,
             work_ns: Vec::new(),
             period_ns: Vec::new(),
@@ -115,6 +131,8 @@ pub struct SessionSummary {
 pub struct Summary {
     pub run_id: String,
     pub goal: Goal,
+    /// One entry per settled command, oldest first. `goal` is the last one.
+    pub goals: Vec<GoalResult>,
     pub ticks: u64,
     pub tick_time: TickTimes,
     /// Per-stage wall time, by stage name.
@@ -150,6 +168,7 @@ pub fn summary(shared: &Shared) -> Summary {
                 .clone()
                 .unwrap_or_else(|| "running".to_owned()),
         },
+        goals: shared.goals.clone(),
         ticks: shared.ticks,
         tick_time: TickTimes {
             samples: work.len() as u64,

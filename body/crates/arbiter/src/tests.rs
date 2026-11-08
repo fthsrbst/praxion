@@ -17,7 +17,7 @@ use praxion_reflexes::{
 use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::Vec3;
 
-use crate::{Arbiter, ArbiterTick, IntentState, NeedKind, Needs, Owner, Tier};
+use crate::{Arbiter, ArbiterTick, CommandError, IntentState, NeedKind, Needs, Owner, Tier};
 
 // ---------------------------------------------------------------------------
 // Mock interpreter world
@@ -500,6 +500,28 @@ fn a_new_command_suspends_the_old_one() {
 }
 
 #[test]
+fn end_command_is_idempotent_for_an_already_done_intent() {
+    let mut rig = Rig::new(continuous_program());
+    rig.command("work");
+
+    let first = rig.arbiter.end_command(1, &mut rig.body, 1);
+    assert!(
+        first.iter().any(|event| matches!(
+            event,
+            EventKind::IntentState { intent_id: 1, state } if state == "done"
+        )),
+        "{first:?}"
+    );
+    assert_eq!(*rig.arbiter.owner(), Owner::Idle);
+
+    let second = rig.arbiter.end_command(1, &mut rig.body, 2);
+    assert!(
+        second.is_empty(),
+        "a second end_command must not re-emit done: {second:?}"
+    );
+}
+
+#[test]
 fn a_refused_skill_leaves_no_intent_behind() {
     // The push happens before the skill starts, so a refused skill must roll
     // its entry back: an intent without a running skill would own the body.
@@ -519,7 +541,10 @@ fn a_refused_skill_leaves_no_intent_behind() {
             Vec::<ArgValue>::new(),
         )
         .unwrap_err();
-    assert!(refusal.contains("no_such_skill"), "{refusal}");
+    assert!(
+        matches!(&refusal, CommandError::Skill(message) if message.contains("no_such_skill")),
+        "{refusal:?}"
+    );
     assert_eq!(rig.arbiter.stack().depth(), depth, "the push was rolled back");
     assert_eq!(
         rig.arbiter.stack().running().map(|entry| entry.skill_ref.as_str()),
@@ -549,7 +574,7 @@ fn a_full_intent_stack_refuses_before_starting_the_skill() {
             Vec::<ArgValue>::new(),
         )
         .unwrap_err();
-    assert!(refusal.contains("full"), "{refusal}");
+    assert_eq!(refusal, CommandError::StackFull);
     assert_eq!(rig.arbiter.stack().depth(), 8, "the stack did not grow");
     assert_eq!(
         rig.arbiter.stack().running().map(|entry| entry.intent_id),

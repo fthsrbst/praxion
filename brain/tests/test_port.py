@@ -216,29 +216,20 @@ def test_expired_command_never_starts(client: PortClient, body: FakeBody) -> Non
     assert body.generation == 0
 
 
-def test_seq_gap_resyncs_then_deltas_continue(client: PortClient, body: FakeBody) -> None:
+def test_a_seq_gap_is_normal_and_never_resyncs(client: PortClient, body: FakeBody) -> None:
+    # The body forwards only some event-log kinds, so wire seqs skip numbers.
+    # Loss is announced by `dropped(n)`, never inferred from a gap.
     wait_snapshot(client)
-
     body.emit_event("note", text="one")
-    first = wait_event(client, "note")
-    body.emit_event("note", text="two")
-    second = wait_event(client, "note")
-    assert (first.seq, second.seq) == (1, 2)
+    assert wait_event(client, "note").seq == 1
 
     body.drop_next_events(1)
-    body.emit_event("note", text="dropped")  # seq 3 is never sent
-    body.emit_event("note", text="after")  # seq 4 shows the gap
-
-    snapshot = wait_snapshot(client)
-    assert snapshot.seq == 4
-    assert client.last_seq == 4
-    assert client.resync_count == 1
-
-    body.emit_event("note", text="five")
-    fifth = wait_event(client, "note")
-    assert fifth.seq == 5
-    assert fifth.event["text"] == "five"
-    assert client.last_seq == 5
+    body.emit_event("note", text="filtered")  # seq 2 is never sent
+    body.emit_event("note", text="after")  # seq 3 arrives after the gap
+    after = wait_event(client, "note")
+    assert (after.seq, after.event["text"]) == (3, "after")
+    assert client.last_seq == 3
+    assert client.resync_count == 0
 
 
 def test_reconnect_after_drop(client: PortClient, body: FakeBody) -> None:
@@ -369,10 +360,8 @@ def test_resync_delivers_held_events_before_the_snapshot(
     client: PortClient, body: FakeBody
 ) -> None:
     wait_snapshot(client)
-    body.drop_next_events(1)
-    body.emit_event("note", text="lost")  # seq 1 is never sent
-    body.emit_event("note", text="gap")  # seq 2 triggers the resync
-    body.emit_event("note", text="held")  # seq 3 arrives while resyncing
+    client.resync()  # an explicit resync holds later events until the snapshot
+    body.emit_event("note", text="held")
 
     messages = []
     deadline = time.monotonic() + 2.0
@@ -387,10 +376,8 @@ def test_resync_delivers_held_events_before_the_snapshot(
     snapshot = messages[-1]
     assert isinstance(snapshot, Snapshot)
     events = [item for item in messages if isinstance(item, EventMessage)]
-    assert [event.seq for event in events] == [2, 3]
-    assert [event.event["text"] for event in events] == ["gap", "held"]
-    assert snapshot.seq == 3
-    assert client.last_seq == 3
+    assert [event.event["text"] for event in events] == ["held"]
+    assert client.last_seq == max(snapshot.seq, events[0].seq)
 
 
 def test_send_times_out_when_the_body_stops_reading(

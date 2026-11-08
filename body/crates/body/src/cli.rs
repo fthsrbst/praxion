@@ -8,6 +8,8 @@
 //!              [--start-delay-ticks N] [--style-seed N] [--linger-ticks N]
 //!              [--verbose]
 //!
+//! praxion-body --forwarder ... --tee ... --run-dir runs/<id> --port 127.0.0.1:P
+//!
 //! praxion-body check-skills --candidates DIR [--skills body/skills]
 //! ```
 //!
@@ -15,6 +17,10 @@
 //! connect to), `--tee` its tee listener. `--candidates` adds learned
 //! `.skill` files to the core skills; `check-skills` checks them without a
 //! server or network and prints one JSON report.
+//!
+//! `--goal` is required unless `--port` is set: a port session takes its goals
+//! from the brain, and `--goal` (when given) is injected as command `cli` so
+//! there is one goal-start path (proposal §2.6).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,8 +34,11 @@ pub struct Args {
     pub forwarder: SocketAddr,
     pub tee: SocketAddr,
     pub name: String,
-    pub goal: String,
+    /// The hand-written goal. `None` is allowed only with `--port`.
+    pub goal: Option<String>,
     pub goal_args: Vec<String>,
+    /// The body port the brain connects to. `None` runs one goal and exits.
+    pub port: Option<SocketAddr>,
     pub run_dir: PathBuf,
     pub max_ticks: Option<u64>,
     pub settings: Option<PathBuf>,
@@ -50,6 +59,7 @@ impl Args {
         let mut name = "Praxion".to_owned();
         let mut goal = None;
         let mut goal_args = Vec::new();
+        let mut port = None;
         let mut run_dir = None;
         let mut max_ticks = None;
         let mut settings = None;
@@ -82,6 +92,7 @@ impl Args {
                     }
                 }
                 "--run-dir" => run_dir = Some(PathBuf::from(value(&mut args, "--run-dir")?)),
+                "--port" => port = Some(address(&mut args, "--port")?),
                 "--max-ticks" => {
                     let text = value(&mut args, "--max-ticks")?;
                     max_ticks = Some(
@@ -117,13 +128,24 @@ impl Args {
             }
         }
 
+        let forwarder = forwarder.ok_or("--forwarder is required")?;
+        let tee = tee.ok_or("--tee is required")?;
+        if goal.is_none() && port.is_none() {
+            return Err("--goal is required (or --port for a brain session)".to_owned());
+        }
+        if goal.is_none() && !goal_args.is_empty() {
+            return Err("--goal-args needs --goal".to_owned());
+        }
+        let run_dir = run_dir.ok_or("--run-dir is required")?;
+
         Ok(Self {
-            forwarder: forwarder.ok_or("--forwarder is required")?,
-            tee: tee.ok_or("--tee is required")?,
+            forwarder,
+            tee,
             name,
-            goal: goal.ok_or("--goal is required")?,
+            goal,
             goal_args,
-            run_dir: run_dir.ok_or("--run-dir is required")?,
+            port,
+            run_dir,
             max_ticks,
             settings,
             skills,
@@ -256,7 +278,8 @@ mod tests {
         assert_eq!(args.forwarder.port(), 25640);
         assert_eq!(args.tee.port(), 25641);
         assert_eq!(args.name, "Praxy");
-        assert_eq!(args.goal, "get_wood(2)");
+        assert_eq!(args.goal.as_deref(), Some("get_wood(2)"));
+        assert_eq!(args.port, None);
         assert_eq!(args.run_dir, PathBuf::from("runs/x"));
         assert_eq!(args.max_ticks, Some(1200));
         assert_eq!(
@@ -329,7 +352,57 @@ mod tests {
         assert_eq!(parse(&[]).unwrap_err(), "--forwarder is required");
         assert_eq!(
             parse(&["--forwarder", "127.0.0.1:1", "--tee", "127.0.0.1:2"]).unwrap_err(),
-            "--goal is required"
+            "--goal is required (or --port for a brain session)"
+        );
+    }
+
+    #[test]
+    fn a_port_session_needs_no_goal() {
+        let args = parse(&[
+            "--forwarder",
+            "127.0.0.1:1",
+            "--tee",
+            "127.0.0.1:2",
+            "--run-dir",
+            "r",
+            "--port",
+            "127.0.0.1:25650",
+        ])
+        .unwrap();
+        assert_eq!(args.goal, None);
+        assert_eq!(args.port.map(|addr| addr.port()), Some(25650));
+
+        // A goal may still be given; it becomes command `cli`.
+        let both = parse(&[
+            "--forwarder",
+            "127.0.0.1:1",
+            "--tee",
+            "127.0.0.1:2",
+            "--run-dir",
+            "r",
+            "--port",
+            "127.0.0.1:2",
+            "--goal",
+            "g",
+        ])
+        .unwrap();
+        assert_eq!(both.goal.as_deref(), Some("g"));
+
+        assert_eq!(
+            parse(&[
+                "--forwarder",
+                "127.0.0.1:1",
+                "--tee",
+                "127.0.0.1:2",
+                "--run-dir",
+                "r",
+                "--port",
+                "127.0.0.1:2",
+                "--goal-args",
+                "3",
+            ])
+            .unwrap_err(),
+            "--goal-args needs --goal"
         );
     }
 

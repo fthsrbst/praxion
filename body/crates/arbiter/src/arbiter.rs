@@ -23,7 +23,7 @@ use praxion_eventlog::EventKind;
 use praxion_headless::{Body, Click, ControlFrame, Held};
 use praxion_interpreter::{Actuator, Decision, Facts, Interpreter};
 use praxion_planner::KnownBlocks;
-use praxion_reflexes::{Engine, EndermanGuard, ReflexKind, ReflexTick, Settings, View};
+use praxion_reflexes::{EndermanGuard, Engine, ReflexKind, ReflexTick, Settings, View};
 use praxion_rules::{ArgValue, PrimitiveKind};
 
 use crate::tier::{IntentStack, IntentState, NeedKind, Needs, Tier, arg_to_string};
@@ -70,7 +70,6 @@ impl FrameSource {
             | FrameSource::Idle(frame) => frame,
         }
     }
-
 }
 
 /// Everything the driver needs after one arbiter tick.
@@ -86,6 +85,10 @@ pub struct ArbiterTick {
     pub maintenance: Option<NeedKind>,
     /// The interpreter's decision this tick, when a skill ran.
     pub skill: Option<Decision>,
+    /// The intent that ran the interpreter this tick, when one did. The
+    /// decision belongs to it even if a maintenance action suspends it before
+    /// the tick ends.
+    pub skill_intent: Option<u64>,
     /// A brain wake was emitted this tick (Demo-0: event log only).
     pub wake_brain: bool,
     /// The inventory slot the body finished eating, when it finished this tick.
@@ -99,6 +102,16 @@ pub struct CommandAccepted {
     pub generation: u32,
     /// The intent events of the push and suspension (for the event log).
     pub events: Vec<EventKind>,
+}
+
+/// Why the arbiter refused a command. The driver maps the variant to the
+/// receipt's `reason`; it never classifies a string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandError {
+    /// The intent stack has no room for another entry.
+    StackFull,
+    /// The interpreter refused to start the skill (unknown name, bad args).
+    Skill(String),
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +139,8 @@ pub struct Arbiter {
     wake_emitted: bool,
     events: Vec<EventKind>,
     ate: Option<u16>,
+    /// The intent that ran the interpreter this tick (see [`ArbiterTick`]).
+    skill_intent: Option<u64>,
 }
 
 impl Arbiter {
@@ -144,6 +159,7 @@ impl Arbiter {
             wake_emitted: false,
             events: Vec::new(),
             ate: None,
+            skill_intent: None,
         }
     }
 
@@ -186,15 +202,15 @@ impl Arbiter {
         tick: u64,
         skill: &str,
         args: Vec<ArgValue>,
-    ) -> Result<CommandAccepted, String> {
+    ) -> Result<CommandAccepted, CommandError> {
         let strings: Vec<String> = args.iter().map(arg_to_string).collect();
         let pushed = self
             .stack
             .push(Tier::Command, skill, strings.clone())
-            .map_err(|_| "the intent stack is full".to_owned())?;
+            .map_err(|_| CommandError::StackFull)?;
         if let Err(refusal) = interpreter.start_skill(skill, args) {
             self.stack.rollback(pushed);
-            return Err(refusal);
+            return Err(CommandError::Skill(refusal));
         }
 
         let mut events = vec![EventKind::IntentPushed {
@@ -238,6 +254,46 @@ impl Arbiter {
         })
     }
 
+    /// The driver settled a command: mark its intent `done` and hand the body
+    /// back. When a suspended command is waiting, it becomes the running one
+    /// again (a new command suspends the old one, so settling the new one must
+    /// give the old one its turn back).
+    ///
+    /// The generation moves whenever the owner does; the returned events are
+    /// the `intent_state`/`owner_changed` lines the driver logs in order. The
+    /// interpreter still holds the settled skill's frames, so the caller must
+    /// restart the resumed command with [`Interpreter::start_skill`] when the
+    /// running intent changed.
+    pub fn end_command(&mut self, intent_id: u64, body: &mut Body, tick: u64) -> Vec<EventKind> {
+        if self
+            .stack
+            .get(intent_id)
+            .is_none_or(|entry| entry.state == IntentState::Done)
+        {
+            // An already-done entry has nothing left to settle: a second pop or
+            // settle must not write another `intent_state done`.
+            return Vec::new();
+        }
+        if !self.stack.done(intent_id) {
+            return Vec::new();
+        }
+        let mut events = vec![EventKind::IntentState {
+            intent_id,
+            state: IntentState::Done.name().to_owned(),
+        }];
+        if self.owner == (Owner::Skill { intent_id }) {
+            body.bump_generation();
+            match self.resume_suspended_command() {
+                Some(next) => {
+                    self.set_owner(Owner::Skill { intent_id: next }, body.generation(), tick);
+                }
+                None => self.set_owner(Owner::Idle, body.generation(), tick),
+            }
+            events.append(&mut self.events);
+        }
+        events
+    }
+
     /// One tick. The caller must have called `Perception::begin_tick` and built
     /// the view; the body is stepped by the caller after returning.
     #[allow(clippy::too_many_arguments)]
@@ -255,6 +311,7 @@ impl Arbiter {
     ) -> ArbiterTick {
         self.events.clear();
         self.ate = None;
+        self.skill_intent = None;
 
         // 1. Reflexes always win. The engine bumps the body generation on a
         // start; the arbiter mirrors it and emits one owner change.
@@ -281,7 +338,10 @@ impl Arbiter {
                 if timed_out {
                     self.wake(
                         "reflex",
-                        format!("{} hit max_reflex_ticks after {ran_ticks} ticks", kind.name()),
+                        format!(
+                            "{} hit max_reflex_ticks after {ran_ticks} ticks",
+                            kind.name()
+                        ),
                     );
                 } else if ran_ticks > u64::from(settings.wake_after_ticks) {
                     self.wake("reflex", format!("{} ran {ran_ticks} ticks", kind.name()));
@@ -349,6 +409,7 @@ impl Arbiter {
             }
             let outcome = interpreter.tick(facts, actuator);
             self.last_decision = Some(outcome.clone());
+            self.skill_intent = Some(intent.intent_id);
             decision = Some(outcome);
         }
 
@@ -410,7 +471,11 @@ impl Arbiter {
             return false;
         }
         if from == to {
-            if tick < self.last_switch_tick.saturating_add(u64::from(settings.min_switch_ticks)) {
+            if tick
+                < self
+                    .last_switch_tick
+                    .saturating_add(u64::from(settings.min_switch_ticks))
+            {
                 return false;
             }
             gain > settings.switch_gain_factor * loss
@@ -499,22 +564,11 @@ impl Arbiter {
     }
 
     /// A reflex ended: the interrupted skill re-evaluates from the top.
-    fn resume_after_reflex(
-        &mut self,
-        interpreter: &mut Interpreter,
-        body: &mut Body,
-        tick: u64,
-    ) {
+    fn resume_after_reflex(&mut self, interpreter: &mut Interpreter, body: &mut Body, tick: u64) {
         interpreter.resume();
         if let Some(intent) = self.resume_suspended_command() {
             body.bump_generation();
-            self.set_owner(
-                Owner::Skill {
-                    intent_id: intent,
-                },
-                body.generation(),
-                tick,
-            );
+            self.set_owner(Owner::Skill { intent_id: intent }, body.generation(), tick);
         } else {
             body.bump_generation();
             self.set_owner(Owner::Idle, body.generation(), tick);
@@ -530,13 +584,7 @@ impl Arbiter {
         interpreter.resume();
         if let Some(intent) = self.resume_suspended_command() {
             body.bump_generation();
-            self.set_owner(
-                Owner::Skill {
-                    intent_id: intent,
-                },
-                body.generation(),
-                tick,
-            );
+            self.set_owner(Owner::Skill { intent_id: intent }, body.generation(), tick);
         } else {
             body.bump_generation();
             self.set_owner(Owner::Idle, body.generation(), tick);
@@ -711,6 +759,7 @@ impl Arbiter {
             reflex,
             maintenance,
             skill,
+            skill_intent: self.skill_intent.take(),
             wake_brain,
             ate: self.ate,
         }

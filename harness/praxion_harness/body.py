@@ -19,8 +19,13 @@ The body waits ``start_delay_ticks`` (3 s by default) after its first tick, so a
 ``setup`` callback has time to give items, set the time and summon mobs through
 the logged RCON fixture channel before the skill starts.
 
-Only ports 25640-25659 are used for the forwarder's game and tee listeners. The
-server keeps its own random port from ``TestServer``.
+Only ports 25640-25659 are used for the forwarder's game and tee listeners and
+for the body port in a brain session. The server keeps its own random port from
+``TestServer``.
+
+``start_session`` (proposal §2.6) starts the same stack with ``--port`` and no
+``--goal``: the body listens for the brain and runs goal after goal in one
+process. Its ``BodySession`` adds the port number to the usual handles.
 """
 
 from __future__ import annotations
@@ -197,6 +202,50 @@ class BodyRun:
         self.stop()
 
 
+class BodySession(BodyRun):
+    """A body in port mode: one process, many goals, the brain in charge.
+
+    ``port`` is the loopback port the brain connects to with
+    :class:`praxion_brain.port.PortClient`. ``run_dir``, ``referee`` and
+    ``fixture`` are the same as for :class:`BodyRun`; ``wait_for_goal`` waits
+    for one command's ``settled`` receipt and ``summary()["goals"]`` lists every
+    settled goal (proposal §2.6). ``wait_for_outcome`` stays for a CLI run: on
+    a session it could return the previous goal's summary before the new
+    command is even accepted.
+    """
+
+    def __init__(self, *args, port: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.port = int(port)
+
+    def wait_for_goal(self, command_id: str, timeout: float = 240.0) -> Dict[str, Any]:
+        """Wait for ``command_id``'s ``settled`` receipt and return that event.
+
+        The receipt is the one line that says this command is over, so a
+        session never mistakes the previous goal's summary for the new one.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for event in self.events():
+                if (
+                    event.get("kind") == "command_receipt"
+                    and event.get("command_id") == command_id
+                    and event.get("state") == "settled"
+                ):
+                    return event
+            if self.process.poll() is not None:
+                raise RuntimeError(
+                    f"the body exited (code {self.process.returncode}) before "
+                    f"{command_id!r} settled ({self.output_path}):\n"
+                    f"{self.output()[-4000:]}"
+                )
+            time.sleep(0.1)
+        raise TimeoutError(
+            f"{command_id!r} did not settle within {timeout:.0f}s "
+            f"({self.output_path}):\n{self.output()[-4000:]}"
+        )
+
+
 def _terminate(process: Optional[subprocess.Popen], timeout: float) -> None:
     if process is None or process.poll() is not None:
         return
@@ -264,6 +313,81 @@ def start_body(
     returned. The caller owns the run; use it as a context manager or call
     :meth:`BodyRun.stop`.
     """
+    return _start(
+        seed,
+        goal,
+        goal_args,
+        port_mode=False,
+        setup=setup,
+        max_ticks=max_ticks,
+        start_delay_ticks=start_delay_ticks,
+        linger_ticks=linger_ticks,
+        settings=settings,
+        name=name,
+        run_dir=run_dir,
+        keep=keep,
+        extra_args=extra_args,
+    )
+
+
+def start_session(
+    seed: int,
+    *,
+    setup: Optional[Setup] = None,
+    max_ticks: int = 60000,
+    start_delay_ticks: int = 0,
+    settings: Optional[Path] = None,
+    name: str = "Praxion",
+    run_dir: Optional[Path] = None,
+    keep: Optional[bool] = None,
+    extra_args: Iterable[str] = (),
+) -> BodySession:
+    """Start a body in port mode: it runs goal after goal for the brain.
+
+    The body gets ``--port`` and no ``--goal``; the brain connects to
+    :attr:`BodySession.port` and sends commands (proposal §2.6). Live case::
+
+        with start_session(101, setup=give_logs) as session:
+            with PortClient(session.port) as client:
+                client.connect()
+                ...
+
+    ``max_ticks`` is only the process-wide safety cap, not a goal budget.
+    """
+    run = _start(
+        seed,
+        None,
+        (),
+        port_mode=True,
+        setup=setup,
+        max_ticks=max_ticks,
+        start_delay_ticks=start_delay_ticks,
+        linger_ticks=0,
+        settings=settings,
+        name=name,
+        run_dir=run_dir,
+        keep=keep,
+        extra_args=extra_args,
+    )
+    return run
+
+
+def _start(
+    seed: int,
+    goal: Optional[str],
+    goal_args: Iterable[str],
+    *,
+    port_mode: bool,
+    setup: Optional[Setup],
+    max_ticks: int,
+    start_delay_ticks: int,
+    linger_ticks: int,
+    settings: Optional[Path],
+    name: str,
+    run_dir: Optional[Path],
+    keep: Optional[bool],
+    extra_args: Iterable[str],
+) -> BodySession:
     for binary in ("praxion-body", "praxion-forwarder"):
         path = _binary(binary)
         if not path.exists():
@@ -286,7 +410,9 @@ def start_body(
         referee.setup_death_objective()
         fixture = FixtureChannel(server.rcon, fixture_log_path(run_dir))
 
-        game_port, tee_port = _free_ports(2)
+        ports = _free_ports(3 if port_mode else 2)
+        game_port, tee_port = ports[0], ports[1]
+        body_port = ports[2] if port_mode else 0
         forwarder_out_path = run_dir / "forwarder.out"
         forwarder_out = forwarder_out_path.open("w", encoding="utf-8", errors="replace")
         forwarder = subprocess.Popen(
@@ -311,12 +437,15 @@ def start_body(
             "--forwarder", f"127.0.0.1:{game_port}",
             "--tee", f"127.0.0.1:{tee_port}",
             "--name", name,
-            "--goal", goal,
             "--run-dir", str(body_dir),
             "--max-ticks", str(max_ticks),
             "--start-delay-ticks", str(start_delay_ticks),
             "--linger-ticks", str(linger_ticks),
         ]
+        if goal is not None:
+            command.extend(["--goal", goal])
+        if port_mode:
+            command.extend(["--port", f"127.0.0.1:{body_port}"])
         if goal_args:
             command.append("--goal-args")
             command.extend(str(argument) for argument in goal_args)
@@ -331,7 +460,7 @@ def start_body(
         )
         _wait_for(body_out_path, "joined", body, BODY_JOIN_TIMEOUT)
 
-        run = BodyRun(
+        run = BodySession(
             run_dir,
             server,
             forwarder,
@@ -341,6 +470,7 @@ def start_body(
             referee,
             fixture,
             keep=server.keep,
+            port=body_port,
         )
         run._out = body_out
         run._forwarder_out = forwarder_out
@@ -367,5 +497,7 @@ def start_body(
 __all__ = [
     "BODY_PORT_RANGE",
     "BodyRun",
+    "BodySession",
     "start_body",
+    "start_session",
 ]

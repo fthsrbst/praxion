@@ -8,9 +8,10 @@ last event sequence at send time.
 
 The client is blocking and thread-free on purpose: :class:`PortReader` owns the
 one reader thread section 3.1 asks for, and the loop calls
-:meth:`PortClient.poll` through it. A seq gap is repaired automatically: the
-client sends ``resync_request``, holds later events, delivers every held event,
-then the snapshot, and resumes with the events after it.
+:meth:`PortClient.poll` through it. Wire seqs skip numbers by design (the body
+forwards only some event kinds); loss is announced by ``dropped(n)`` plus a
+snapshot. An explicit :meth:`PortClient.resync` holds later events, delivers
+them, then the snapshot.
 
 Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` section 2.
 """
@@ -335,8 +336,8 @@ class PortClient:
     """A blocking, single-threaded client for one body.
 
     ``connect`` performs the handshake (body ``hello`` first, then the brain's
-    ``hello``). ``poll`` returns one body message or ``None`` on timeout; an
-    ``event`` whose ``seq`` jumps triggers ``resync_request`` automatically.
+    ``hello``). ``poll`` returns one body message or ``None`` on timeout; a
+    ``seq`` gap is normal (the body filters event kinds) and never resyncs.
     The client never starts a thread of its own: :class:`PortReader` runs
     ``poll`` and ``keepalive`` on its one reader thread and the loop writes
     from its own thread, serialized by an internal write lock.
@@ -638,8 +639,8 @@ class PortClient:
     def poll(self, timeout: Optional[float] = 0.0) -> Optional[Any]:
         """Return the next body message, or ``None`` when ``timeout`` expires.
 
-        ``timeout=None`` blocks until a message arrives. A seq gap sends
-        ``resync_request`` once, holds later events, then delivers them before
+        ``timeout=None`` blocks until a message arrives. While an explicit
+        :meth:`resync` is pending, later events are held and delivered before
         the snapshot.
         """
         if self._ready:
@@ -727,13 +728,13 @@ class PortClient:
                 return
             if message.seq <= self.last_seq:
                 return
-            if message.seq == self.last_seq + 1:
-                self.last_seq = message.seq
-                self._ready.append(message)
-                return
-            # A gap: ask for a snapshot and hold this and later events.
-            self.resync()
-            self._held.append(message)
+            # The wire seq is the event-log seq and the body forwards only the
+            # kinds the brain needs, so seq gaps are normal. Loss is announced
+            # explicitly by `dropped(n)` plus a snapshot. Treating gaps as loss
+            # made every goal resync and discard its own receipts (live port
+            # tests, 2026-11-08).
+            self.last_seq = message.seq
+            self._ready.append(message)
             return
 
         if isinstance(message, Pong):

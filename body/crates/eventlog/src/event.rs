@@ -152,7 +152,38 @@ pub enum EventKind {
     /// The frontier `explore` chose to walk to, with its score (the squared
     /// distance used by the ordering) and how many frontier cells were
     /// candidates.
-    ExploreFrontier { cell: String, score: i64, candidates: u32 },
+    ExploreFrontier {
+        cell: String,
+        score: i64,
+        candidates: u32,
+    },
+    /// The brain's command lifecycle (proposal §2.2). A receipt is an event,
+    /// not a fourth channel: the harness, a replay and the live brain all see
+    /// the same line.
+    ///
+    /// `state` is `pending`, `accepted`, `rejected`, `expired` or `settled`.
+    /// `pending` is written when the driver drains its inbox; `accepted` after
+    /// `Arbiter::command` returned, with the generation it bumped to. A
+    /// `rejected` carries `reason` (`stale_generation`, `unknown_skill`,
+    /// `stack_full`, `bad_condition`, `bad_args`); a `settled` carries
+    /// `outcome` (`done`, `failed` or `popped`), the typed `failure_kind`, and
+    /// the guard's `condition` result (`true`, `false` or `unknown`).
+    CommandReceipt {
+        command_id: String,
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     /// The brain should wake. Demo-0 has no brain yet, so this is only logged.
     WakeBrain { cause: String, detail: String },
     /// Free-form operator or test note.
@@ -232,6 +263,16 @@ mod tests {
                 cause: "reflex".to_owned(),
                 detail: "creeper ran 40 ticks".to_owned(),
             },
+            EventKind::CommandReceipt {
+                command_id: "c-0007".to_owned(),
+                state: "settled".to_owned(),
+                intent_id: Some(3),
+                generation: Some(9),
+                outcome: Some("done".to_owned()),
+                failure_kind: None,
+                reason: None,
+                condition: Some("true".to_owned()),
+            },
         ];
         for case in cases {
             let back = round_trip(case.clone());
@@ -251,5 +292,28 @@ mod tests {
         assert!(line.contains("\"kind\":\"owner_changed\""), "{line}");
         assert!(line.contains("\"generation\":4"), "{line}");
     }
-}
 
+    #[test]
+    fn a_command_receipt_carries_only_the_fields_it_has() {
+        let line = serde_json::to_string(&Event {
+            seq: 7,
+            tick: 8,
+            ts_ns: 9,
+            event: EventKind::CommandReceipt {
+                command_id: "c-0001".to_owned(),
+                state: "accepted".to_owned(),
+                intent_id: Some(1),
+                generation: Some(4),
+                outcome: None,
+                failure_kind: None,
+                reason: None,
+                condition: None,
+            },
+        })
+        .unwrap();
+        assert!(line.contains("\"kind\":\"command_receipt\""), "{line}");
+        assert!(!line.contains("outcome"), "{line}");
+        assert!(!line.contains("reason"), "{line}");
+        assert!(!line.contains("condition"), "{line}");
+    }
+}
