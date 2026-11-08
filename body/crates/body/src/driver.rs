@@ -56,6 +56,7 @@ use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::{BlockPos, Vec3, World};
 
 use crate::summary::{GoalResult, Shared, write_summary};
+use crate::{ReloadedSkills, SkillsWatch};
 
 /// The command id of a `--goal` run. There is one goal-start path: `--goal`
 /// becomes this injected command (proposal §2.6).
@@ -134,6 +135,10 @@ pub struct BodyDriver {
     mirror: Body,
     /// The brain's channel, when the process was started with `--port`.
     port: Option<Arc<PortServer>>,
+    /// The admitted skills a port session reloads before accepting a command,
+    /// so a skill written after the process started is playable. `None` in a
+    /// CLI run, and in a port session started without `--candidates`.
+    watch: Option<SkillsWatch>,
     /// Commands accepted from the port, by intent id, until they settle.
     commands: BTreeMap<u64, CommandRecord>,
     /// The intent whose skill the interpreter currently holds. A resume path
@@ -240,6 +245,7 @@ impl BodyDriver {
         options: BodyOptions,
         run_dir: PathBuf,
         program: Program,
+        watch: Option<SkillsWatch>,
         settings: Settings,
         shared: Arc<Mutex<Shared>>,
         port: Option<Arc<PortServer>>,
@@ -279,6 +285,7 @@ impl BodyDriver {
             look_source: None,
             mirror: Body::new(Vec3::ZERO),
             port,
+            watch,
             commands: BTreeMap::new(),
             interpreter_intent: None,
             cli,
@@ -379,6 +386,10 @@ impl BodyDriver {
             self.receipt(tick, ts_ns, Receipt::new(&command.id, "expired"));
             return;
         }
+        // The reload comes before the skill check: the first command naming a
+        // skill the brain has just admitted must find it. It runs after the
+        // `pending` ack so the brain never waits on disk work.
+        self.reload_skills(tick, ts_ns);
         if command.based_on_generation != self.arbiter.generation() {
             self.reject(&command.id, "stale_generation", tick, ts_ns);
             return;
@@ -460,6 +471,73 @@ impl BodyDriver {
                 self.reject(&command.id, reason, tick, ts_ns);
             }
         }
+    }
+
+    /// Swap in a program reloaded from core plus the watched directory when its
+    /// files changed. Only an idle body reloads: a running or suspended intent
+    /// keeps its frames, which name skills the new program may not hold. A
+    /// failed reload keeps the old program and writes a `skills_reload_failed`
+    /// note (a repeat of the same error is not logged again); either way the
+    /// command that woke this is accepted with the program the body now holds.
+    fn reload_skills(&mut self, tick: u64, ts_ns: u64) {
+        let idle = self
+            .arbiter
+            .stack()
+            .entries()
+            .iter()
+            .all(|entry| entry.state == IntentState::Done);
+        if !idle {
+            return;
+        }
+        let reloaded = match self.watch.as_mut() {
+            Some(watch) => watch.reload(),
+            None => return,
+        };
+        match reloaded {
+            Ok(None) => {}
+            Ok(Some(ReloadedSkills { program, names })) => {
+                self.interpreter.replace_program(program);
+                // The interpreter holds no skill now; the old goal's rule dedupe
+                // belongs to the old program.
+                self.interpreter_intent = None;
+                self.last_rule_logged = None;
+                let count = names.len();
+                let names = if names.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    names.join(",")
+                };
+                self.record(
+                    tick,
+                    ts_ns,
+                    EventKind::Note {
+                        text: format!("skills_reloaded count={count} skills={names}"),
+                    },
+                );
+            }
+            Err(errors) => {
+                self.record(
+                    tick,
+                    ts_ns,
+                    EventKind::Note {
+                        text: format!("skills_reload_failed {}", errors.join("; ")),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Write the startup failure that made a port session fall back to the
+    /// core-only program. Same note text as a failed reload, so the log has
+    /// one shape for "the candidate side of the program is broken".
+    pub fn startup_reload_failed(&mut self, failure: &str) {
+        self.record(
+            0,
+            now_ns(),
+            EventKind::Note {
+                text: format!("skills_reload_failed {failure}"),
+            },
+        );
     }
 
     /// A refused command writes its `rejected` receipt; a refused `--goal` is
@@ -1782,21 +1860,34 @@ skill stall()
         .expect("the reflex settings must load")
     }
 
+    fn options(brain_silence: Duration) -> BodyOptions {
+        BodyOptions {
+            skill: None,
+            args: Vec::new(),
+            start_delay_ticks: 0,
+            style_seed: 0,
+            brain_silence,
+            versions: Versions::default(),
+        }
+    }
+
     fn harness_with(port: Option<Arc<PortServer>>, silence: Duration) -> Harness {
+        harness_watching(port, silence, None)
+    }
+
+    fn harness_watching(
+        port: Option<Arc<PortServer>>,
+        silence: Duration,
+        watch: Option<SkillsWatch>,
+    ) -> Harness {
         let run_dir = run_dir();
         let program = praxion_rules::load(INSTA).expect("the test program must load");
         let shared = Arc::new(Mutex::new(Shared::new("test", "", vec![])));
         let driver = BodyDriver::new(
-            BodyOptions {
-                skill: None,
-                args: Vec::new(),
-                start_delay_ticks: 0,
-                style_seed: 0,
-                brain_silence: silence,
-                versions: Versions::default(),
-            },
+            options(silence),
             run_dir.clone(),
             program,
+            watch,
             settings(),
             shared,
             port,
@@ -1870,6 +1961,87 @@ skill stall()
                 .expect("the driver has a summary");
             serde_json::from_str(&text).expect("the summary is JSON")
         }
+    }
+
+    /// A real core directory plus a watched candidate directory under
+    /// `target/test-runs`, so a reload reads the same files the body would.
+    struct SkillsFixture {
+        core: PathBuf,
+        watched: PathBuf,
+    }
+
+    impl SkillsFixture {
+        fn new() -> Self {
+            let base = run_dir();
+            let core = base.join("core");
+            let watched = base.join("active");
+            std::fs::create_dir_all(&core).expect("the core dir");
+            std::fs::create_dir_all(&watched).expect("the watched dir");
+            std::fs::write(core.join("core.skill"), INSTA).expect("the core skill");
+            Self { core, watched }
+        }
+
+        /// Write one candidate after the driver started, as admission does.
+        fn add(&self, file: &str, source: &str) {
+            std::fs::create_dir_all(&self.watched).expect("the watched dir");
+            std::fs::write(self.watched.join(file), source).expect("the skill file");
+        }
+
+        /// Remove the watched directory, so a stamp read fails.
+        fn remove_watched(&self) {
+            std::fs::remove_dir_all(&self.watched).expect("the watched dir");
+        }
+
+        /// Empty the core directory, so a reload's core read fails while the
+        /// watched files stay unchanged.
+        fn break_core(&self) {
+            std::fs::remove_dir_all(&self.core).expect("the core dir");
+            std::fs::create_dir_all(&self.core).expect("the empty core dir");
+        }
+
+        fn restore_core(&self) {
+            std::fs::write(self.core.join("core.skill"), INSTA).expect("the core skill");
+        }
+
+        /// A driver whose program and watch come from these directories.
+        fn driver(&self) -> Harness {
+            let core = crate::load_skill_files(&self.core).expect("the core skills");
+            let candidates = crate::read_skill_files(&self.watched).expect("the watched skills");
+            let program =
+                crate::load_program(&core, &candidates).expect("the fixture program loads");
+            let watch =
+                SkillsWatch::new(self.core.clone(), self.watched.clone()).expect("the watch");
+            let run_dir = run_dir();
+            let shared = Arc::new(Mutex::new(Shared::new("test", "", vec![])));
+            let driver = BodyDriver::new(
+                options(DEFAULT_BRAIN_SILENCE),
+                run_dir.clone(),
+                program,
+                Some(watch),
+                settings(),
+                shared,
+                None,
+            )
+            .expect("the driver must start");
+            Harness {
+                driver,
+                world: World::new(),
+                body: Body::new(Vec3::ZERO),
+                tick: 1,
+                run_dir,
+            }
+        }
+    }
+
+    fn notes(harness: &Harness, prefix: &str) -> Vec<String> {
+        harness
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.event {
+                EventKind::Note { text } if text.starts_with(prefix) => Some(text),
+                _ => None,
+            })
+            .collect()
     }
 
     fn command(id: &str, skill: &str) -> PortCommand {
@@ -2531,6 +2703,232 @@ skill stall()
         // a one-goal driver.
         assert!(!harness.driver.done());
         assert_eq!(harness.driver.commands.len(), 0);
+    }
+
+    #[test]
+    fn a_skill_added_after_start_is_accepted_after_a_reload() {
+        let skills = SkillsFixture::new();
+        let mut harness = skills.driver();
+        harness.inject(command("c-1", "insta"));
+        harness.run(3);
+        assert_eq!(harness.receipts("settled").len(), 1);
+
+        // Admission copied the file between two goals; the next command must
+        // find the skill in a program read after the copy.
+        skills.add("make.skill", "skill make()\n  rules:\n    true -> done\n");
+        harness.inject(command("c-2", "make"));
+        harness.run(3);
+
+        assert!(
+            harness
+                .receipts("accepted")
+                .iter()
+                .any(|receipt| receipt.0 == "c-2"),
+            "the newly written skill must be accepted: {:?}",
+            harness.receipts("rejected")
+        );
+        assert_eq!(
+            notes(&harness, "skills_reloaded"),
+            vec!["skills_reloaded count=1 skills=make"]
+        );
+        let settled = harness.receipts("settled");
+        assert!(
+            settled
+                .iter()
+                .any(|receipt| receipt.0 == "c-2" && receipt.3.as_deref() == Some("done")),
+            "{settled:?}"
+        );
+    }
+
+    #[test]
+    fn a_reload_is_deferred_while_an_intent_runs() {
+        let skills = SkillsFixture::new();
+        let mut harness = skills.driver();
+        harness.inject(command("c-1", "stall"));
+        harness.run(1);
+        assert_eq!(
+            harness
+                .driver
+                .arbiter
+                .stack()
+                .running()
+                .map(|entry| entry.intent_id),
+            Some(1)
+        );
+
+        skills.add("make.skill", "skill make()\n  rules:\n    true -> done\n");
+        harness.inject(command("c-2", "make"));
+        harness.run(1);
+
+        let reason = harness.events().into_iter().find_map(|event| match event.event {
+            EventKind::CommandReceipt {
+                command_id,
+                state,
+                reason,
+                ..
+            } if command_id == "c-2" && state == "rejected" => reason,
+            _ => None,
+        });
+        assert_eq!(
+            reason.as_deref(),
+            Some("unknown_skill"),
+            "the running intent keeps the old program"
+        );
+        assert!(
+            notes(&harness, "skills_reloaded").is_empty(),
+            "no reload while an intent owns the body"
+        );
+        assert!(harness.driver.interpreter.program().skill("make").is_none());
+        assert_eq!(
+            harness
+                .driver
+                .arbiter
+                .stack()
+                .running()
+                .map(|entry| entry.intent_id),
+            Some(1),
+            "the rejected command must not disturb the running intent"
+        );
+    }
+
+    #[test]
+    fn a_broken_reload_keeps_the_old_program_and_logs_the_error() {
+        let skills = SkillsFixture::new();
+        let mut harness = skills.driver();
+        harness.run(2);
+        skills.add(
+            "broken.skill",
+            "skill broken()\n  rules:\n    nope(stick) -> done\n",
+        );
+
+        harness.inject(command("c-1", "insta"));
+        harness.run(3);
+
+        let failures = notes(&harness, "skills_reload_failed");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("broken.skill"), "{}", failures[0]);
+        assert!(failures[0].contains("unknown fact `nope`"), "{}", failures[0]);
+        assert!(
+            harness
+                .receipts("accepted")
+                .iter()
+                .any(|receipt| receipt.0 == "c-1"),
+            "the old program still plays a core skill"
+        );
+        assert!(harness.driver.interpreter.program().skill("insta").is_some());
+        assert!(harness.driver.interpreter.program().skill("broken").is_none());
+    }
+
+    #[test]
+    fn a_same_failure_is_not_logged_on_every_command() {
+        let skills = SkillsFixture::new();
+        let mut harness = skills.driver();
+        harness.run(2);
+        skills.add(
+            "broken.skill",
+            "skill broken()\n  rules:\n    nope(stick) -> done\n",
+        );
+
+        harness.inject(command("c-1", "insta"));
+        harness.run(3);
+        harness.inject(command("c-2", "insta"));
+        harness.run(3);
+
+        assert_eq!(
+            notes(&harness, "skills_reload_failed").len(),
+            1,
+            "the identical failure is reported once"
+        );
+        // The retry still happens, so a fix that lands without a new stamp is
+        // seen; only the log line is deduped.
+        assert_eq!(
+            harness.receipts("accepted").len(),
+            2,
+            "both commands still play"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_watched_dir_is_retried_and_reported_once() {
+        let skills = SkillsFixture::new();
+        let mut harness = skills.driver();
+        harness.run(2);
+        skills.remove_watched();
+
+        harness.inject(command("c-1", "insta"));
+        harness.run(3);
+        harness.inject(command("c-2", "insta"));
+        harness.run(3);
+        let failures = notes(&harness, "skills_reload_failed");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("active"), "{}", failures[0]);
+
+        // The directory comes back: the next command reloads without waiting
+        // for another stamp read to succeed first.
+        skills.add("make.skill", "skill make()\n  rules:\n    true -> done\n");
+        harness.inject(command("c-3", "make"));
+        harness.run(3);
+        assert!(
+            harness
+                .receipts("accepted")
+                .iter()
+                .any(|receipt| receipt.0 == "c-3"),
+            "the recovered directory is watched again: {:?}",
+            harness.receipts("rejected")
+        );
+        assert_eq!(
+            notes(&harness, "skills_reloaded"),
+            vec!["skills_reloaded count=1 skills=make"]
+        );
+    }
+
+    #[test]
+    fn a_failed_load_is_retried_though_the_watched_files_did_not_change() {
+        let skills = SkillsFixture::new();
+        let mut harness = skills.driver();
+        harness.run(2);
+        skills.add("make.skill", "skill make()\n  rules:\n    true -> done\n");
+
+        // The core side is briefly unreadable (a checkout or editor rewrite):
+        // the watched stamp changed, the load failed, so the stamp must not
+        // have moved.
+        skills.break_core();
+        harness.inject(command("c-1", "insta"));
+        harness.run(3);
+        assert_eq!(notes(&harness, "skills_reload_failed").len(), 1);
+
+        // Nothing in the watched directory changes when the core comes back;
+        // the next command must still retry the load.
+        skills.restore_core();
+        harness.inject(command("c-2", "make"));
+        harness.run(3);
+        assert!(
+            harness
+                .receipts("accepted")
+                .iter()
+                .any(|receipt| receipt.0 == "c-2"),
+            "the fix is picked up without a new watched-file change: {:?}",
+            harness.receipts("rejected")
+        );
+        assert_eq!(
+            notes(&harness, "skills_reloaded"),
+            vec!["skills_reloaded count=1 skills=make"]
+        );
+    }
+
+    #[test]
+    fn a_startup_reload_failure_is_a_reload_failed_note() {
+        let mut harness = harness();
+        harness
+            .driver
+            .startup_reload_failed("stale.skill:3:5: unknown fact `nope`");
+        // One frame flushes the log; the note is written before any tick.
+        harness.run(1);
+
+        assert_eq!(
+            notes(&harness, "skills_reload_failed"),
+            vec!["skills_reload_failed stale.skill:3:5: unknown fact `nope`"]
+        );
     }
 
     #[test]

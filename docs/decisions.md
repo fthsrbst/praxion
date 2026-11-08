@@ -51,6 +51,21 @@ Thin Demo-2 slice, designed by Claude and approved by the user ("demo 2 yi yap")
 - **Learned skills live in `local/skills/` (candidates/, active/)**, the machine-local ignored directory,
   not in the product repository (architecture §10, per-installation data). A run gets the core skills plus
   the candidate in one skills directory inside its run dir.
+- **A running body hot-loads admitted skills; `--candidates DIR` is also the watch (Claude).** In a port
+  session the body compares the names, sizes and mtimes of DIR's `.skill` files before accepting a command
+  and, when they changed, reloads core + DIR through the same `load_program` / `check_candidates` path it
+  used at startup. The program is swapped only while no intent is running or suspended; otherwise the old
+  program stays and serves the command. A failed reload keeps the old program and writes
+  `skills_reload_failed`; a success writes `skills_reloaded` with the skill names. The stamp moves only
+  after a successful load, so a failure is retried on the next command and the identical error is logged
+  once. A port session whose candidates fail to load at startup starts on the core-only program and writes
+  the same note (the CLI `--goal` path still exits 2); the watcher retries when the file changes.
+  `start_session` watches `active_skills_dir()`, which the harness and `brain/praxion_brain/config.py` both
+  read from `PRAXION_SKILLS_ACTIVE` (default `local/skills/active`), so a custom directory cannot detach
+  the watch from admission. Reason:
+  autonomous run 3 admitted `get_furnace` and the body, started before the file existed, rejected it
+  `unknown_skill`. Rules out: a separate `--skills-dir-watch` flag (the loaded dir and the watched dir must
+  not drift), and swapping under a running intent (its frames name skills the new program may not hold).
 - **Models by measurement, budget $5 per key (user).** Writer: `gpt-6-luna` and `gpt-6.1-terra` are
   measured on the slice goals; the cheaper one that passes admission is used, a repair may escalate to the
   stronger one. Router: Jev (`jev-latest`), one Noul per known skill ("does it reach the goal?"); code

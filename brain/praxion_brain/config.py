@@ -85,7 +85,17 @@ def candidates_dir() -> Path:
 
 
 def active_skills_dir() -> Path:
-    """Admitted skills; a run gets these in addition to the core skills."""
+    """Admitted skills; a run gets these in addition to the core skills.
+
+    ``PRAXION_SKILLS_ACTIVE`` is the one override the harness
+    (``praxion_harness.body.active_skills_dir``) also reads, so the directory
+    the body watches is always the one admission writes. A relative path is
+    resolved against the repository root.
+    """
+    value = os.environ.get("PRAXION_SKILLS_ACTIVE")
+    if value:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else repo_root() / path
     return local_dir() / "skills" / "active"
 
 

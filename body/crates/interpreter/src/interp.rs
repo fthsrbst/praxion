@@ -127,6 +127,16 @@ impl Interpreter {
         &self.program
     }
 
+    /// Replaces the program a port session reloaded from disk. Every frame is
+    /// dropped: the old stack names skills the new program may not hold. The
+    /// caller reloads only while no intent owns the body, and the next
+    /// `start_skill` builds a fresh stack.
+    pub fn replace_program(&mut self, program: Program) {
+        let max_primitive_failures = self.max_primitive_failures;
+        *self = Self::new(program);
+        self.max_primitive_failures = max_primitive_failures;
+    }
+
     /// Pushes the root frame. `args` are positional; defaults fill the rest.
     pub fn start_skill(&mut self, name: &str, mut args: Vec<ArgValue>) -> Result<(), String> {
         let skill = self

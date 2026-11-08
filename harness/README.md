@@ -86,7 +86,11 @@ praxion-body --forwarder 127.0.0.1:25640 --tee 127.0.0.1:25641 \
 - `--goal` names a skill in `body/skills`; `--goal-args` are typed from the
   skill's parameters (int, item, block, entity_kind or bool).
 - `--candidates DIR` loads every `.skill` in DIR next to the core skills; a
-  candidate that redefines a core skill exits 2 with an error.
+  candidate that redefines a core skill exits 2 with an error. In a port
+  session the body watches DIR: a new or changed file reloads the program
+  before the next command, so a skill admitted mid-run is playable without a
+  restart (`start_session` watches `active_skills_dir()`:
+  `PRAXION_SKILLS_ACTIVE`, default `local/skills/active`, created when missing).
 - `praxion-body check-skills --candidates DIR [--skills body/skills]` checks
   them offline and prints one JSON report (exit `0` pass, `1` fail, `2` usage/IO).
 - `--start-delay-ticks` waits after the first usable tick so fixtures can give

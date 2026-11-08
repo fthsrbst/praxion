@@ -59,6 +59,21 @@ def _binary(name: str) -> Path:
     return repo_root() / "body" / "target" / "release" / f"{name}{suffix}"
 
 
+def active_skills_dir() -> Path:
+    """The admitted-skills directory: the brain writes it, the body watches it.
+
+    ``PRAXION_SKILLS_ACTIVE`` is the one override this module and
+    ``brain/praxion_brain/config.py`` both read, so a custom directory cannot
+    detach the body's watch from where admission writes. A relative path is
+    resolved against the repository root.
+    """
+    value = os.environ.get("PRAXION_SKILLS_ACTIVE")
+    if value:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else repo_root() / path
+    return repo_root() / "local" / "skills" / "active"
+
+
 def _port_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -102,6 +117,7 @@ class BodyRun:
         fixture: FixtureChannel,
         *,
         keep: bool,
+        skills_dir: Optional[Path] = None,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.body_dir = self.run_dir / "body"
@@ -113,6 +129,8 @@ class BodyRun:
         self.referee = referee
         self.fixture = fixture
         self.keep = keep
+        #: The directory a port session watches for newly admitted skills.
+        self.skills_dir = Path(skills_dir) if skills_dir is not None else None
         self._out = None
         self._forwarder_out = None
         self._stopped = False
@@ -352,9 +370,14 @@ def start_session(
                 client.connect()
                 ...
 
+    The body watches :func:`active_skills_dir` (``PRAXION_SKILLS_ACTIVE``,
+    default ``local/skills/active``) as ``--candidates`` and reloads its
+    program when a file there changes, so a skill the brain admits during the
+    run is playable by the next command. The directory is created when missing.
+
     ``max_ticks`` is only the process-wide safety cap, not a goal budget.
     """
-    run = _start(
+    return _start(
         seed,
         None,
         (),
@@ -369,7 +392,6 @@ def start_session(
         keep=keep,
         extra_args=extra_args,
     )
-    return run
 
 
 def _start(
@@ -394,6 +416,13 @@ def _start(
             raise RuntimeError(
                 f"{binary} is not built ({path}); run: cd body && cargo build --release"
             )
+
+    # The brain's admitted skills live here; the body watches it and reloads,
+    # so a skill written mid-run needs no restart. Both sides read
+    # `active_skills_dir()`, so an override cannot point the watch elsewhere.
+    skills_dir = active_skills_dir() if port_mode else None
+    if skills_dir is not None:
+        skills_dir.mkdir(parents=True, exist_ok=True)
 
     run_dir = Path(run_dir) if run_dir is not None else (
         repo_root() / "runs" / f"test-body-{uuid.uuid4().hex}"
@@ -446,6 +475,7 @@ def _start(
             command.extend(["--goal", goal])
         if port_mode:
             command.extend(["--port", f"127.0.0.1:{body_port}"])
+            command.extend(["--candidates", str(skills_dir)])
         if goal_args:
             command.append("--goal-args")
             command.extend(str(argument) for argument in goal_args)
@@ -471,6 +501,7 @@ def _start(
             fixture,
             keep=server.keep,
             port=body_port,
+            skills_dir=skills_dir,
         )
         run._out = body_out
         run._forwarder_out = forwarder_out
@@ -498,6 +529,7 @@ __all__ = [
     "BODY_PORT_RANGE",
     "BodyRun",
     "BodySession",
+    "active_skills_dir",
     "start_body",
     "start_session",
 ]

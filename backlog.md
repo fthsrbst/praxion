@@ -51,6 +51,13 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   removed as tautological. The same fixture is needed for tests of the walk-back cap (`EXPLORE_MAX_WALK_BACKS`),
   the empty walk-back/frontier plan skips, the look-around ending when a target is found mid-turn, and
   `open_to_sky` against a real heightmap (GLM review `logs/review/r1108/r-explore-fixes.answer.txt` Q6).
+- NEXT (body): the console's "Stop goal" cannot stop a running skill: the body pops only done or suspended intents
+  (`body/crates/body/src/driver.rs` pop path), a pop of a running one is ignored. Architecture §5.4: stop and cancel
+  always work. Add a cancel that settles the running intent `cancelled` (abandon its primitive) and a receipt.
+- NEXT (loop): admission blocks the body for 30+ minutes (autonomous run 3, `get_coal`: the body stood still while
+  practice runs played on test servers). Session 8 says a safe fallback goal runs after 3-5 s. Make admission a
+  background job; the loop keeps playing known-skill goals (never the goal being written); on admission the skill is
+  hot-loaded and the goal retried. After the console agent's `loop.py` change lands.
 - `craft` vs `near(crafting_table, 4)` disagree (autonomous run 2, seed 202,
   `runs/test-body-774ebe1d772149d8b028db880afe62eb`): `get_stone_sword` chose its craft rule (near true) and `craft`
   failed `needs_table` after 195 ticks. Same class as wet stone (near vs mine): give craft and near one predicate

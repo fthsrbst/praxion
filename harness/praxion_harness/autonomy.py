@@ -35,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
     with start_session(args.seed, setup=_peaceful, max_ticks=10**9, keep=True) as session:
         print(f"Watch: Minecraft 26.3 > Direct Connection > 127.0.0.1:{session.server.port}", flush=True)
         print(f"body port {session.port}, run_dir {session.run_dir}", flush=True)
+        print("Console: http://127.0.0.1:8765/", flush=True)
+        # The body watches this directory: a skill admitted mid-run is live on
+        # the next command, with no restart.
+        print(f"hot skills {session.skills_dir}", flush=True)
         brain = subprocess.Popen(
             [sys.executable, "-m", "praxion_brain", "run", "--port", str(session.port),
              # Each run is a fresh server world: its memory must be too, or

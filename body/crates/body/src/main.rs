@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use praxion_body::summary::{SessionSummary, Shared};
 use praxion_body::{
-    Args, BodyDriver, BodyOptions, CheckArgs, ProgramLoadError, Versions, find_root, git_commit,
-    load_program, load_skill_files, read_skill_files, resolve_goal_args, settings_path, skills_dir,
-    summary,
+    Args, BodyDriver, BodyOptions, CheckArgs, ProgramLoadError, SkillsWatch, Versions, find_root,
+    git_commit, load_skill_files, load_startup_program, read_skill_files, resolve_goal_args,
+    settings_path, skills_dir, summary,
 };
 use praxion_headless::{ConnectOptions, DriverHandle, Event, Session, TICK};
 use praxion_manifest::Manifest;
@@ -109,13 +109,23 @@ fn run() -> Result<ExitCode, String> {
 
     let root = find_root().ok_or("cannot find the repository root (versions/manifest.toml)")?;
     let skills = args.skills.clone().unwrap_or_else(|| skills_dir(&root));
-    let core_files = load_skill_files(&skills)?;
-    let candidate_files = match &args.candidates {
-        Some(dir) => read_skill_files(dir)?,
-        None => Vec::new(),
+    // A port session watches `--candidates`: its files are the brain's admitted
+    // skills, and one written after this process started must be playable. The
+    // stamp is taken before the files are read, so a skill added during startup
+    // is reloaded on the first command instead of missed.
+    let watch = match (&args.candidates, args.port.is_some()) {
+        (Some(dir), true) => Some(SkillsWatch::new(skills.clone(), dir.clone())?),
+        _ => None,
     };
-    let program = match load_program(&core_files, &candidate_files) {
-        Ok(program) => program,
+    // A port session must boot: a stale file left in the watched directory
+    // degrades to the core-only program and is retried when it changes. A
+    // `--goal` run keeps its exit-2 contract for a rejected candidate.
+    let (program, startup_failure) = match load_startup_program(
+        &skills,
+        args.candidates.as_deref(),
+        args.port.is_some(),
+    ) {
+        Ok(started) => started,
         Err(ProgramLoadError::NameCollision(message) | ProgramLoadError::Candidate(message)) => {
             log::error!("praxion-body: {message}");
             return Ok(ExitCode::from(2));
@@ -174,7 +184,7 @@ fn run() -> Result<ExitCode, String> {
         None => None,
     };
 
-    let driver = BodyDriver::new(
+    let mut driver = BodyDriver::new(
         BodyOptions {
             skill: args.goal.clone(),
             args: goal_args,
@@ -185,11 +195,18 @@ fn run() -> Result<ExitCode, String> {
         },
         args.run_dir.clone(),
         program,
+        watch,
         settings,
         Arc::clone(&shared),
         port.clone(),
     )
     .map_err(|error| format!("cannot start the event log: {error}"))?;
+    if let Some(failure) = startup_failure {
+        // The session runs on the core-only program; the brain sees why and
+        // the watcher retries when the file is fixed or removed.
+        log::warn!("praxion-body: {failure}");
+        driver.startup_reload_failed(&failure);
+    }
     let handle: DriverHandle = Arc::new(Mutex::new(Box::new(driver)));
 
     let options = ConnectOptions {

@@ -16,7 +16,10 @@
 //! `--forwarder` is the forwarder's game listener (the address a client would
 //! connect to), `--tee` its tee listener. `--candidates` adds learned
 //! `.skill` files to the core skills; `check-skills` checks them without a
-//! server or network and prints one JSON report.
+//! server or network and prints one JSON report. In a port session the
+//! directory is watched: a new or changed file reloads the program before the
+//! next command is accepted, so a skill admitted after the body started is
+//! playable without a restart.
 //!
 //! `--goal` is required unless `--port` is set: a port session takes its goals
 //! from the brain, and `--goal` (when given) is injected as command `cli` so
@@ -43,7 +46,8 @@ pub struct Args {
     pub max_ticks: Option<u64>,
     pub settings: Option<PathBuf>,
     pub skills: Option<PathBuf>,
-    /// Learned candidate skills loaded next to the core skills.
+    /// Learned candidate skills loaded next to the core skills; in a port
+    /// session the directory is also watched for reloads.
     pub candidates: Option<PathBuf>,
     pub start_delay_ticks: u64,
     /// The movement-style seed; the same seed gives the same personality.
