@@ -216,10 +216,9 @@ fn rank_frontiers_inner(
         // tier made it the first candidate on every scan. `explore` then got a
         // successful empty plan, marked the cell explored and never moved
         // (seed 101 live run 2026-11-08: 500 scans, 24,000 ticks, no step).
-        // TEMP-VERIFY: the regression test must fail without this guard.
-        // if pos == start {
-        //     continue;
-        // }
+        if pos == start {
+            continue;
+        }
         if explored_set.contains(&pos) || rejected_set.contains(&pos) {
             continue;
         }
