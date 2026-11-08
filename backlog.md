@@ -45,6 +45,12 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   ticks in about 2 of 5 runs: the nearest-frontier order wanders downhill and west. A person would climb
   for a view or follow open ground. Needs a design (score by height or by unseen sky area); runs
   `runs/test-body-405d2ee3274444ae8e1c75b959a749fb`, `...11b45b28...` (3 follower stalls at deviation 0.8).
+- Explore review fixes (2026-11-08, `logs/review/r1108/`): the "at most 2 cue attempts on a known canopy"
+  rule has no behavioural test; a test needs a `World` fixture with chunks so `seek` runs on real known
+  leaves (same fixture as "Mine and HandSelect tick paths lack tests"). The worker's counter-only test was
+  removed as tautological. The same fixture is needed for tests of the walk-back cap (`EXPLORE_MAX_WALK_BACKS`),
+  the empty walk-back/frontier plan skips, the look-around ending when a target is found mid-turn, and
+  `open_to_sky` against a real heightmap (GLM review `logs/review/r1108/r-explore-fixes.answer.txt` Q6).
 - Watch: the `place` registry budget (80 ticks) is tight with human aiming (GLM review, about 74-81
   ticks worst case); check for place timeouts in the first live runs.
 - Decision owed (user): the raw-store/perception boundary in architecture §4/§5.1 is not enforced in

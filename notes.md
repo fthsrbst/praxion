@@ -6,6 +6,15 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-08, user: building, persona, combat, farms (wishes, not yet decided)
+- The bot must build shelters, and not the same shelter every time: a design that fits the site and the
+  moment, and beautiful when it wants to be. It should have a persona.
+- It must fight mobs, go wherever an item's mob lives and hunt it, and even build a mob farm.
+- Claude's proposal (not decided): a build layer (LLM designs a voxel blueprint for the site from the persona,
+  terrain and inventory; code validates supports, materials and reach; a `build` primitive executes it
+  support-first with scaffolding), a persona profile fed to the proposer and the designer, a `hunt(mob)` core
+  skill plus combat tactics, then farms as blueprints with mechanics from the wiki RAG. After the Demo-2 loop.
+
 ## 2026-11-08, Claude Opus 5.5: first live `learn get_furnace`
 - The whole slice ran end to end: Jev routed "have a furnace" to write (every known skill ~0.02), the writer
   produced four candidates (2x `gpt-6-luna`, 2x escalated `gpt-6.1-terra`), all passed `check-skills`, and the

@@ -19,6 +19,7 @@ use std::io::Cursor;
 
 use azalea_core::{
     game_type::GameMode,
+    heightmap_kind::HeightmapKind,
     position::{ChunkBlockPos, ChunkSectionBlockPos, ChunkSectionPos},
     sound::CustomSound,
 };
@@ -386,6 +387,24 @@ impl World {
         chunk.get_block_state(&ChunkBlockPos::from(pos), dimension.min_y())
     }
 
+    /// The `WorldSurface` heightmap value of the column at `x, z`: the first
+    /// `y` above the highest non-air block, so the column's top block is
+    /// `surface_y - 1`. `None` when the world is invalid, the chunk is not
+    /// loaded, or the server sent no `WorldSurface` heightmap for it.
+    ///
+    /// The heightmaps follow block changes (`Chunk::set_block_state` calls
+    /// `Heightmap::update`), so the answer is current for every block update
+    /// the followed connection has applied.
+    pub fn surface_y(&self, x: i32, z: i32) -> Option<i32> {
+        if !self.status.is_valid() {
+            return None;
+        }
+        let chunk = self.chunks.get(&ChunkPos::new(x >> 4, z >> 4))?;
+        let heightmap = chunk.heightmaps.get(&HeightmapKind::WorldSurface)?;
+        // `& 15` keeps a negative coordinate inside its chunk: -1 is local 15.
+        Some(heightmap.get_first_available((x & 15) as u8, (z & 15) as u8))
+    }
+
     pub fn block_description(&self, pos: BlockPos) -> Option<BlockDescription> {
         self.block_state(pos).map(BlockDescription::of)
     }
@@ -474,6 +493,11 @@ impl World {
                 self.sounds.clear();
                 self.player.clear_position();
                 self.player.clear_own_facts();
+                // The server builds a new player on slot 0 and sends no held-slot
+                // packet for the reset. The old selection would otherwise stay in
+                // the mirror, because our own `ServerboundSetCarriedItem` packets
+                // write it (seed 202, 2026-11-08).
+                self.player.set_selected_slot(0);
                 self.open_container = None;
                 self.set_dimension_and_mode(&packet.common);
             }

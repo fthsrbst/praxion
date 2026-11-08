@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use praxion_world::{BlockPos, BlockState};
+use praxion_world::{BlockPos, BlockState, ChunkPos, World};
 
 use crate::hash::FxBuildHasher;
 
@@ -137,15 +137,11 @@ impl KnownMap {
     /// first.
     fn evict_farthest(&mut self, focus: SectionKey, incoming: Option<SectionKey>) {
         while self.sections.len() >= self.capacity {
-            let farthest = self
-                .sections
-                .keys()
-                .copied()
-                .max_by(|a, b| {
-                    section_center_sq(*a, focus)
-                        .cmp(&section_center_sq(*b, focus))
-                        .then_with(|| a.cmp(b))
-                });
+            let farthest = self.sections.keys().copied().max_by(|a, b| {
+                section_center_sq(*a, focus)
+                    .cmp(&section_center_sq(*b, focus))
+                    .then_with(|| a.cmp(b))
+            });
             let Some(farthest) = farthest else {
                 break;
             };
@@ -237,8 +233,11 @@ impl KnownMap {
         }
         let index = local_index(pos);
         let section = self.section_mut(pos, focus);
-        if let Some(Cell::Seen { checked_tick, checked_revision, .. }) =
-            section.cells.get_mut(&index)
+        if let Some(Cell::Seen {
+            checked_tick,
+            checked_revision,
+            ..
+        }) = section.cells.get_mut(&index)
         {
             *checked_tick = tick;
             *checked_revision = revision;
@@ -246,7 +245,10 @@ impl KnownMap {
             .cells
             .insert(
                 index,
-                Cell::Miss { checked_tick: tick, checked_revision: revision },
+                Cell::Miss {
+                    checked_tick: tick,
+                    checked_revision: revision,
+                },
             )
             .is_none()
         {
@@ -257,8 +259,15 @@ impl KnownMap {
 
     /// The block fact at `pos`, when a ray has reached it.
     pub(crate) fn get(&self, pos: BlockPos) -> Option<Remembered> {
-        match self.sections.get(&section_key(pos))?.cells.get(&local_index(pos))? {
-            Cell::Seen { state, seen_tick, .. } => Some(Remembered {
+        match self
+            .sections
+            .get(&section_key(pos))?
+            .cells
+            .get(&local_index(pos))?
+        {
+            Cell::Seen {
+                state, seen_tick, ..
+            } => Some(Remembered {
                 state: *state,
                 seen_tick: *seen_tick,
             }),
@@ -271,8 +280,14 @@ impl KnownMap {
     /// deterministic). Sections are visited nearest first and the search stops
     /// once no unvisited section can hold a nearer cell, so the cost follows
     /// what is remembered, not the volume of the radius.
+    ///
+    /// A cell whose chunk changed since it was last checked is re-validated
+    /// against the live world: its remembered state may no longer be there.
+    /// The check is the same revision comparison [`KnownMap::needs_probe`]
+    /// makes.
     pub(crate) fn nearest_seen(
         &self,
+        world: &World,
         center: BlockPos,
         radius: u32,
         mut accept: impl FnMut(BlockPos, BlockState) -> bool,
@@ -284,8 +299,11 @@ impl KnownMap {
             .keys()
             .map(|&key| {
                 let base = section_base(key);
-                let (dx, dy, dz) =
-                    (axis(center.x, base.x), axis(center.y, base.y), axis(center.z, base.z));
+                let (dx, dy, dz) = (
+                    axis(center.x, base.x),
+                    axis(center.y, base.y),
+                    axis(center.z, base.z),
+                );
                 (dx * dx + dy * dy + dz * dz, key)
             })
             .filter(|&(d2, _)| d2 <= r2)
@@ -297,8 +315,18 @@ impl KnownMap {
                 break;
             }
             let base = section_base(key);
+            // Every cell of this section lives in the same chunk column, so
+            // the current revision is one lookup for the whole section.
+            let current_revision = world.chunk_revision(ChunkPos::new(key.0, key.2));
             for (index, cell) in &self.sections[&key].cells {
-                let Cell::Seen { state, .. } = *cell else { continue };
+                let Cell::Seen {
+                    state,
+                    checked_revision,
+                    ..
+                } = *cell
+                else {
+                    continue;
+                };
                 let pos = BlockPos::new(
                     base.x + i32::from(index & 15),
                     base.y + i32::from((index >> 8) & 15),
@@ -314,6 +342,22 @@ impl KnownMap {
                 if d2 > r2 || best.is_some_and(|(b, p, _)| (b, p) <= rank) {
                     continue;
                 }
+                // The cell is a candidate answer; only now is a stale chunk
+                // worth checking. A changed chunk re-validates the remembered
+                // cell against the world instead of hiding it: the chunk
+                // revision covers a whole column, so one dig or one decaying
+                // leaf would otherwise blind every remembered cell in it, and
+                // cells outside the sweep sphere might never be re-seen. The
+                // live read only confirms or denies a block the body saw; it
+                // never reveals a new one.
+                let state = if current_revision == Some(checked_revision) {
+                    state
+                } else {
+                    match world.block_state(pos) {
+                        Some(live) => live,
+                        None => continue,
+                    }
+                };
                 if accept(pos, state) {
                     best = Some((d2, rank.1, pos));
                 }
@@ -333,11 +377,18 @@ impl KnownMap {
             return true;
         };
         match *cell {
-            Cell::Seen { checked_tick, checked_revision, .. } => {
+            Cell::Seen {
+                checked_tick,
+                checked_revision,
+                ..
+            } => {
                 checked_revision != revision
                     || tick.saturating_sub(checked_tick) >= self.stale_ticks
             }
-            Cell::Miss { checked_tick, checked_revision } => {
+            Cell::Miss {
+                checked_tick,
+                checked_revision,
+            } => {
                 checked_revision != revision
                     || tick.saturating_sub(checked_tick) >= self.retry_ticks
             }
@@ -373,7 +424,10 @@ impl KnownMap {
         for (key, section) in &self.sections {
             let base = section_base(*key);
             for (index, cell) in &section.cells {
-                if let Cell::Seen { state, seen_tick, .. } = *cell {
+                if let Cell::Seen {
+                    state, seen_tick, ..
+                } = *cell
+                {
                     let pos = BlockPos::new(
                         base.x + i32::from(index & 15),
                         base.y + i32::from((index >> 8) & 15),
@@ -423,7 +477,10 @@ mod tests {
         assert_eq!(map.get(cell), None);
         assert!(!map.needs_probe(cell, 20, 7), "retry interval not reached");
         assert!(map.needs_probe(cell, 50, 7), "retry interval reached");
-        assert!(map.needs_probe(cell, 11, 8), "a chunk change forces a probe");
+        assert!(
+            map.needs_probe(cell, 11, 8),
+            "a chunk change forces a probe"
+        );
     }
 
     #[test]
@@ -442,7 +499,11 @@ mod tests {
         for i in 0..5 {
             map.record_seen(pos(i, 65, 0), state(1), 1 + i as u64, 1, (0, 4, 0));
         }
-        assert!(map.seen_len() <= 2, "{} cells over a cap of 2", map.seen_len());
+        assert!(
+            map.seen_len() <= 2,
+            "{} cells over a cap of 2",
+            map.seen_len()
+        );
 
         let mut none = KnownMap::new(96, 0, 100, 40);
         none.record_seen(pos(0, 65, 0), state(1), 1, 1, (0, 4, 0));
@@ -485,7 +546,10 @@ mod tests {
         let new = pos(2 * 16 + 1, 4 * 16 + 1, 0);
         map.record_seen(new, state(2), 1, 1, focus);
         assert_eq!(map.sections_len(), 27, "the map never exceeds its bound");
-        let remaining = corners.iter().filter(|cell| map.get(**cell).is_some()).count();
+        let remaining = corners
+            .iter()
+            .filter(|cell| map.get(**cell).is_some())
+            .count();
         assert_eq!(remaining, 7, "one corner section went first");
         assert!(map.get(new).is_some(), "the new cell is kept");
     }

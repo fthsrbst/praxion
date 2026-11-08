@@ -1,5 +1,6 @@
 //! The view scan: a sparse fan of rays inside the body's current look, written
-//! to the known map. One scan casts half the fan; two scans cover the view.
+//! to the known map. Every scan casts the whole fan, so a moving view is not
+//! left with half its rows sampled.
 
 use praxion_world::{BlockState, Vec3, World};
 
@@ -14,23 +15,21 @@ const VIEW_PITCH_MAX_DEGREES: f64 = 20.0;
 const VIEW_STEP_DEGREES: f64 = 2.5;
 
 impl Perception {
-    /// Cast one half of the view fan and record each ray's first blocking cell
-    /// in the known map. Rays come from `Caller::Other`'s share, never the
-    /// reflex reserve; a short share makes the scan do less, never more.
+    /// Cast the whole view fan and record each ray's first blocking cell in the
+    /// known map. Rays come from `Caller::Other`'s share, never the reflex
+    /// reserve; a short share makes the scan do less, never more.
     pub(crate) fn scan_view(&mut self, world: &World) {
         let Some(eye) = self.valid_eye(world) else {
             return;
         };
         let (yaw, pitch) = world.player_rotation();
         let range = f64::from(self.config.range);
-        let phase = usize::from(self.view_scan_phase);
-        self.view_scan_phase = !self.view_scan_phase;
         let yaw_rows = ((VIEW_YAW_HALF_DEGREES * 2.0) / VIEW_STEP_DEGREES) as usize + 1;
         let pitch_rows =
             ((VIEW_PITCH_MAX_DEGREES - VIEW_PITCH_MIN_DEGREES) / VIEW_STEP_DEGREES) as usize + 1;
         let eye_cell = eye.to_block_pos_floor();
         let (mut cast, mut hits, mut farthest) = (0u32, 0u32, 0f64);
-        'rows: for row in (phase..yaw_rows).step_by(2) {
+        'rows: for row in 0..yaw_rows {
             let yaw_offset = -VIEW_YAW_HALF_DEGREES + row as f64 * VIEW_STEP_DEGREES;
             for col in 0..pitch_rows {
                 if self.remaining_rays(Caller::Other) == 0 {

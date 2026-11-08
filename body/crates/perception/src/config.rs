@@ -45,8 +45,7 @@ pub const DEFAULT_SWEEP_STALE_TICKS: u64 = 100;
 /// hidden cells cannot starve the sweep.
 pub const DEFAULT_SWEEP_RETRY_TICKS: u64 = 40;
 
-/// Ticks between view scans. A scan covers half the fan, so two scans cover
-/// the whole current view.
+/// Ticks between view scans. Every scan casts the whole fan.
 pub const DEFAULT_VIEW_SCAN_PERIOD: u64 = 10;
 
 /// Largest block volume a `blocks_in` request may name.

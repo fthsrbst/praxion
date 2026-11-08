@@ -10,7 +10,7 @@ use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Look};
 use praxion_interpreter::Outcome;
 use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, Step};
-use praxion_world::World;
+use praxion_world::{BlockState, World};
 
 use crate::common::{block_name, idle, plan_inventory};
 use crate::frontier::{
@@ -44,9 +44,74 @@ const TARGET_APPROACH_RADIUS: f32 = 4.0;
 /// several directions.
 const EXPLORE_STEP_TICKS: u32 = 160;
 
-/// One full turn on the spot before the first frontier: two seconds, about
-/// four view scans, each a different quarter of the horizon.
-const LOOK_AROUND_TICKS: u64 = 40;
+/// Hard cap on one look-around: four held quarters must fit in five seconds
+/// even when the gaze is slow. Never more than one turn per call.
+const LOOK_AROUND_MAX_TICKS: u64 = 100;
+
+/// How close the body's yaw must be to a held quarter before the quarter
+/// counts as arrived, in degrees.
+const LOOK_AROUND_TOLERANCE_DEG: f32 = 10.0;
+
+/// Cue walks one call may attempt. A cue is a one-shot hint, not a substitute
+/// for exploring: after two attempts the search only considers targets and
+/// frontiers. An attempt is one `approach` call, whether a plan succeeds or
+/// not.
+const MAX_CUE_ATTEMPTS: u32 = 2;
+
+/// One look-around: four quarter turns held long enough for a view scan each.
+/// The turn starts where the body already looks, so the first quarter needs no
+/// movement.
+#[derive(Debug)]
+struct LookAround {
+    start_tick: u64,
+    start_yaw: f32,
+    quarter: u8,
+    /// Tick the body first came within tolerance of the held quarter. The
+    /// quarter is held for one scan period from here, so the scan sees it.
+    arrived_tick: Option<u64>,
+}
+
+impl LookAround {
+    fn new(tick: u64, yaw: f32) -> Self {
+        Self {
+            start_tick: tick,
+            start_yaw: yaw,
+            quarter: 0,
+            arrived_tick: None,
+        }
+    }
+
+    /// The yaw this quarter holds, in `0..360`.
+    fn aim(&self) -> f32 {
+        (self.start_yaw + f32::from(self.quarter) * 90.0).rem_euclid(360.0)
+    }
+
+    /// Advance the held aim when the gaze arrived and the scan period passed.
+    /// Returns whether the turn is still running. A turn never outlives
+    /// [`LOOK_AROUND_MAX_TICKS`], even if the gaze never reaches an aim.
+    fn advance(&mut self, tick: u64, body_yaw: f32, period: u64) -> bool {
+        if tick.saturating_sub(self.start_tick) >= LOOK_AROUND_MAX_TICKS {
+            return false;
+        }
+        let within =
+            praxion_planner::wrap_degrees(self.aim() - body_yaw).abs() <= LOOK_AROUND_TOLERANCE_DEG;
+        if within && self.arrived_tick.is_none() {
+            self.arrived_tick = Some(tick);
+        }
+        if let Some(arrived) = self.arrived_tick
+            && within
+            && tick.saturating_sub(arrived) >= period
+        {
+            if self.quarter < 3 {
+                self.quarter += 1;
+                self.arrived_tick = None;
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Explore {
@@ -58,10 +123,20 @@ pub(crate) struct Explore {
     /// looking for something better on the search period, as a person who
     /// spots the tree turns toward it instead of finishing the detour.
     chase: Chase,
-    /// When nothing is known yet, the call first turns once on the spot (tick
-    /// it started, yaw it started from), so the view scan sees every side
-    /// before a frontier is picked; a person looks around before walking off.
-    look_around: Option<(u64, f32)>,
+    /// When nothing is known yet, the call first turns once on the spot, so
+    /// the view scan sees every side before a frontier is picked; a person
+    /// looks around before walking off. Armed at most once per call.
+    look_around: Option<LookAround>,
+    /// Whether this call already made its look-around decision. It prevents a
+    /// later failed seek from arming a turn after the first leg.
+    look_around_started: bool,
+    /// Cue approaches this call has attempted, successful plans or not.
+    cue_attempts: u32,
+    /// Cue cells this call reached, rejected or found already at. Kept apart
+    /// from `explored`: a cue must not steer the frontier ranking or the
+    /// cross-call memory, and the shared ring must not silently re-enable a
+    /// cue that was already used.
+    cue_done: Vec<BlockPos>,
     /// Frontier cells this call has reached; new choices stay away from them.
     explored: Vec<BlockPos>,
     /// Frontier cells the planner could not reach.
@@ -127,6 +202,12 @@ const EXPLORE_WATER_AFTER_IDLE_TICKS: u32 = 40;
 /// counts as exhausted too.
 const EXPLORE_WALK_BACKS_BEFORE_WATER: u32 = 2;
 
+/// Walks back without a new frontier after which the call gives up and lets
+/// its idle budget run out. Without a cap a body near its explored cells
+/// walked back and forth for whole calls and never reported `not_found`
+/// (seed 101 live run 2026-11-08).
+const EXPLORE_MAX_WALK_BACKS: u32 = 4;
+
 /// Plan attempts per tick when consuming a ranked frontier list. One keeps a
 /// slow A* out of the tick's tail; the remaining candidates wait for the next
 /// tick.
@@ -169,9 +250,6 @@ const RECENT_EXPLORED_CELLS: usize = 128;
 pub(crate) struct ExploreMemory {
     /// Cells recent `explore` calls reached or rejected, oldest first.
     recent: VecDeque<BlockPos>,
-    /// The highest surface altitude this run's `explore` calls stood at, once
-    /// one has run.
-    home_y: Option<i32>,
     /// The first cell this run explored, as `(x, z)`.
     origin: Option<(i32, i32)>,
     /// How many `explore` calls this run has started.
@@ -194,16 +272,6 @@ impl ExploreMemory {
             self.recent.pop_front();
         }
         self.recent.push_back(pos);
-    }
-
-    /// The highest surface altitude recent `explore` calls stood at. Wood grows
-    /// on the surface; an explore that follows one-block descents into a cave
-    /// can burn every budget underground, so a candidate much below this line
-    /// is refused.
-    fn home_y(&mut self, start: i32) -> i32 {
-        let home = self.home_y.get_or_insert(start);
-        *home = (*home).max(start);
-        *home
     }
 
     /// The first cell this body explored, as (x, z). Frontier ranking pushes
@@ -258,6 +326,9 @@ impl Explore {
             goal: None,
             chase: Chase::Frontier,
             look_around: None,
+            look_around_started: false,
+            cue_attempts: 0,
+            cue_done: Vec::new(),
             explored: {
                 // Continue from where recent calls walked, so a retry does not
                 // repeat the same direction from an empty set.
@@ -294,7 +365,6 @@ impl Explore {
         let frame = idle(ctx);
         self.waited += 1;
         let start = ctx.body.position().to_block_pos_floor();
-        let home = memory.home_y(start.y);
         // The completion check is cheap: a 5-block scan. The wider target
         // search runs on `EXPLORE_SEARCH_PERIOD_TICKS`, also while walking to a
         // frontier or a cue; it walks remembered sections, not the cube.
@@ -303,6 +373,31 @@ impl Explore {
         }
         if self.waited > self.budget {
             return (frame, None, Some(Outcome::Failed("not_found".into())));
+        }
+
+        // A first tick in the air must not consume the one look-around: the
+        // body cannot turn while it falls, but it may arm the turn as soon as
+        // it lands. In water the gate is evaluated (and refused) so a sinking
+        // body does not arm the same turn on every tick.
+        if !self.look_around_started && (ctx.body.on_ground() || ctx.body.is_in_water()) {
+            self.look_around_started = true;
+            // Only a body standing on solid, dry ground may turn on the spot.
+            // A body that stands still in water sinks; on seed 101 the turn
+            // cost 100 ticks of sinking, the drowning reflex preempted the
+            // call, and the retry armed the same turn again, 106 times.
+            if look_around_allowed(ctx.body.on_ground(), ctx.body.is_in_water()) {
+                let target_known = nearest_known_block(
+                    ctx.perception,
+                    ctx.world,
+                    &self.target,
+                    EXPLORE_SEARCH_RADIUS,
+                    &self.rejected,
+                )
+                .is_some();
+                if !target_known {
+                    self.look_around = Some(LookAround::new(ctx.tick, ctx.body.look().y_rot()));
+                }
+            }
         }
 
         // While walking to a frontier or a cue, keep looking: a target (or,
@@ -327,9 +422,23 @@ impl Explore {
                 self.idle_ticks = 0;
                 self.candidates.clear();
                 if let Some(goal) = self.goal.take() {
-                    memory.remember(goal);
-                    remember(&mut self.explored, goal);
-                    self.goals = self.goals.saturating_add(1);
+                    if self.chase == Chase::Cue {
+                        // Cue cells have their own per-call memory. They must
+                        // not seed the frontier-avoid ring or the ranking.
+                        self.note_cue_done(goal);
+                    } else if self.chase == Chase::WalkBack {
+                        // The cell was taken out of `explored` to walk back to
+                        // it; putting it back would make it the next walk-back
+                        // target and the body would shuttle between two cells.
+                    } else {
+                        memory.remember(goal);
+                        remember(&mut self.explored, goal);
+                        // Only a real frontier arrival advances the outward
+                        // ranking; a cue or target leg is not exploration.
+                        if self.chase == Chase::Frontier {
+                            self.goals = self.goals.saturating_add(1);
+                        }
+                    }
                 }
             } else if follower.is_stalled() {
                 let progress = follower.progress(ctx.body);
@@ -379,8 +488,12 @@ impl Explore {
                 // is how the body sat at an edge for 160 ticks.
                 self.candidates.clear();
                 if let Some(goal) = self.goal.take() {
-                    memory.remember(goal);
-                    remember(&mut self.rejected, goal);
+                    if self.chase == Chase::Cue {
+                        self.note_cue_done(goal);
+                    } else {
+                        memory.remember(goal);
+                        remember(&mut self.rejected, goal);
+                    }
                 }
                 let stuck = ctx.body.position().to_block_pos_floor();
                 remember(&mut self.blocked, stuck);
@@ -413,27 +526,34 @@ impl Explore {
 
         // A target the known map already holds is approached directly. The
         // search is the expensive wide scan, so it refreshes on a bounded
-        // period instead of every tick.
+        // period instead of every tick. A target or cue found now ends the
+        // look-around.
         if ctx.tick >= self.target_search_tick {
             self.target_search_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
             if self.seek(ctx, start) {
-                return (frame, None, None);
-            }
-            self.look_around
-                .get_or_insert((ctx.tick, ctx.body.look().y_rot()));
-        }
-        if let Some((since, yaw)) = self.look_around {
-            let elapsed = ctx.tick.saturating_sub(since);
-            if elapsed < LOOK_AROUND_TICKS {
-                let turned = 360.0 * elapsed as f32 / LOOK_AROUND_TICKS as f32;
-                let mut frame = frame;
-                frame.look = Look::Aim {
-                    yaw: yaw + turned,
-                    pitch: 0.0,
-                };
+                self.look_around = None;
                 return (frame, None, None);
             }
         }
+        // Hold each quarter of the horizon for one view-scan period after the
+        // gaze reaches it, so the scan sees every side once. The whole turn is
+        // capped, because a slow gaze must not eat the call's budget.
+        let period = ctx.perception.config().view_scan_period.max(1);
+        let mut aim = None;
+        // The ground can give way mid-turn (sand, a flood): stop turning then.
+        let still_allowed = look_around_allowed(ctx.body.on_ground(), ctx.body.is_in_water());
+        if let Some(turn) = self.look_around.as_mut()
+            && still_allowed
+            && turn.advance(ctx.tick, ctx.body.look().y_rot(), period)
+        {
+            aim = Some(turn.aim());
+        }
+        if let Some(yaw) = aim {
+            let mut frame = frame;
+            frame.look = Look::Aim { yaw, pitch: 0.0 };
+            return (frame, None, None);
+        }
+        self.look_around = None;
 
         // No target in sight: rank the frontiers once per refresh period and
         // consume the list with a few plan attempts per tick. An unreachable
@@ -473,6 +593,30 @@ impl Explore {
             self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
             self.candidates
                 .retain(|choice| !self.rejected.contains(&choice.cell));
+            // Keep only cells whose column is open to the sky. Wood does not
+            // grow in the cave a chain of one-block descents leads to, and an
+            // open column is the real property that tells a valley from a
+            // cave. The altitude band that stood in for it dropped every
+            // valley once the body walked down from a peak (seed 303: spawned
+            // at y 99, at y 88 every frontier toward the trees was refused).
+            // `choice.cell` is the feet cell (`frontier::standable` keeps the
+            // body cell and checks its floor), so the scan starts at its head.
+            // Before the tier cut: a best tier made only of covered cells
+            // emptied the list while open cells waited in a lower tier (seed
+            // 101, 2026-11-08: 106 `not_found` in a row).
+            let ranked = self.candidates.len();
+            self.candidates.retain(|choice| {
+                open_to_sky(
+                    choice.cell,
+                    ctx.world.surface_y(choice.cell.x, choice.cell.z),
+                    |pos| ctx.world.block_state(pos),
+                )
+            });
+            log::debug!(
+                "explore frontiers ranked={} open_to_sky={}",
+                ranked,
+                self.candidates.len()
+            );
             // Keep the best quality tier (not avoided, on level, dry) before
             // fanning out or preferring a longer leg; distance never overrides
             // a cliff or an explored edge.
@@ -491,11 +635,6 @@ impl Explore {
             // rotation); hopping is fine because the follower walks a whole
             // path. Long legs were tried and made the follower stall on
             // terrain, so the score is not inflated here.
-            // Stay near the surface: wood does not grow in the cave a chain of
-            // one-block descents leads to. Twelve blocks below the highest
-            // recent surface still reaches a valley forest but not a cave.
-            self.candidates
-                .retain(|choice| choice.cell.y >= home - 12 && choice.cell.y <= home + 32);
         }
         if ctx.tick >= self.next_plan_tick {
             for _ in 0..EXPLORE_PLAN_ATTEMPTS {
@@ -505,6 +644,12 @@ impl Explore {
                 let goal = choice.cell;
                 let plan = self.plan_to(ctx, start, Goal::Block(goal));
                 match plan.status {
+                    // The body already stands on this frontier: it is explored,
+                    // not a goal to walk to (no follower, no goal count).
+                    praxion_planner::PlanStatus::Success if plan.steps.is_empty() => {
+                        memory.remember(goal);
+                        remember(&mut self.explored, goal);
+                    }
                     praxion_planner::PlanStatus::Success
                         if self.allow_water || !plan_crosses_water(&plan) =>
                     {
@@ -562,7 +707,11 @@ impl Explore {
         // A pit with no reachable frontier is not a dead end: walk back to a
         // cell a previous leg reached and scan from there. Without this the
         // body sits at the bottom of the same hole for every retry.
-        if self.idle_ticks >= 10 && !self.explored.is_empty() && ctx.tick >= self.next_plan_tick {
+        if self.idle_ticks >= 10
+            && self.walk_backs < EXPLORE_MAX_WALK_BACKS
+            && !self.explored.is_empty()
+            && ctx.tick >= self.next_plan_tick
+        {
             for _ in 0..2 {
                 if self.explored.is_empty() {
                     break;
@@ -576,12 +725,22 @@ impl Explore {
                         radius: TARGET_APPROACH_RADIUS,
                     },
                 );
+                // An empty plan means the body is already there: a walk back
+                // would end on the next tick and only reset the idle budget.
                 if plan.status == praxion_planner::PlanStatus::Success
+                    && !plan.steps.is_empty()
                     && (self.allow_water || !plan_crosses_water(&plan))
                 {
+                    log::debug!(
+                        "explore walk back target={:?} cell={:?} steps={} walk_backs={}",
+                        self.target,
+                        cell,
+                        plan.steps.len(),
+                        self.walk_backs
+                    );
                     self.path_ticks = plan.cost.ceil().max(0.) as u64;
                     self.goal = Some(cell);
-                    self.chase = Chase::Frontier;
+                    self.chase = Chase::WalkBack;
                     self.follower = Some(self.follow(ctx, plan.steps));
                     self.idle_ticks = 0;
                     self.walk_backs += 1;
@@ -592,6 +751,16 @@ impl Explore {
             }
         }
         if self.idle_ticks > EXPLORE_IDLE_TICKS {
+            log::debug!(
+                "explore not_found target={:?} pos={:?} on_ground={} in_water={} allow_water={} explored={} walk_backs={}",
+                self.target,
+                ctx.body.position(),
+                ctx.body.on_ground(),
+                ctx.body.is_in_water(),
+                self.allow_water,
+                self.explored.len(),
+                self.walk_backs
+            );
             return (frame, None, Some(Outcome::Failed("not_found".into())));
         }
         (frame, None, None)
@@ -617,8 +786,17 @@ impl Explore {
     }
 
     /// Plan to `cell` and start the follower. A failed plan rejects the cell
-    /// for the next search. Returns whether a walk started.
-    fn approach(&mut self, ctx: &mut Ctx<'_>, start: BlockPos, cell: BlockPos, chase: Chase) -> bool {
+    /// for the next search. A successful plan with no steps means the body is
+    /// already there: it starts no follower, and a cue is marked done, so an
+    /// already-reached cell cannot become a fake goal every tick. Returns
+    /// whether a walk started.
+    fn approach(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        start: BlockPos,
+        cell: BlockPos,
+        chase: Chase,
+    ) -> bool {
         let plan = self.plan_to(
             ctx,
             start,
@@ -630,6 +808,12 @@ impl Explore {
         if plan.status == praxion_planner::PlanStatus::Success
             && (self.allow_water || !plan_crosses_water(&plan))
         {
+            if plan.steps.is_empty() {
+                if chase == Chase::Cue {
+                    self.note_cue_done(cell);
+                }
+                return false;
+            }
             self.path_ticks = plan.cost.ceil().max(0.) as u64;
             log::debug!(
                 "explore approach target={:?} cell={:?} cost={} steps={}",
@@ -644,7 +828,11 @@ impl Explore {
             self.idle_ticks = 0;
             true
         } else {
-            remember(&mut self.rejected, cell);
+            if chase == Chase::Cue {
+                self.note_cue_done(cell);
+            } else {
+                remember(&mut self.rejected, cell);
+            }
             false
         }
     }
@@ -661,21 +849,42 @@ impl Explore {
             &self.rejected,
         );
         if let Some((cell, _)) = target {
-            return !self.rejected.contains(&cell) && self.approach(ctx, start, cell, Chase::Target);
+            return !self.rejected.contains(&cell)
+                && self.approach(ctx, start, cell, Chase::Target);
         }
         if self.chase == Chase::Cue && self.follower.is_some() {
             return false;
         }
-        // No log is known, but a log grows in a leaf canopy: walk to the
-        // nearest known leaves instead of a frontier, so the search does not
-        // leave a tree that is already in view.
-        let cue = cue_goal(&self.target, |tag, radius| {
+        // A cue is a one-shot hint: at most two walks per call. After that the
+        // search only considers targets and frontiers, so a harvested canopy
+        // cannot consume the whole budget.
+        if self.cue_attempts >= MAX_CUE_ATTEMPTS {
+            return false;
+        }
+        // Leaves are see-through, so the view scan records no canopy: only the
+        // sweep knows leaf cells, and only within its radius. A cue farther
+        // out would be a stale sweep fact the body has walked away from.
+        let sweep_radius = ctx.perception.config().sweep_radius;
+        let cue = cue_goal(&self.target, sweep_radius, |tag, radius| {
             let mut exclude = self.rejected.clone();
+            exclude.extend(self.cue_done.iter().copied());
             exclude.extend(self.explored.iter().copied());
             nearest_known_block(ctx.perception, ctx.world, tag, radius, &exclude)
                 .map(|(cell, _)| cell)
         });
-        cue.is_some_and(|cell| self.approach(ctx, start, cell, Chase::Cue))
+        let Some(cell) = cue else {
+            return false;
+        };
+        self.cue_attempts += 1;
+        self.approach(ctx, start, cell, Chase::Cue)
+    }
+
+    /// Mark a cue cell reached or rejected. The list is per call and never
+    /// feeds the frontier ranking or the cross-call memory.
+    fn note_cue_done(&mut self, cell: BlockPos) {
+        if !self.cue_done.contains(&cell) {
+            self.cue_done.push(cell);
+        }
     }
 
     fn plan_to(&self, ctx: &mut Ctx<'_>, start: BlockPos, goal: Goal) -> praxion_planner::Plan {
@@ -688,18 +897,23 @@ impl Explore {
     }
 }
 
-/// The tag whose known cells point toward `target` when `target` itself is not
-/// known. Logs grow in leaf canopies, so a log search that sees no log can
-/// still walk to a canopy and look under it. This is the only cue; it is not a
-/// general mapping.
 /// What the follower is walking to; see [`Explore::chase`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Chase {
     Frontier,
+    /// A walk to a cue cell, not a frontier: it neither counts as a goal nor
+    /// enters the frontier memory.
     Cue,
     Target,
+    /// A walk back to a cell an earlier leg reached, so the search can scan
+    /// from there. It is not a frontier arrival either.
+    WalkBack,
 }
 
+/// The tag whose known cells point toward `target` when `target` itself is not
+/// known. Logs grow in leaf canopies, so a log search that sees no log can
+/// still walk to a canopy and look under it. This is the only cue; it is not a
+/// general mapping.
 fn cue_for(target: &str) -> Option<&'static str> {
     let tag = target.strip_prefix('#')?;
     // `#logs` is the general tag; a wood type names its own (`#oak_logs`).
@@ -707,14 +921,17 @@ fn cue_for(target: &str) -> Option<&'static str> {
     is_log.then_some("#leaves")
 }
 
-/// The cell a cued search walks to, if the cue tag is known within the search
-/// radius. `nearest` is the perception lookup; it receives the cue tag and the
-/// radius so this decision stays independent of the ray-free map scan.
+/// The cell a cued search walks to, if the cue tag is known within `radius`.
+/// The caller passes the sweep radius: leaves are see-through, so the view scan
+/// never records a far canopy. `nearest` is the perception lookup; it receives
+/// the cue tag and the radius so this decision stays independent of the
+/// ray-free map scan.
 fn cue_goal(
     target: &str,
+    radius: u32,
     mut nearest: impl FnMut(&str, u32) -> Option<BlockPos>,
 ) -> Option<BlockPos> {
-    nearest(cue_for(target)?, EXPLORE_SEARCH_RADIUS)
+    nearest(cue_for(target)?, radius)
 }
 
 /// Whether a walking plan enters water. `explore` for wood stays on land: a
@@ -731,12 +948,129 @@ fn plan_crosses_water(plan: &praxion_planner::Plan) -> bool {
     })
 }
 
+/// Whether a call may start with the look-around turn. A body that stands
+/// still out of the ground sinks, and a body that stands still in water
+/// drowns: only solid, dry ground is a place to turn on.
+fn look_around_allowed(on_ground: bool, in_water: bool) -> bool {
+    on_ground && !in_water
+}
+
+/// Blocks above the head a column may hold before the cell counts as covered.
+/// A roof farther up than this is a mountain over a cave, not a canopy.
+const SKY_SCAN_BLOCKS: i32 = 48;
+
+/// Whether the column above the body cell `feet` is open to the sky.
+///
+/// `surface` is the column's [`World::surface_y`], the first free y above its
+/// highest non-air block. `None` means the chunk or its heightmap is not
+/// loaded, which is not a fact about the column: the cell is kept, and the
+/// planner rejects it if it is unreachable. `block` looks a world cell up.
+///
+/// The scan starts at the head cell, one above `feet`: frontier ranking checks
+/// only the feet cell and its floor, so a covered head must also count. Every
+/// block from there up to the surface must be open; a surface farther than
+/// [`SKY_SCAN_BLOCKS`] above counts as covered without a scan.
+fn open_to_sky(
+    feet: BlockPos,
+    surface: Option<i32>,
+    block: impl Fn(BlockPos) -> Option<BlockState>,
+) -> bool {
+    let Some(surface) = surface else {
+        return true;
+    };
+    let first = feet.y.saturating_add(1);
+    if surface.saturating_sub(first) > SKY_SCAN_BLOCKS {
+        return false;
+    }
+    (first..surface).all(|y| block(BlockPos::new(feet.x, y, feet.z)).is_some_and(sky_open))
+}
+
+/// Whether a block above a frontier cell still leaves its column open.
+///
+/// Air, leaves, logs and the vegetation the game replaces when a tree grows
+/// in it leave the ground under a canopy in daylight. Water is in that
+/// `replaceable` tag too and stays open: a water frontier is the last resort
+/// the planner swims, and the drowning reflex guards it, so refusing it here
+/// would silently disable the water fallback. Lava and fire are hazards and
+/// cover the column, and anything else does too.
+fn sky_open(state: BlockState) -> bool {
+    if state.is_air() {
+        return true;
+    }
+    // Kelp and other waterlogged plants are not in `replaceable`; the planner
+    // swims through them, so they leave a water column open too.
+    if praxion_planner::blocks::is_water(state) {
+        return true;
+    }
+    let name = gamedata::normalize(praxion_planner::blocks::name(state));
+    gamedata::block_in_tag(name, "leaves")
+        || gamedata::block_in_tag(name, "logs")
+        || (gamedata::block_in_tag(name, "replaceable")
+            && !praxion_planner::blocks::is_hazard(state))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use azalea_core::position::Vec3;
+    use praxion_headless::{Blocks, Body, Held};
+    use praxion_perception::Perception;
+    use praxion_world::BlockState;
+
     use super::*;
 
     fn at(x: i32, y: i32, z: i32) -> BlockPos {
         BlockPos::new(x, y, z)
+    }
+
+    /// Solid ground at and below y = 63, air above: enough for the body to
+    /// stand on and for explore's ground gate to pass.
+    struct Ground;
+
+    impl Blocks for Ground {
+        fn block(&self, pos: BlockPos) -> Option<BlockState> {
+            (pos.y <= 63).then_some(BlockState::from(BlockKind::Stone))
+        }
+
+        fn ready(&self, _position: Vec3) -> bool {
+            true
+        }
+    }
+
+    /// Stone at and below y = 63 with a water column from y = 64 to y = 70: a
+    /// body in it is in water and cannot stand, the seed 101 case.
+    struct Sea;
+
+    impl Blocks for Sea {
+        fn block(&self, pos: BlockPos) -> Option<BlockState> {
+            Some(if pos.y <= 63 {
+                BlockState::from(BlockKind::Stone)
+            } else if pos.y <= 70 {
+                BlockState::from(BlockKind::Water)
+            } else {
+                BlockState::from(BlockKind::Air)
+            })
+        }
+
+        fn ready(&self, _position: Vec3) -> bool {
+            true
+        }
+    }
+
+    fn ctx<'a>(
+        tick: u64,
+        body: &'a Body,
+        world: &'a World,
+        perception: &'a mut Perception,
+    ) -> Ctx<'a> {
+        Ctx {
+            tick,
+            body,
+            world,
+            perception,
+            style: praxion_planner::Personality::default(),
+        }
     }
 
     #[test]
@@ -765,16 +1099,18 @@ mod tests {
     }
     #[test]
     fn a_log_search_with_only_leaves_known_walks_to_the_leaves() {
-        // Only leaves are known, at 50 blocks; no log is known. The cue must
-        // ask for leaves within the search radius and return that cell as the
-        // goal, before the frontier scan gets a chance.
-        let leaves = at(0, 65, 50);
+        // Only leaves are known within the sweep radius; no log is known. The
+        // cue must ask for leaves at the sweep radius (leaves pass, so the view
+        // scan never records a far canopy) and return that cell as the goal,
+        // before the frontier scan gets a chance.
+        let sweep_radius = 32;
+        let leaves = at(0, 65, 20);
         let mut asked = None;
-        let goal = cue_goal("#logs", |tag, radius| {
+        let goal = cue_goal("#logs", sweep_radius, |tag, radius| {
             asked = Some((tag.to_owned(), radius));
-            (tag == "#leaves" && radius == EXPLORE_SEARCH_RADIUS).then_some(leaves)
+            (tag == "#leaves" && radius == sweep_radius).then_some(leaves)
         });
-        assert_eq!(asked, Some(("#leaves".to_owned(), 64)));
+        assert_eq!(asked, Some(("#leaves".to_owned(), sweep_radius)));
         assert_eq!(
             goal,
             Some(leaves),
@@ -784,7 +1120,220 @@ mod tests {
         assert_eq!(cue_for("#oak_logs"), Some("#leaves"));
         assert_eq!(cue_for("#stone"), None);
         assert_eq!(cue_for("oak_log"), None, "a block name is not a tag");
-        assert_eq!(cue_goal("#logs", |_, _| None), None);
+        assert_eq!(cue_goal("#logs", sweep_radius, |_, _| None), None);
+    }
+
+    #[test]
+    fn a_cue_cell_already_within_reach_starts_no_follower() {
+        // Standing next to a known leaf: the planner succeeds with no steps.
+        // That is "already there", not a goal: no follower, no goal count, and
+        // the ranking mode must not change.
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        let world = World::new();
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        let start = at(0, 64, 0);
+        let leaf = at(2, 64, 0);
+        let mut ctx = ctx(0, &body, &world, &mut perception);
+        let goals_before = explore.goals;
+        let chase_before = explore.chase;
+        assert!(
+            !explore.approach(&mut ctx, start, leaf, Chase::Cue),
+            "an empty plan is not a walk"
+        );
+        assert!(explore.follower.is_none(), "no follower for zero steps");
+        assert_eq!(explore.goals, goals_before, "a cue is not a goal");
+        assert_eq!(explore.chase, chase_before, "the ranking mode is unchanged");
+        assert!(
+            explore.cue_done.contains(&leaf),
+            "the reached cue cell is remembered in its own list"
+        );
+    }
+
+    #[test]
+    fn look_around_holds_four_quarters_and_ends_within_its_cap() {
+        // No target is known, so the call turns once. The body follows every
+        // aim immediately, as a fast gaze would, and the turn must still visit
+        // all four quarters and finish inside the cap.
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &Ground);
+        }
+        assert!(body.on_ground(), "the body stands on the test ground");
+        let world = World::new();
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        let start_yaw = body.look().y_rot();
+        let mut quarters = Vec::new();
+        let mut ended = None;
+        for tick in 0..=LOOK_AROUND_MAX_TICKS {
+            let frame = {
+                let mut ctx = ctx(tick, &body, &world, &mut perception);
+                explore.tick(&mut ctx, false, &mut memory).0
+            };
+            if let Look::Aim { yaw, .. } = frame.look {
+                let quarter = ((yaw - start_yaw).rem_euclid(360.0) / 90.0).round() as i32;
+                if !quarters.contains(&quarter) {
+                    quarters.push(quarter);
+                }
+                frame
+                    .apply(&mut body, tick)
+                    .expect("the look-around frame applies");
+            } else if !quarters.is_empty() {
+                ended = Some(tick);
+                break;
+            }
+        }
+        assert_eq!(quarters, vec![0, 1, 2, 3], "all four quarters were held");
+        let ended = ended.expect("the turn ends on its own");
+        assert!(
+            ended <= LOOK_AROUND_MAX_TICKS,
+            "the turn took {ended} ticks"
+        );
+    }
+
+    #[test]
+    fn a_look_around_is_not_armed_in_water_or_in_the_air() {
+        // Seed 101: the call turned on the spot while the body sank in water,
+        // the drowning reflex preempted it, and the retry repeated the turn.
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        body.step(&Held::NONE, &Sea);
+        assert!(body.is_in_water(), "the body is in the water column");
+        assert!(
+            !look_around_allowed(body.on_ground(), body.is_in_water()),
+            "a body in water may not turn on the spot"
+        );
+
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let world = World::new();
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory);
+        }
+        assert!(
+            explore.look_around.is_none(),
+            "the call does not arm a turn while the body is in water"
+        );
+        assert!(
+            explore.look_around_started,
+            "the gate was evaluated in water, so the call does not retry it"
+        );
+
+        // An airborne body stands nowhere either; it must fall, not turn. The
+        // first tick must not consume the one look-around: the body may land
+        // and turn then.
+        let mut body = Body::new(Vec3::new(0.5, 80.0, 0.5));
+        body.step(&Held::NONE, &Ground);
+        assert!(!body.on_ground(), "the body is falling");
+        assert!(!body.is_in_water());
+        assert!(
+            !look_around_allowed(body.on_ground(), body.is_in_water()),
+            "a falling body may not turn on the spot"
+        );
+
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory);
+        }
+        assert!(
+            !explore.look_around_started,
+            "an airborne first tick must not consume the look-around"
+        );
+        assert!(explore.look_around.is_none());
+
+        // Land the body and tick again: the turn arms now.
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &Ground);
+        }
+        assert!(body.on_ground(), "the body stands on the test ground");
+        {
+            let mut ctx = ctx(1, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory);
+        }
+        assert!(explore.look_around_started);
+        assert!(
+            explore.look_around.is_some(),
+            "the first grounded tick arms the look-around"
+        );
+    }
+
+    /// The column predicate over a map whose unlisted cells are air.
+    fn column_open(feet: BlockPos, surface: i32, map: &HashMap<BlockPos, BlockState>) -> bool {
+        open_to_sky(feet, Some(surface), |pos| {
+            Some(map.get(&pos).copied().unwrap_or_else(air))
+        })
+    }
+
+    fn air() -> BlockState {
+        BlockState::from(BlockKind::Air)
+    }
+
+    #[test]
+    fn a_column_is_open_only_under_air_a_canopy_or_vegetation() {
+        let feet = at(0, 64, 0);
+        // The scan starts at the head cell, y = 65.
+        let mut head = HashMap::new();
+        head.insert(at(0, 65, 0), BlockState::from(BlockKind::Stone));
+        assert!(!column_open(feet, 66, &head), "a stone head cell covers it");
+
+        let mut stone = HashMap::new();
+        for y in 66..=68 {
+            stone.insert(at(0, y, 0), BlockState::from(BlockKind::Stone));
+        }
+        assert!(
+            !column_open(feet, 69, &stone),
+            "three stone blocks cover it"
+        );
+
+        let mut canopy = HashMap::new();
+        canopy.insert(at(0, 66, 0), BlockState::from(BlockKind::OakLeaves));
+        canopy.insert(at(0, 67, 0), BlockState::from(BlockKind::OakLeaves));
+        canopy.insert(at(0, 68, 0), BlockState::from(BlockKind::OakLog));
+        assert!(
+            column_open(feet, 69, &canopy),
+            "a leaf and log canopy still lets the ground be reached"
+        );
+
+        let open = HashMap::new();
+        assert!(column_open(feet, 66, &open), "nothing above the head");
+        assert!(
+            column_open(feet, 65 + SKY_SCAN_BLOCKS, &open),
+            "the whole scan window is air"
+        );
+
+        let mut overhang = HashMap::new();
+        overhang.insert(at(0, 66 + 59, 0), BlockState::from(BlockKind::Stone));
+        assert!(
+            !column_open(feet, 66 + 60, &overhang),
+            "a 60-block overhang counts as covered"
+        );
+
+        // No heightmap is not a fact about the column: the cell is kept for the
+        // planner, which rejects a chunk it cannot reach anyway.
+        assert!(open_to_sky(feet, None, |_| None));
+
+        // Water is in the `replaceable` tag and stays open (a water frontier
+        // is the swimming last resort); lava and fire are hazards and cover.
+        let mut water = HashMap::new();
+        water.insert(at(0, 66, 0), BlockState::from(BlockKind::Water));
+        assert!(column_open(feet, 67, &water), "a water column stays open");
+        let mut kelp = HashMap::new();
+        kelp.insert(at(0, 66, 0), BlockState::from(BlockKind::KelpPlant));
+        assert!(
+            column_open(feet, 67, &kelp),
+            "kelp is swimmable water, not a roof"
+        );
+        for kind in [BlockKind::Lava, BlockKind::Fire] {
+            let mut hazard = HashMap::new();
+            hazard.insert(at(0, 66, 0), BlockState::from(kind));
+            assert!(!column_open(feet, 67, &hazard), "{kind:?} covers the cell");
+        }
     }
 
     #[test]

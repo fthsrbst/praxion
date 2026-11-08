@@ -167,8 +167,6 @@ pub struct Perception {
     block_cache: VisibilityCache<BlockCacheKey>,
     entity_cache: VisibilityCache<EntityCacheKey>,
     last_eye_cell: Option<BlockPos>,
-    /// Which half of the view fan the next scan casts.
-    view_scan_phase: bool,
     known: known::KnownMap,
     ledger: Ledger,
 }
@@ -196,7 +194,6 @@ impl Perception {
             block_cache: VisibilityCache::new(),
             entity_cache: VisibilityCache::new(),
             last_eye_cell: None,
-            view_scan_phase: false,
             ledger: Ledger::default(),
         }
     }
@@ -366,7 +363,7 @@ impl Perception {
         let eye = self.eye(world)?;
         let pos = self
             .known
-            .nearest_seen(eye.to_block_pos_floor(), radius, |pos, state| {
+            .nearest_seen(world, eye.to_block_pos_floor(), radius, |pos, state| {
                 !exclude(pos) && accept(state)
             })?;
         Some((pos, eye.distance_to(pos.center())))
@@ -386,6 +383,29 @@ impl Perception {
     /// The block cell the eye is in.
     pub fn eye_cell(&self, world: &World) -> Option<BlockPos> {
         self.eye(world).map(|eye| eye.to_block_pos_floor())
+    }
+
+    /// The first cell a sight ray from `from` to `target`'s centre meets, spending one ray; `None` when clear or out of budget.
+    pub fn first_blocking_cell(
+        &mut self,
+        caller: Caller,
+        world: &World,
+        from: Vec3,
+        target: BlockPos,
+    ) -> Option<BlockPos> {
+        self.valid_world(world)?;
+        if self.remaining_rays(caller) == 0 {
+            return None;
+        }
+        self.spend_ray(caller);
+        sight::first_blocking_cell(
+            world,
+            from,
+            target.center() - from,
+            Some(target),
+            &mut self.table,
+            None,
+        )
     }
 
     /// Deny-by-default: a query on an invalid world answers

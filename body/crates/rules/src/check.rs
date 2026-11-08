@@ -20,6 +20,10 @@ pub const MAX_COMPOSITION_DEPTH: usize = 2;
 /// The cap for the hand-written core skills in `body/skills/`: root plus
 /// three children. They are reviewed by hand, so they may compose deeper.
 pub const CORE_COMPOSITION_DEPTH: usize = 4;
+/// The program-wide cap once candidate skills are loaded: a candidate chain of
+/// at most [`MAX_COMPOSITION_DEPTH`] frames may end in a full core chain (a
+/// candidate `get_furnace` calling the depth-4 `get_cobblestone` chain).
+pub const PROGRAM_COMPOSITION_DEPTH: usize = CORE_COMPOSITION_DEPTH + MAX_COMPOSITION_DEPTH;
 
 /// A checked ruleset: the skills plus the registries every call was checked
 /// against. It also carries the composition depth it was checked with, so the

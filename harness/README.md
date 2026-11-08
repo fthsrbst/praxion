@@ -79,12 +79,16 @@ praxion-body --forwarder 127.0.0.1:25640 --tee 127.0.0.1:25641 \
              --run-dir runs/body-pickaxe \
              [--goal-args ...] [--max-ticks 6000] \
              [--settings body/config/reflexes.toml] [--skills body/skills] \
-             [--start-delay-ticks 60] [--linger-ticks 60] [--verbose]
+             [--candidates DIR] [--start-delay-ticks 60] [--linger-ticks 60] [--verbose]
 ```
 
 - `--forwarder` is the forwarder's game listener, `--tee` its tee listener.
 - `--goal` names a skill in `body/skills`; `--goal-args` are typed from the
   skill's parameters (int, item, block, entity_kind or bool).
+- `--candidates DIR` loads every `.skill` in DIR next to the core skills; a
+  candidate that redefines a core skill exits 2 with an error.
+- `praxion-body check-skills --candidates DIR [--skills body/skills]` checks
+  them offline and prints one JSON report (exit `0` pass, `1` fail, `2` usage/IO).
 - `--start-delay-ticks` waits after the first usable tick so fixtures can give
   items, set the time and summon mobs.
 - `--linger-ticks` keeps the player connected after the goal settles so the

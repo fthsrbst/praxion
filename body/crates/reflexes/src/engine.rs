@@ -7,11 +7,10 @@
 
 use praxion_headless::{Body, ControlFrame};
 use praxion_planner::KnownBlocks;
+use praxion_world::BlockPos;
 
 use crate::motion::Motion;
-use crate::reflex::{
-    LatencyClass, ReflexAction, ReflexKind, ReflexState, evaluate,
-};
+use crate::reflex::{LatencyClass, ReflexAction, ReflexKind, ReflexState, evaluate};
 use crate::settings::Settings;
 use crate::view::View;
 
@@ -22,12 +21,61 @@ struct Active {
     action: ReflexAction,
     motion: Motion,
     started: u64,
+    /// The last tick the routine was seen to make progress toward air.
+    /// A drowning reflex is not cut at `max_reflex_ticks` while it is still
+    /// advancing.
+    progress_tick: u64,
+    /// The cell the current plan heads for: a water cell the body can breathe
+    /// from, or a bank. Whether it is a water cell or a bank is not stored;
+    /// reaching it with the head in air is what ends the reflex.
+    air_target: Option<BlockPos>,
+    /// The closest the body has come to [`Active::air_target`] on this plan.
+    air_best: Option<f64>,
 }
 
 impl Active {
     fn ran_for(&self, tick: u64) -> u64 {
         tick.saturating_sub(self.started)
     }
+
+    /// Fold this tick's state into the progress clock. A drowning reflex is
+    /// making progress when its head is out of the water or when it got
+    /// measurably closer to its air target. Picking a target is not progress
+    /// by itself: a route switch would otherwise keep a stuck body alive
+    /// forever.
+    fn observe_progress(&mut self, tick: u64, view: &View, body: &Body) {
+        let mut progressed = !view.head_in_water;
+        let target = self.motion.air_target();
+        if target != self.air_target {
+            // A fresh plan picked another air cell: restart the distance
+            // baseline for it. The next tick decides whether the body is
+            // actually closing in.
+            self.air_target = target;
+            self.air_best = target.map(|cell| distance_to_cell(body, cell));
+        } else if let (Some(cell), Some(best)) = (target, self.air_best) {
+            let distance = distance_to_cell(body, cell);
+            // `PROGRESS_EPSILON` is far below one tick of movement, so even a
+            // slow horizontal swim (about 0.1 blocks a tick) counts. The best
+            // distance only ever falls, so bobbing in place still runs out the
+            // window.
+            if distance < best - PROGRESS_EPSILON {
+                self.air_best = Some(distance);
+                progressed = true;
+            }
+        }
+        if progressed {
+            self.progress_tick = tick;
+        }
+    }
+}
+
+/// How much closer to the air target counts as progress, in blocks. A tick of
+/// the body's slowest swim is about 0.1 blocks, so this only rejects jitter.
+const PROGRESS_EPSILON: f64 = 1.0e-3;
+
+/// The distance from the body's feet to the centre of an air cell.
+fn distance_to_cell(body: &Body, cell: BlockPos) -> f64 {
+    body.position().distance_to(cell.center())
 }
 
 /// What the engine reports for one tick.
@@ -121,11 +169,73 @@ impl Engine {
 
         if let Some(active) = &mut self.active {
             let ran_ticks = active.ran_for(tick);
-            let timed_out = ran_ticks >= u64::from(settings.max_reflex_ticks);
+            let drowning = active.kind == ReflexKind::Drowning;
+            let cap = u64::from(settings.max_reflex_ticks);
+
+            // The drowning reflex owns the body until the body can breathe:
+            // the air supply is above the trigger threshold, or the body
+            // stands safely on land. Clearing the water while still floating
+            // is not enough: handing control back with the air still low is
+            // what drowned the live run.
+            if drowning {
+                // A view that still has the head in water is never "safe",
+                // even if the block source disagrees: the fact that matters
+                // is the one the body is drowning from.
+                if self.state.air() > settings.air_surface_threshold
+                    || (!view.head_in_water && view.is_safe_standing(blocks))
+                {
+                    let kind = active.kind;
+                    self.active = None;
+                    return ReflexTick::Ended {
+                        kind,
+                        ran_ticks,
+                        timed_out: false,
+                    };
+                }
+
+                // A plan that finished or stalled without reaching air is not
+                // the end: re-plan from where the body is now, so a route whose
+                // first segment ended at a frontier keeps going. Only when no
+                // plan exists does the routine fall back to holding jump.
+                if active.motion.ended(tick, view, body) {
+                    let fresh = if view.head_in_water {
+                        Motion::start(ReflexAction::SwimUp, view, settings, body, tick, blocks)
+                    } else {
+                        None
+                    };
+                    active.motion = fresh.unwrap_or(Motion::SwimUp);
+                }
+                active.observe_progress(tick, view, body);
+
+                // The nominal cap only ends a reflex that stopped making
+                // progress toward air: every tick that closes the distance to
+                // the target (or clears the head) restarts the window.
+                if tick.saturating_sub(active.progress_tick) >= cap {
+                    let kind = active.kind;
+                    self.active = None;
+                    self.state.set_cooldown(kind, tick + 20);
+                    return ReflexTick::Ended {
+                        kind,
+                        ran_ticks,
+                        timed_out: true,
+                    };
+                }
+                let frame = active
+                    .motion
+                    .step(tick, body.generation(), body, view, settings);
+                return ReflexTick::Running {
+                    kind: active.kind,
+                    frame,
+                };
+            }
+
+            let timed_out = ran_ticks >= cap;
+
             // The reflex's own end condition: its trigger is gone. A flee that
             // reached the goal, a fire that went out and a creeper that left
             // the range all end here, not only at the routine's own boundary.
             let trigger_gone = !active.kind.triggered(view, &self.state, settings);
+
             if timed_out || trigger_gone || active.motion.ended(tick, view, body) {
                 let kind = active.kind;
                 self.active = None;
@@ -140,7 +250,9 @@ impl Engine {
                     timed_out,
                 };
             }
-            let frame = active.motion.step(tick, body.generation(), body, view, settings);
+            let frame = active
+                .motion
+                .step(tick, body.generation(), body, view, settings);
             return ReflexTick::Running {
                 kind: active.kind,
                 frame,
@@ -166,11 +278,15 @@ impl Engine {
             };
             body.bump_generation();
             let frame = motion.step(tick, body.generation(), body, view, settings);
+            let air_target = motion.air_target();
             self.active = Some(Active {
                 kind,
                 action,
                 motion,
                 started: tick,
+                progress_tick: tick,
+                air_target,
+                air_best: air_target.map(|cell| distance_to_cell(body, cell)),
             });
             return ReflexTick::Started {
                 kind,

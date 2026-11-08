@@ -35,8 +35,8 @@ use praxion_arbiter::{Arbiter, FrameSource, Needs};
 use praxion_eventlog::{EventKind, Outcome as ReceiptOutcome, Versions, Writer};
 use praxion_headless::{AppliedReport, Body, ControlFrame, Driver, Held, Look, TickView};
 use praxion_interpreter::{
-    Actuator, Decision, Facts as InterpreterFacts, InterpreterEvent, IntValue, Interpreter, Outcome,
-    StartAction, Truth,
+    Actuator, Decision, Facts as InterpreterFacts, IntValue, Interpreter, InterpreterEvent,
+    Outcome, StartAction, Truth,
 };
 use praxion_perception::{Config as PerceptionConfig, Perception};
 use praxion_planner::{Block, Cue, Gaze, GazeMode, KnownBlocks};
@@ -46,7 +46,7 @@ use praxion_reflexes::{EndermanGuard, LatencyClass, ReflexKind, Settings, View};
 use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::{BlockPos, Vec3, World};
 
-use crate::summary::{write_summary, Shared};
+use crate::summary::{Shared, write_summary};
 
 /// The body driver's settings.
 pub struct BodyOptions {
@@ -221,9 +221,9 @@ impl BodyDriver {
     fn observe_packets(&mut self, view: &TickView<'_>, world: &World, ts_ns: u64) {
         self.register_pending(view.tick, world);
         for packet in view.packets {
-            if let Err(error) = self
-                .engine
-                .observe(&mut self.log, view.tick, ts_ns, &packet.packet, world)
+            if let Err(error) =
+                self.engine
+                    .observe(&mut self.log, view.tick, ts_ns, &packet.packet, world)
             {
                 log::warn!("body: receipt observe: {error}");
             }
@@ -295,8 +295,14 @@ impl BodyDriver {
                 delta,
                 window,
             } => Some(
-                Intent::inventory(intent_id, primitive.clone(), item.clone(), *delta, report_tick)
-                    .with_window(*window),
+                Intent::inventory(
+                    intent_id,
+                    primitive.clone(),
+                    item.clone(),
+                    *delta,
+                    report_tick,
+                )
+                .with_window(*window),
             ),
             IntentSpec::StorageInventory {
                 primitive,
@@ -338,9 +344,9 @@ impl BodyDriver {
             IntentSpec::Attack { entity_id, window } => {
                 Some(Intent::attack(intent_id, *entity_id, report_tick).with_window(*window))
             }
-            IntentSpec::Fact { fact, window } => Some(
-                Intent::fact(intent_id, fact.to_string(), report_tick).with_window(*window),
-            ),
+            IntentSpec::Fact { fact, window } => {
+                Some(Intent::fact(intent_id, fact.to_string(), report_tick).with_window(*window))
+            }
         };
         let Some(intent) = intent else {
             return;
@@ -353,9 +359,9 @@ impl BodyDriver {
                 // The cell the receipt watches: the actuator's report, which
                 // follows the block the click actually hit.
                 self.block_intent = match &spec {
-                    IntentSpec::Dig { .. } | IntentSpec::Place { .. } => report
-                        .block_before
-                        .map(|(target, _)| (intent_id, target)),
+                    IntentSpec::Dig { .. } | IntentSpec::Place { .. } => {
+                        report.block_before.map(|(target, _)| (intent_id, target))
+                    }
                     _ => None,
                 };
                 if let IntentSpec::Fact { fact, .. } = &spec {
@@ -593,9 +599,9 @@ impl BodyDriver {
                 fact_known(&mut ctx, &fact)
             };
             if known {
-                let _ = self
-                    .engine
-                    .confirm(&mut self.log, receipt, view.tick, now_ns(), "fact_known");
+                let _ =
+                    self.engine
+                        .confirm(&mut self.log, receipt, view.tick, now_ns(), "fact_known");
                 self.observe_receipt = None;
             }
         }
@@ -607,16 +613,13 @@ impl BodyDriver {
     /// `Preempted`. A craft with an open table returns one close frame; the
     /// caller merges it into this tick's frame so the server-side window is not
     /// left open across the reflex.
-    fn cancel_primitive(
-        &mut self,
-        view: &TickView<'_>,
-        world: &World,
-    ) -> Option<ControlFrame> {
+    fn cancel_primitive(&mut self, view: &TickView<'_>, world: &World) -> Option<ControlFrame> {
         if !self.runner.is_active() {
             return None;
         }
-        self.runner
-            .settle(praxion_receipts::interpreter_outcome(ReceiptOutcome::Preempted));
+        self.runner.settle(praxion_receipts::interpreter_outcome(
+            ReceiptOutcome::Preempted,
+        ));
         let result = {
             let mut perception = lock(&self.perception);
             let mut ctx = Ctx {
@@ -644,7 +647,10 @@ impl BodyDriver {
             if let EventKind::OwnerChanged { ref owner, .. } = event
                 && let Some(kind) = owner.strip_prefix("reflex:")
             {
-                *shared.reflex_activations.entry(kind.to_owned()).or_insert(0) += 1;
+                *shared
+                    .reflex_activations
+                    .entry(kind.to_owned())
+                    .or_insert(0) += 1;
             }
             let _ = self.log.append(tick, ts_ns, event);
         }
@@ -683,7 +689,13 @@ impl Driver for BodyDriver {
         }
 
         let Some(world) = view.world else {
-            return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
+            return self.finish_tick(
+                view,
+                ControlFrame::new(view.tick, view.body.generation(), Held::NONE),
+                work_start,
+                ts_ns,
+                Cue::Continue,
+            );
         };
         // The arbiter wants `&mut Body`; the session owns the real one.
         self.mirror = view.body.clone();
@@ -691,7 +703,13 @@ impl Driver for BodyDriver {
 
         let settled = lock(&self.shared).outcome.is_some();
         if settled {
-            return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
+            return self.finish_tick(
+                view,
+                ControlFrame::new(view.tick, view.body.generation(), Held::NONE),
+                work_start,
+                ts_ns,
+                Cue::Continue,
+            );
         }
 
         let stage = Instant::now();
@@ -705,11 +723,23 @@ impl Driver for BodyDriver {
         let begin_ns = stage.elapsed().as_nanos() as u64;
         if !self.started {
             if view.tick < first_tick.saturating_add(self.options.start_delay_ticks) {
-                return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
+                return self.finish_tick(
+                    view,
+                    ControlFrame::new(view.tick, view.body.generation(), Held::NONE),
+                    work_start,
+                    ts_ns,
+                    Cue::Continue,
+                );
             }
             self.start_goal(view.tick, ts_ns);
             if self.done {
-                return self.finish_tick(view, ControlFrame::new(view.tick, view.body.generation(), Held::NONE), work_start, ts_ns, Cue::Continue);
+                return self.finish_tick(
+                    view,
+                    ControlFrame::new(view.tick, view.body.generation(), Held::NONE),
+                    work_start,
+                    ts_ns,
+                    Cue::Continue,
+                );
             }
         }
 
@@ -723,7 +753,11 @@ impl Driver for BodyDriver {
 
         let reflex_view = {
             let mut perception = lock(&self.perception);
-            View::capture(&mut perception, world, self.arbiter.engine_mut().state_mut())
+            View::capture(
+                &mut perception,
+                world,
+                self.arbiter.engine_mut().state_mut(),
+            )
         };
         let needs = Needs::from_view(&reflex_view);
         let stage = Instant::now();
@@ -734,10 +768,7 @@ impl Driver for BodyDriver {
                 perception: Arc::clone(&perception),
                 world,
             };
-            let mut blocks = KnownView {
-                perception,
-                world,
-            };
+            let mut blocks = KnownView { perception, world };
             self.arbiter.tick(
                 &reflex_view,
                 &mut self.interpreter,
@@ -774,13 +805,13 @@ impl Driver for BodyDriver {
 
         let mut guarded = false;
         let mut frame = match &ticked.source {
-            FrameSource::Reflex(_) | FrameSource::Maintenance(_) => {
-                ticked.source.frame().clone()
-            }
+            FrameSource::Reflex(_) | FrameSource::Maintenance(_) => ticked.source.frame().clone(),
             FrameSource::Skill(_) | FrameSource::Idle(_) => {
                 let mut frame = self.run_primitive(view, world, ticked.skill.as_ref(), ts_ns);
                 let wanted = frame.look;
-                frame.look = self.look_guard.apply(wanted, view.body.look(), &reflex_view);
+                frame.look = self
+                    .look_guard
+                    .apply(wanted, view.body.look(), &reflex_view);
                 guarded = frame.look != wanted;
                 frame
             }
@@ -1032,7 +1063,8 @@ fn arg_string(arg: &ArgValue) -> String {
     }
 }
 
-fn outcome_key(outcome: ReceiptOutcome) -> &'static str {    match outcome {
+fn outcome_key(outcome: ReceiptOutcome) -> &'static str {
+    match outcome {
         ReceiptOutcome::Confirmed => "confirmed",
         ReceiptOutcome::Unconfirmed => "unconfirmed",
         ReceiptOutcome::Timeout => "timeout",
@@ -1042,7 +1074,9 @@ fn outcome_key(outcome: ReceiptOutcome) -> &'static str {    match outcome {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn now_ns() -> u64 {

@@ -4,12 +4,17 @@
 //! praxion-body --forwarder 127.0.0.1:PORT --tee 127.0.0.1:PORT --name Praxion
 //!              --goal get_wooden_pickaxe [--goal-args 3] --run-dir runs/<id>
 //!              [--max-ticks N] [--settings body/config/reflexes.toml]
-//!              [--skills body/skills] [--start-delay-ticks N]
-//!              [--style-seed N] [--linger-ticks N] [--verbose]
+//!              [--skills body/skills] [--candidates DIR]
+//!              [--start-delay-ticks N] [--style-seed N] [--linger-ticks N]
+//!              [--verbose]
+//!
+//! praxion-body check-skills --candidates DIR [--skills body/skills]
 //! ```
 //!
 //! `--forwarder` is the forwarder's game listener (the address a client would
-//! connect to), `--tee` its tee listener.
+//! connect to), `--tee` its tee listener. `--candidates` adds learned
+//! `.skill` files to the core skills; `check-skills` checks them without a
+//! server or network and prints one JSON report.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -29,6 +34,8 @@ pub struct Args {
     pub max_ticks: Option<u64>,
     pub settings: Option<PathBuf>,
     pub skills: Option<PathBuf>,
+    /// Learned candidate skills loaded next to the core skills.
+    pub candidates: Option<PathBuf>,
     pub start_delay_ticks: u64,
     /// The movement-style seed; the same seed gives the same personality.
     pub style_seed: u64,
@@ -47,6 +54,7 @@ impl Args {
         let mut max_ticks = None;
         let mut settings = None;
         let mut skills = None;
+        let mut candidates = None;
         let mut start_delay_ticks = 0;
         let mut style_seed = 0;
         let mut linger_ticks = 60;
@@ -66,7 +74,11 @@ impl Args {
                         && !next.starts_with("--")
                     {
                         let next = args.next().expect("peeked");
-                        goal_args.extend(next.split(',').filter(|part| !part.is_empty()).map(str::to_owned));
+                        goal_args.extend(
+                            next.split(',')
+                                .filter(|part| !part.is_empty())
+                                .map(str::to_owned),
+                        );
                     }
                 }
                 "--run-dir" => run_dir = Some(PathBuf::from(value(&mut args, "--run-dir")?)),
@@ -79,6 +91,9 @@ impl Args {
                 }
                 "--settings" => settings = Some(PathBuf::from(value(&mut args, "--settings")?)),
                 "--skills" => skills = Some(PathBuf::from(value(&mut args, "--skills")?)),
+                "--candidates" => {
+                    candidates = Some(PathBuf::from(value(&mut args, "--candidates")?));
+                }
                 "--start-delay-ticks" => {
                     let text = value(&mut args, "--start-delay-ticks")?;
                     start_delay_ticks = text
@@ -112,6 +127,7 @@ impl Args {
             max_ticks,
             settings,
             skills,
+            candidates,
             start_delay_ticks,
             style_seed,
             linger_ticks,
@@ -120,8 +136,46 @@ impl Args {
     }
 }
 
+/// Parsed arguments of the `check-skills` subcommand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckArgs {
+    pub candidates: PathBuf,
+    pub skills: Option<PathBuf>,
+}
+
+impl CheckArgs {
+    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Self, String> {
+        let mut candidates = None;
+        let mut skills = None;
+
+        let mut args = args.into_iter();
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--candidates" => {
+                    let text = args.next().ok_or("--candidates wants a value")?;
+                    candidates = Some(PathBuf::from(text));
+                }
+                "--skills" => {
+                    let text = args.next().ok_or("--skills wants a value")?;
+                    skills = Some(PathBuf::from(text));
+                }
+                other => return Err(format!("unknown argument {other:?}")),
+            }
+        }
+
+        Ok(Self {
+            candidates: candidates.ok_or("--candidates is required")?,
+            skills,
+        })
+    }
+}
+
 /// Type a goal's arguments from the skill's declared parameters.
-pub fn resolve_goal_args(program: &Program, skill: &str, raw: &[String]) -> Result<Vec<ArgValue>, String> {
+pub fn resolve_goal_args(
+    program: &Program,
+    skill: &str,
+    raw: &[String],
+) -> Result<Vec<ArgValue>, String> {
     let declared = program
         .skill(skill)
         .ok_or_else(|| format!("the ruleset has no skill `{skill}`"))?;
@@ -146,7 +200,12 @@ pub fn resolve_goal_args(program: &Program, skill: &str, raw: &[String]) -> Resu
                 praxion_rules::ValueType::Bool => match text.as_str() {
                     "true" => ArgValue::Bool(true),
                     "false" => ArgValue::Bool(false),
-                    other => return Err(format!("`{}` wants true or false, got {other:?}", param.name)),
+                    other => {
+                        return Err(format!(
+                            "`{}` wants true or false, got {other:?}",
+                            param.name
+                        ));
+                    }
                 },
             };
             Ok(argument)
@@ -200,9 +259,50 @@ mod tests {
         assert_eq!(args.goal, "get_wood(2)");
         assert_eq!(args.run_dir, PathBuf::from("runs/x"));
         assert_eq!(args.max_ticks, Some(1200));
-        assert_eq!(args.settings, Some(PathBuf::from("body/config/reflexes.toml")));
+        assert_eq!(
+            args.settings,
+            Some(PathBuf::from("body/config/reflexes.toml"))
+        );
         assert_eq!(args.style_seed, 7);
         assert_eq!(args.linger_ticks, 60);
+        assert_eq!(args.candidates, None);
+    }
+
+    #[test]
+    fn candidates_are_optional_on_the_play_command_line() {
+        let args = parse(&[
+            "--forwarder",
+            "127.0.0.1:1",
+            "--tee",
+            "127.0.0.1:2",
+            "--goal",
+            "g",
+            "--run-dir",
+            "r",
+            "--candidates",
+            "candidates/",
+        ])
+        .unwrap();
+        assert_eq!(args.candidates, Some(PathBuf::from("candidates/")));
+    }
+
+    #[test]
+    fn check_skills_arguments_parse() {
+        let args = CheckArgs::parse(
+            ["--candidates", "candidates/", "--skills", "body/skills"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.candidates, PathBuf::from("candidates/"));
+        assert_eq!(args.skills, Some(PathBuf::from("body/skills")));
+
+        let defaults = CheckArgs::parse(["--candidates", "c"].map(str::to_owned)).unwrap();
+        assert_eq!(defaults.skills, None);
+        assert_eq!(
+            CheckArgs::parse(std::iter::empty()).unwrap_err(),
+            "--candidates is required"
+        );
     }
 
     #[test]

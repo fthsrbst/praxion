@@ -1,17 +1,33 @@
 # Stone needs a wooden pickaxe or better; this skill builds the pickaxe if
 # it has none. Depth 3: get_cobblestone -> get_wooden_pickaxe -> leaf. With the
-# pickaxe in hand, no stone in reach means walking to a frontier of the
-# perception known map first; without the pickaxe the wood chain comes first,
-# because stone cannot be mined yet. Before that walk the body takes its placed
+# pickaxe in hand and stone in reach it mines. With no stone in reach it first
+# explores (find_stone), and digs a staircase down when exploring finds none:
+# in flat terrain stone lies three to six blocks under the dirt and no ray ever
+# reaches it from the surface. Without the pickaxe the wood chain comes first,
+# because stone cannot be mined yet. Before the walk the body takes its placed
 # table along: the wooden pickaxe leaves three planks, one short of a new table,
 # and a body far from the trees then explored for one more log instead of
 # crafting. This skill decides to leave, so the rule lives here, not in the
 # caller (only the innermost frame selects a rule each tick).
+#
+# Why explore, then dig, without the two rules fighting (interpreter 6.1):
+# the highest true rule fires, but a rule whose child skill just failed is
+# ineligible for that one tick only. So the two rules share one guard, the
+# search comes first, and the dig is the rule underneath: it fires exactly on
+# the tick the search frame failed, and `dig_down` is a discrete primitive,
+# which the interpreter runs to its outcome before it evaluates any guard
+# again, so the search cannot take over mid-dig. Once stone is near, the mine
+# rule above both wins and the dig ends by itself (confirmed). The failure cap
+# counts per rule: a failed search counts once for the search rule (a third
+# one fails the skill), a failed dig once for the dig rule, and a finished
+# search or dig clears its own count. The search itself needs three failed
+# explores to fail its frame (one cap, inside find_stone).
 skill get_cobblestone(n: int = 3)
   doc "Collect at least n cobblestone, crafting a wooden pickaxe first if needed."
   rules:
     count(cobblestone) >= $n -> done
     has(wooden_pickaxe) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table) -> mine(crafting_table)
-    has(wooden_pickaxe) and not near(stone, 5) -> explore(stone)
-    has(wooden_pickaxe) -> mine(stone) until count(cobblestone) >= $n
+    has(wooden_pickaxe) and near(stone, 5) -> mine(stone) until count(cobblestone) >= $n
+    has(wooden_pickaxe) -> do find_stone()
+    has(wooden_pickaxe) -> dig_down(stone)
     true -> do get_wooden_pickaxe()

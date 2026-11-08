@@ -95,6 +95,9 @@ Verified under `--auto` on macOS (2026-10-21) and Windows (2026-10-31). Windows 
    Exit codes: `0` done with `FINAL_REPORT`, `10` stalled, `11` wall timeout,
    `12` finished without `FINAL_REPORT`, `13` could not start or worker error.
    Tune with `OC_STALL_SECS` (default 300) and `OC_WALL_SECS` (default 1800).
+   Build-heavy Rust tasks need `OC_STALL_SECS=1500`: a worker on its own `CARGO_TARGET_DIR` (required when
+   several workers build in parallel) sits silent through a 5-10 min first build, and the default watchdog killed
+   three such workers mid-edit on 2026-11-08.
    On Windows run it with Git Bash (the Bash tool). It kills with `taskkill /T` there; verified 2026-10-31
    (exit 0 path and exit 11 path; the shared `opencode serve --service` process correctly survives).
    Killing the client is not enough: the service keeps running the session (measured 2026-10-31: a

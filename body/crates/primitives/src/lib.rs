@@ -6,6 +6,7 @@
 
 mod common;
 mod craft;
+mod dig_down;
 mod explore;
 mod frontier;
 mod mine;

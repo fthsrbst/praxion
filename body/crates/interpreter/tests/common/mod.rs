@@ -67,11 +67,7 @@ impl Facts for Mock {
                 .unwrap_or(false),
             _ => false,
         };
-        if value {
-            Truth::True
-        } else {
-            Truth::False
-        }
+        if value { Truth::True } else { Truth::False }
     }
 
     fn int_fact(&mut self, call: &FactCall) -> IntValue {

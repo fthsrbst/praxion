@@ -1,14 +1,18 @@
 //! `place`: put one block against a visible support face.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use azalea_core::direction::Direction;
 use azalea_core::position::{BlockPos, Vec3};
+use praxion_gamedata::normalize;
 use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
 use praxion_perception::{BlockFilter, BlockRegion, Caller};
 use praxion_planner::center;
-use praxion_world::BlockState;
+use praxion_world::{BlockDescription, BlockState};
 
-use crate::common::{HandSelect, Selecting, aim_precise, count_item, idle};
+use crate::common::{HandSelect, Selecting, aim_precise, count_item, hotbar_index, idle};
 use crate::runner::{Ctx, IntentSpec};
 
 #[derive(Debug)]
@@ -44,6 +48,23 @@ impl Place {
         }
         if count_item(ctx.world, &self.block) == 0 {
             return (frame, None, Some(Outcome::Failed("no_item".into())));
+        }
+        // Name the block's hotbar slot once per call even when the mirror
+        // already shows it in hand. Respawn resets both the mirror and the
+        // actuator (a new server player starts on slot 0 and sends no
+        // held-slot packet), but the mirror is decoded on another connection
+        // and can lag the body by a tick. Naming the slot here keeps the click
+        // independent of that race; `waited` is 0 only on the call's first
+        // tick, which makes this the once-per-call marker.
+        if self.waited == 0
+            && let Some(slot) = hotbar_index(ctx.world, &self.block)
+        {
+            frame.select_slot = Some(slot);
+            // The click waits one tick: the actuator sends a use before the
+            // held-slot packet in the same frame, and the server would still
+            // use the old item.
+            self.waited = 1;
+            return (frame, None, None);
         }
         match self.hand.tick(ctx.world, &self.block, &mut frame) {
             Selecting::Held => {}
@@ -124,6 +145,7 @@ impl Place {
             }
         }
         frame.clicks.push(praxion_headless::Click::Use);
+        note_place_attempt(air, &self.block);
         self.sent = true;
         // The 40-tick wait for the receipt starts at the click, not at the
         // first plan.
@@ -183,7 +205,86 @@ pub(crate) fn cell_centre(pos: BlockPos) -> Vec3 {
 /// server's block update arriving a few ticks later).
 const PLACE_CLEAR_CLICKS: u32 = 20;
 
+/// How many clicks that left their cell air make `place` choose another cell.
+/// A cell that swallowed three places in a row is not a placement target
+/// again for this body.
+const PLACE_FAILURES_BEFORE_NEW_CELL: u32 = 3;
+
+/// What one target cell did with the last click that named it.
+#[derive(Debug, Default)]
+struct PlaceFailure {
+    /// The block the click wanted to place, normalized at comparison time.
+    block: String,
+    /// Clicks sent to this cell in a row.
+    attempts: u32,
+    /// The last click is not checked against the world yet.
+    pending: bool,
+}
+
+thread_local! {
+    /// Per body (one driver tick thread), never per process: two bodies must
+    /// not ban each other's cells. Thread locals also keep tests isolated.
+    static PLACE_FAILURES: RefCell<HashMap<BlockPos, PlaceFailure>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Remember that a use click was sent for `pos`. A place call sends one click,
+/// so this is also the cell the next call checks for success.
+fn note_place_attempt(pos: BlockPos, block: &str) {
+    PLACE_FAILURES.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        let failure = cells.entry(pos).or_default();
+        failure.block = block.to_owned();
+        failure.attempts = failure.attempts.saturating_add(1);
+        failure.pending = true;
+    });
+}
+
+/// Check the previous call's click against the world now that its receipt has
+/// settled (the driver does not start another `place` before then). The cell
+/// holds the wanted block when the place worked, so the cell is forgotten;
+/// otherwise its attempt count stands.
+fn settle_place_attempts(state_at: impl Fn(BlockPos) -> Option<BlockState>) {
+    PLACE_FAILURES.with(|cells| {
+        cells.borrow_mut().retain(|pos, failure| {
+            if !failure.pending {
+                return true;
+            }
+            failure.pending = false;
+            !state_at(*pos).is_some_and(|state| {
+                normalize(BlockDescription::of(state).name()) == normalize(&failure.block)
+            })
+        });
+    });
+}
+
+/// Whether earlier places failed on this cell often enough to avoid it.
+fn place_cell_exhausted(pos: BlockPos) -> bool {
+    PLACE_FAILURES.with(|cells| {
+        cells.borrow().get(&pos).is_some_and(|failure| {
+            !failure.pending && failure.attempts >= PLACE_FAILURES_BEFORE_NEW_CELL
+        })
+    })
+}
+
+/// The nearest candidate whose target cell is not exhausted. Indirected out of
+/// `place_target` so the choice is testable without a live world.
+fn nearest_allowed(
+    candidates: impl IntoIterator<Item = (f64, BlockPos, Direction)>,
+) -> Option<(BlockPos, Direction)> {
+    candidates
+        .into_iter()
+        .filter(|(_, support, direction)| {
+            !place_cell_exhausted(support.offset_with_direction(*direction))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, support, direction)| (support, direction))
+}
+
 fn place_target(ctx: &mut Ctx<'_>, rejected: &[BlockPos]) -> Option<(BlockPos, Direction)> {
+    // A new call only starts after the previous receipt settled, so this is
+    // where the last click's outcome is known from the world.
+    settle_place_attempts(|pos| ctx.world.block_state(pos));
     let eye = ctx.body.eye_position();
     let eye_cell = eye.to_block_pos_floor();
     let body_box = ctx.body.bounding_box();
@@ -192,7 +293,7 @@ fn place_target(ctx: &mut Ctx<'_>, rejected: &[BlockPos]) -> Option<(BlockPos, D
         .perception
         .blocks_in(Caller::Other, ctx.world, region, BlockFilter::Any);
     let blocks = answer.value()?;
-    let mut best: Option<(f64, BlockPos, Direction)> = None;
+    let mut candidates = Vec::new();
     for fact in blocks {
         // Never click a replaceable block (air, grass, snow, a flower): the
         // server replaces the clicked cell instead of placing against its
@@ -223,11 +324,9 @@ fn place_target(ctx: &mut Ctx<'_>, rejected: &[BlockPos]) -> Option<(BlockPos, D
             continue;
         }
         let distance = eye.distance_to(center(air));
-        if best.as_ref().is_none_or(|(best, _, _)| distance < *best) {
-            best = Some((distance, fact.pos, direction));
-        }
+        candidates.push((distance, fact.pos, direction));
     }
-    best.map(|(_, pos, direction)| (pos, direction))
+    nearest_allowed(candidates)
 }
 
 #[cfg(test)]
@@ -295,5 +394,50 @@ mod tests {
         assert!(!place_support(BlockState::from(BlockKind::Snow)));
         assert!(place_support(stone()));
         assert!(place_support(BlockState::from(BlockKind::CraftingTable)));
+    }
+
+    fn reset_place_failures() {
+        PLACE_FAILURES.with(|cells| cells.borrow_mut().clear());
+    }
+
+    #[test]
+    fn three_failed_places_on_one_cell_move_the_next_target() {
+        reset_place_failures();
+        let direction = Direction::East;
+        let near = BlockPos::new(10, 64, 0);
+        let far = BlockPos::new(10, 64, 2);
+        let near_cell = near.offset_with_direction(direction);
+        let far_cell = far.offset_with_direction(direction);
+        // The server acked the click but the cell stayed air: three times.
+        for _ in 0..PLACE_FAILURES_BEFORE_NEW_CELL {
+            note_place_attempt(near_cell, "crafting_table");
+            settle_place_attempts(|_| None);
+        }
+        assert!(place_cell_exhausted(near_cell));
+        assert!(!place_cell_exhausted(far_cell));
+        // The nearer support would win on distance, but its cell is banned.
+        let chosen = nearest_allowed([(0.5, near, direction), (1.0, far, direction)]);
+        assert_eq!(chosen, Some((far, direction)));
+        reset_place_failures();
+    }
+
+    #[test]
+    fn a_place_that_worked_does_not_count_as_a_failure() {
+        reset_place_failures();
+        let direction = Direction::East;
+        let support = BlockPos::new(10, 64, 0);
+        let cell = support.offset_with_direction(direction);
+        for _ in 0..PLACE_FAILURES_BEFORE_NEW_CELL {
+            note_place_attempt(cell, "crafting_table");
+            settle_place_attempts(|pos| {
+                (pos == cell).then(|| BlockState::from(BlockKind::CraftingTable))
+            });
+        }
+        assert!(!place_cell_exhausted(cell));
+        assert_eq!(
+            nearest_allowed([(0.5, support, direction)]),
+            Some((support, direction))
+        );
+        reset_place_failures();
     }
 }

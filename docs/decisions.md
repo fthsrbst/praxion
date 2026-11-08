@@ -5,6 +5,28 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-11-08
 
+- **Demo-3 is the building and fighting bot, right after Demo-2 (user).** Contents (proposal in `notes.md`
+  2026-11-08, designed with the user before code): a build layer (the LLM designs a voxel blueprint for the
+  site from a persona, the terrain and the inventory; code validates supports, materials, reach and, for a
+  shelter, closure and light; a `build` primitive places support-first with scaffolding), a persona profile
+  read by the goal proposer and the designer, a `hunt(mob)` core skill with retreat, and later farms as
+  blueprints with mechanics from the wiki RAG. Reason: the user wants varied, site-fitting, persona-driven
+  structures and mob hunting; the first-night shelter is also the brain-silence fallback (§5.4).
+  Rules out: fixed shelter templates.
+
+- **`dig_down(block)` digs a staircase toward ground the body cannot see (Claude, pending user review).**
+  Amends 2026-11-03 ("explore may not dig"): `explore` still never digs. A new discrete primitive cuts a
+  one-wide diagonal staircase along one axis (3 cells per stair, dug top-down, one dig receipt each) until
+  the block is known within 5 blocks, then returns `confirmed` so `mine` takes over. Reason: in flat terrain
+  stone lies 3 to 6 blocks under dirt and no ray reaches it, so `get_cobblestone` failed `not_found` for
+  whole runs (live 2026-11-08, `explore(stone)` x3). Safety: never a cell whose removal exposes water or
+  lava, never the block under the feet, floor of each new stair must be solid (fall of one block), at most
+  12 blocks below the start and 40 dug blocks per call, falling sand and gravel are dug again under new
+  receipts; typed failures `fluid`, `unsafe_drop`, `too_deep`, `no_block`, `needs_tool`, `stuck`.
+  `get_cobblestone` now calls the new skill `find_stone` (explore) first and `dig_down(stone)` on the tick
+  that search failed (child-failure semantics of §6.1, so neither the per-rule cap nor oscillation applies).
+  Rules out for now: pillaring up, digging straight down, digging toward anything but the named block.
+
 Thin Demo-2 slice, designed by Claude and approved by the user ("demo 2 yi yap"), with the user's budget:
 
 - **Slice: Praxion writes one skill, admits it, plays it, on the headless body.** First target `get_furnace`

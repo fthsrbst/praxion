@@ -27,6 +27,7 @@ CORE_NAMES = {
     "get_stone_sword",
     "get_wood",
     "get_wooden_pickaxe",
+    "find_stone",
 }
 
 
@@ -44,7 +45,7 @@ def test_load_catalog_reads_the_real_core_skills() -> None:
     cobblestone = catalog.by_name("get_cobblestone")
     assert cobblestone is not None
     assert cobblestone.params == ["n: int = 3"]
-    assert cobblestone.rules == 5
+    assert cobblestone.rules == 6
 
 
 def test_catalog_text_contains_every_skill_source() -> None:
@@ -56,7 +57,7 @@ def test_catalog_text_contains_every_skill_source() -> None:
 
 def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
     catalog = load_catalog()
-    assert primitive_names(catalog) == ["craft", "explore", "mine", "place"]
+    assert primitive_names(catalog) == ["craft", "dig_down", "explore", "mine", "place"]
     assert fact_names(catalog) == ["count", "has", "near"]
 
 

@@ -294,6 +294,36 @@ fn glass_passes_and_is_itself_visible() {
 }
 
 #[test]
+fn first_blocking_cell_uses_the_sight_table_and_spends_one_ray() {
+    let glass = find_block("glass", &[]);
+    let dirt = find_block("dirt", &[]);
+    let through = BlockPos::new(2, 65, 0);
+    let blocker = BlockPos::new(3, 65, 0);
+    let target = BlockPos::new(4, 65, 0);
+    let world = world_with(&[(through, glass), (blocker, dirt)]);
+    let from = Vec3::new(0.5, 65.0, 0.5);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    assert_eq!(
+        p.first_blocking_cell(Caller::Other, &world, from, target),
+        Some(blocker),
+        "glass passes and the dirt behind it blocks"
+    );
+    assert_eq!(p.rays_used_this_tick(), 1, "one ray per call");
+
+    let mut p = Perception::new(Config {
+        ray_budget: 0,
+        ..Config::default()
+    });
+    p.begin_tick(&world);
+    assert_eq!(
+        p.first_blocking_cell(Caller::Other, &world, from, target),
+        None,
+        "no budget, no answer"
+    );
+}
+
+#[test]
 fn a_bottom_slab_blocks_only_its_half() {
     let bottom = find_block("stone_slab", &[("type", "bottom")]);
     let top = find_block("stone_slab", &[("type", "top")]);
@@ -1181,6 +1211,67 @@ fn a_log_behind_the_look_stays_unknown() {
 }
 
 #[test]
+fn a_log_between_two_half_fan_rows_is_seen_by_one_scan() {
+    // The old scan cast every other row: rows offset by multiples of five
+    // degrees. Put the log's bearing on an odd row (2.5 degrees off), so one
+    // full-fan scan sees it while the old half-fan could not.
+    let log_state = find_block("oak_log", &[]);
+    let log = BlockPos::new(50, 65, 2);
+    let mut world = world_area(4, &[(log, log_state)]);
+    let dx = f64::from(log.x) + 0.5 - 0.5;
+    let dz = f64::from(log.z) + 0.5 - 0.5;
+    let bearing = (-dx).atan2(dz).to_degrees().rem_euclid(360.0);
+    set_rotation(&mut world, (bearing - 2.5) as f32, 0.0);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    p.scan_view(&world);
+    assert_eq!(
+        p.known(log).map(|seen| seen.state),
+        Some(log_state),
+        "one full-fan scan must see a log whose bearing falls between two old half-fan rows"
+    );
+}
+
+#[test]
+fn a_changed_chunk_revalidates_its_seen_cells_against_the_world() {
+    let log_state = find_block("oak_log", &[]);
+    let log = BlockPos::new(50, 65, 0);
+    let mut world = world_across_chunks(4, &[(log, log_state)]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    assert_eq!(
+        p.block(Caller::Other, &world, log).provenance(),
+        Some(Provenance::Sight)
+    );
+    assert!(
+        p.nearest_known(&world, 64, |_| false, |state| state == log_state)
+            .is_some(),
+        "the fresh sighting is returned"
+    );
+
+    // A change elsewhere in the log's chunk must not blind the remembered
+    // cell: the log is still there, so it still answers.
+    set_block(&mut world, BlockPos::new(50, 64, 0), stone());
+    p.begin_tick(&world);
+    assert_eq!(
+        p.nearest_known(&world, 64, |_| false, |state| state == log_state)
+            .map(|(pos, _)| pos),
+        Some(log),
+        "an unrelated change in the chunk keeps the log"
+    );
+
+    // The log itself removed: the changed chunk is re-validated and the ghost
+    // is gone, although no ray has seen the cell since.
+    set_block(&mut world, log, BlockState::AIR);
+    p.begin_tick(&world);
+    assert_eq!(
+        p.nearest_known(&world, 64, |_| false, |state| state == log_state),
+        None,
+        "a remembered log that is gone must not answer nearest_known"
+    );
+}
+
+#[test]
 fn the_view_scan_never_spends_the_reflex_reserve() {
     let world = world_area(1, &[]);
     let config = Config {
@@ -1247,7 +1338,7 @@ fn bench_view_scan() {
 #[test]
 #[ignore = "timing measurement: cargo test -p praxion-perception --release -- --ignored bench_nearest_known_worst_case --nocapture"]
 fn bench_nearest_known_worst_case() {
-    let world = world_with(&[]);
+    let world = world_area(4, &[]);
     let config = Config {
         memory_capacity: 3_000_000,
         ..Config::default()
@@ -1261,8 +1352,11 @@ fn bench_nearest_known_worst_case() {
     for x in eye_cell.x - radius..=eye_cell.x + radius {
         for y in eye_cell.y - radius..=eye_cell.y + radius {
             for z in eye_cell.z - radius..=eye_cell.z + radius {
-                p.known
-                    .record_seen(BlockPos::new(x, y, z), air, 1, 0, focus);
+                let pos = BlockPos::new(x, y, z);
+                // The cell is fresh in its chunk, so the revision check does
+                // not skip it and the bench measures the full scan.
+                let revision = world.chunk_revision(ChunkPos::from(pos)).unwrap_or(0);
+                p.known.record_seen(pos, air, 1, revision, focus);
             }
         }
     }

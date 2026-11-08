@@ -1,0 +1,9 @@
+# Walk until stone is within mining reach. It is a skill of its own so that a
+# failed search is ONE failure of the caller's rule: three failed explores
+# inside this frame (the per-rule cap) fail it with not_found, and the caller
+# then falls through to its next rule, see get_cobblestone.
+skill find_stone()
+  doc "Explore until stone is within mining reach; fails not_found when exploring runs out."
+  rules:
+    near(stone, 5) -> done
+    true -> explore(stone)

@@ -213,6 +213,54 @@ pub(crate) fn choose_tool(
     }
 }
 
+/// How long a dig tries to bring its tool into the main hand before it digs
+/// with what it holds (a swap waits for the server's slot update).
+const TOOL_SELECT_TICKS: u32 = 40;
+
+/// What preparing the tool for one dig decided for this tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolStep {
+    /// The right tool is in the hand (or the best available is): click.
+    Ready,
+    /// A hotbar key or a swap is on its way: the frame carries it.
+    Pending,
+    /// The block drops nothing with anything the body carries.
+    Missing,
+}
+
+/// Hold the best tool for `state` before the first attack click of a target; a
+/// dig that is already under way keeps its item, because switching restarts
+/// the break. Stone mined by hand breaks and drops nothing, which is how a
+/// fresh-spawn body mined 21 stone and collected no cobblestone. `waited`
+/// counts the ticks spent selecting for this target.
+pub(crate) fn hold_tool(
+    ctx: &Ctx<'_>,
+    state: BlockState,
+    hand: &mut HandSelect,
+    waited: &mut u32,
+    frame: &mut ControlFrame,
+) -> ToolStep {
+    let held = praxion_headless::held_item(ctx.world);
+    match choose_tool(state, ctx.world.inventory(), &held) {
+        ToolChoice::Keep => ToolStep::Ready,
+        ToolChoice::Missing => ToolStep::Missing,
+        ToolChoice::Select(item) => {
+            *waited = waited.saturating_add(1);
+            let selecting = hand.tick(ctx.world, &item, frame);
+            if selecting != Selecting::Unavailable && *waited <= TOOL_SELECT_TICKS {
+                return ToolStep::Pending;
+            }
+            // The better tool cannot be brought into the hand: dig with the
+            // held item only if the block still drops with it.
+            if !praxion_headless::tool_fit(state, &held).drops {
+                return ToolStep::Missing;
+            }
+            *frame = idle(ctx);
+            ToolStep::Ready
+        }
+    }
+}
+
 pub(crate) fn held_matches(world: &World, wanted: &str) -> bool {
     let slot = world.selected_hotbar_slot().unwrap_or(0) as usize;
     world
@@ -223,6 +271,16 @@ pub(crate) fn held_matches(world: &World, wanted: &str) -> bool {
 
 /// The nearest visible block of `wanted` within `radius`.
 pub(crate) fn block_target(ctx: &mut Ctx<'_>, wanted: &str, radius: u32) -> Option<BlockPos> {
+    block_target_where(ctx, wanted, radius, |_| true)
+}
+
+/// The nearest visible `wanted` block within `radius` that `accept` allows.
+pub(crate) fn block_target_where(
+    ctx: &mut Ctx<'_>,
+    wanted: &str,
+    radius: u32,
+    accept: impl Fn(BlockPos) -> bool,
+) -> Option<BlockPos> {
     if let Some(tag) = wanted.strip_prefix('#') {
         let eye = ctx.perception.eye_cell(ctx.world)?;
         let region = BlockRegion::around(eye, radius);
@@ -232,14 +290,30 @@ pub(crate) fn block_target(ctx: &mut Ctx<'_>, wanted: &str, radius: u32) -> Opti
         let blocks = answer.value()?;
         return blocks
             .iter()
-            .filter(|fact| gamedata::block_in_tag(fact.kind.to_str(), tag))
+            .filter(|fact| gamedata::block_in_tag(fact.kind.to_str(), tag) && accept(fact.pos))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
             .map(|fact| fact.pos);
     }
     let kind = wanted.parse::<BlockKind>().ok()?;
-    ctx.perception
+    let nearest = ctx
+        .perception
         .nearest_block(Caller::Other, ctx.world, kind, radius)
         .value()
+        .map(|fact| fact.pos)?;
+    if accept(nearest) {
+        return Some(nearest);
+    }
+    // The nearest one is refused: look at every visible one in the radius.
+    let eye = ctx.perception.eye_cell(ctx.world)?;
+    let region = BlockRegion::around(eye, radius);
+    let answer = ctx
+        .perception
+        .blocks_in(Caller::Other, ctx.world, region, BlockFilter::Any);
+    answer
+        .value()?
+        .iter()
+        .filter(|fact| fact.kind == kind && accept(fact.pos))
+        .min_by(|a, b| a.distance.total_cmp(&b.distance))
         .map(|fact| fact.pos)
 }
 

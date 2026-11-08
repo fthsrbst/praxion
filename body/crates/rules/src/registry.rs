@@ -31,10 +31,14 @@ pub const EXPLORE_NEAR_RADIUS: u32 = 5;
 
 /// How far `explore` looks for its target in the perception known map before
 /// it falls back to walking to a frontier. This is the sight range: the view
-/// scan can record a tree out to 64 blocks, so a search shorter than that
-/// would walk away from a tree already in plain sight. The 80-block frontier
-/// box still reaches past the known ring. The scan is shell-ordered, so a near
-/// target stays cheap.
+/// scan records the first blocking cell of each ray, so a log out to 64 blocks
+/// reaches the map, and a search shorter than that would walk away from a tree
+/// already in plain sight. The 80-block frontier box still reaches past the
+/// known ring. The known map is section-ordered with a distance lower bound,
+/// so a near target stays cheap.
+///
+/// This is not the cue radius: leaves are see-through, so the view scan records
+/// no canopy. The cue may only use the much shorter sweep radius.
 pub const EXPLORE_SEARCH_RADIUS: u32 = 64;
 
 /// The signature of one fact.
@@ -146,6 +150,9 @@ pub enum BlockRef {
     Named(&'static str),
     /// The block or item named by argument `index`.
     Param(usize),
+    /// Any breakable ground block (`dig_down` removes whatever lies in its
+    /// way).
+    Any,
 }
 
 /// A block state change in a primitive's declared effect.
@@ -232,6 +239,15 @@ impl Primitives {
         }];
         let (mine_produces, mine_drops) =
             summary_drops(gamedata::BLOCKS.iter().map(|table| table.drops));
+        let dig_down_effects = Effects {
+            produces: mine_produces.clone(),
+            drops: mine_drops.clone(),
+            consumes: Vec::new(),
+            changes: vec![BlockChange {
+                from: BlockRef::Any,
+                to: BlockRef::Air,
+            }],
+        };
         let mut mine = PrimitiveRecord {
             name: "mine",
             version: 1,
@@ -262,6 +278,24 @@ impl Primitives {
         }
         insert_block_tag_effects(&mut mine);
         primitives.add(mine);
+
+        primitives.add(PrimitiveRecord {
+            name: "dig_down",
+            version: 1,
+            params: vec![PrimParam {
+                name: "block",
+                ty: ArgType::Value(ValueType::Block),
+            }],
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            // Up to 40 dig receipts (160-tick window each, usually a few ticks
+            // for dirt), tool selection and the walk onto each stair; the
+            // interpreter must not preempt a staircase that is progressing.
+            default_max_ticks: 1500,
+            effects: dig_down_effects,
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::BlockBecomesAir,
+        });
 
         primitives.add(PrimitiveRecord {
             name: "place",
@@ -624,7 +658,7 @@ mod tests {
     fn every_required_record_exists() {
         let primitives = Primitives::standard();
         for name in [
-            "move_to", "mine", "place", "craft", "eat", "explore", "attack", "equip", "wait",
+            "move_to", "mine", "dig_down", "place", "craft", "eat", "explore", "attack", "equip", "wait",
             "observe",
         ] {
             let record = primitives.get(name).unwrap_or_else(|| panic!("missing {name}"));
@@ -659,6 +693,35 @@ mod tests {
         assert_eq!(p.get("observe").unwrap().kind, PrimitiveKind::Discrete);
         assert_eq!(p.get("observe").unwrap().evidence, EvidenceKind::FactKnown);
         assert_eq!(p.get("observe").unwrap().default_max_ticks, 120);
+    }
+
+    #[test]
+    fn dig_down_digs_ground_with_one_receipt_per_block() {
+        let p = Primitives::standard();
+        let dig_down = p.get("dig_down").unwrap();
+        assert_eq!(dig_down.kind, PrimitiveKind::Discrete);
+        assert_eq!(dig_down.evidence, EvidenceKind::BlockBecomesAir);
+        assert_eq!(
+            dig_down.params,
+            vec![PrimParam {
+                name: "block",
+                ty: ArgType::Value(ValueType::Block),
+            }]
+        );
+        // It removes any ground block, so the effect names no single block,
+        // and it declares what mining that ground can drop.
+        let effects = dig_down.effects_for(&[ArgValue::Block("stone".into())]);
+        assert_eq!(
+            effects.changes,
+            vec![BlockChange {
+                from: BlockRef::Any,
+                to: BlockRef::Air,
+            }]
+        );
+        assert!(effects.produces.iter().any(|delta| delta.item == "dirt"));
+        assert!(effects.produces.iter().any(|delta| delta.item == "cobblestone"));
+        // The flight deadline outlasts one dig receipt window and a walk.
+        assert!(dig_down.default_max_ticks >= 1000);
     }
 
     #[test]

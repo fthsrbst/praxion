@@ -6,6 +6,7 @@ use azalea_core::{
     delta::{LpVec3, PositionDelta8},
     entity_id::MinecraftEntityId,
     game_type::{GameMode, OptionalGameType},
+    heightmap_kind::HeightmapKind,
     position::{BlockPos, ChunkPos, ChunkSectionBlockPos, ChunkSectionPos, Vec3},
 };
 use azalea_entity::{EntityDataItem, EntityDataValue, LookDirection, Pose};
@@ -39,6 +40,7 @@ use azalea_registry::{
     identifier::Identifier,
 };
 use azalea_world::Chunk;
+use azalea_world::heightmap::Heightmap;
 use uuid::Uuid;
 
 use super::*;
@@ -309,6 +311,58 @@ fn chunks_and_block_updates_are_applied() {
         world.block_description(BlockPos::new(0, 64, 0)).unwrap().name(),
         "minecraft:stone"
     );
+}
+
+#[test]
+fn surface_y_reads_and_tracks_the_world_surface_heightmap() {
+    // 256 columns at ceil(log2(384 + 1)) = 9 bits each pack into 36 u64 words.
+    fn surface_heightmap() -> Heightmap {
+        Heightmap::new(
+            HeightmapKind::WorldSurface,
+            384,
+            -64,
+            vec![0u64; 36].into_boxed_slice(),
+        )
+    }
+
+    let mut world = active_world();
+    assert_eq!(world.surface_y(0, 0), None, "no chunk is loaded");
+
+    // A chunk holding only a `WorldSurface` heightmap. Column (0, 0) says its
+    // first free y is 65, every other column is untouched (min_y).
+    let mut chunk = Chunk::default();
+    let mut heightmap = surface_heightmap();
+    heightmap.set_height(0, 0, 65);
+    chunk
+        .heightmaps
+        .insert(HeightmapKind::WorldSurface, heightmap);
+    world.chunks.insert(ChunkPos::new(0, 0), chunk);
+
+    assert_eq!(world.surface_y(0, 0), Some(65));
+    assert_eq!(world.surface_y(15, 15), Some(-64), "an untouched column");
+    assert_eq!(world.surface_y(16, 0), None, "a missing chunk");
+
+    // x = -1 is local column 15 of chunk -1, not chunk 0.
+    assert_eq!(world.surface_y(-1, 0), None, "chunk (-1, 0) is not loaded");
+    let mut left = Chunk::default();
+    let mut left_heightmap = surface_heightmap();
+    left_heightmap.set_height(15, 0, 70);
+    left.heightmaps
+        .insert(HeightmapKind::WorldSurface, left_heightmap);
+    world.chunks.insert(ChunkPos::new(-1, 0), left);
+    assert_eq!(world.surface_y(-1, 0), Some(70));
+
+    // A block placed above the recorded surface raises the heightmap, which is
+    // what makes the answer current after every block update.
+    let stone = find_block("minecraft:stone");
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
+            pos: BlockPos::new(0, 70, 0),
+            block_state: stone,
+        }),
+    );
+    assert_eq!(world.surface_y(0, 0), Some(71));
 }
 
 #[test]
@@ -718,6 +772,32 @@ fn own_air_is_clamped_at_zero_and_unknown_after_respawn() {
     );
     assert_eq!(world.own_air(), None, "a new entity has no facts yet");
     assert_eq!(world.own_burning(), None);
+}
+
+#[test]
+fn respawn_resets_the_selected_hotbar_slot() {
+    let mut world = active_world();
+    // Our own selection packet writes the mirror, as it does on the wire.
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::SetCarriedItem(
+            azalea_protocol::packets::game::ServerboundSetCarriedItem { slot: 6 },
+        ),
+    );
+    assert_eq!(world.selected_hotbar_slot(), Some(6));
+
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::Respawn(ClientboundRespawn {
+            common: spawn_info(),
+            data_to_keep: 0,
+        }),
+    );
+    assert_eq!(
+        world.selected_hotbar_slot(),
+        Some(0),
+        "the server's new player starts on slot 0 and sends no held-slot packet"
+    );
 }
 
 #[test]

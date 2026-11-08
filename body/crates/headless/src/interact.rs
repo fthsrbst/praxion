@@ -136,6 +136,27 @@ impl ActuatorState {
         self.prediction_seq = self.prediction_seq.wrapping_add(1);
         self.prediction_seq
     }
+
+    /// A respawn hands the server a new player. Every action of the old player
+    /// has ended, so its mining, use and selection state must not leak into the
+    /// new life. The prediction sequence deliberately stays monotonic: the
+    /// server acknowledges the highest sequence it has seen on this connection,
+    /// so starting over at 1 could leave every later block action unacknowledged.
+    ///
+    /// The held slot matters most: a new player starts on slot 0 and the server
+    /// sends no held-slot packet for that reset. Keeping the old life's
+    /// `last_selected_slot` made the actuator drop the first selection of the
+    /// new life, so the server kept using slot 0 while the body held the block
+    /// it had just crafted (seed 202, 2026-11-08: 87 `place` clicks with a
+    /// sapling in slot 0 acked and placed nothing).
+    pub(crate) fn respawn(&mut self) {
+        self.mining = None;
+        self.last_use = false;
+        self.using_item = false;
+        self.attack_cooldown = 0;
+        self.last_selected_slot = None;
+        self.mine_delay = 0;
+    }
 }
 
 /// The item in the selected hotbar slot (the main hand), not the cursor stack.
@@ -292,7 +313,7 @@ fn pick_entity(
 ) -> Option<EntityPick> {
     let mut best = range_sq;
     let mut result = None;
-    for entity in world.entities() {
+    for entity in world.entities().filter(|entity| is_pickable(entity.kind())) {
         let dimensions = calculate_dimensions(entity.kind(), Pose::Standing);
         let aabb = dimensions.make_bounding_box(entity.position());
         if let Some(location) = aabb.clip(eye, end) {
@@ -309,6 +330,46 @@ fn pick_entity(
         }
     }
     result
+}
+
+/// Whether the vanilla client's crosshair can hit this kind of entity
+/// (`Entity#isPickable`). Items, experience orbs and arrows are not only
+/// unpickable: the server disconnects a client that attacks them ("Attempting
+/// to attack an invalid entity", seed 101 live run 2026-11-08, where a swing at
+/// a log hit the dropped log item first). The rest are thrown or effect
+/// entities the client also never targets.
+fn is_pickable(kind: EntityKind) -> bool {
+    !matches!(
+        kind,
+        EntityKind::Item
+            | EntityKind::ExperienceOrb
+            | EntityKind::Arrow
+            | EntityKind::SpectralArrow
+            | EntityKind::Trident
+            | EntityKind::AreaEffectCloud
+            | EntityKind::Snowball
+            | EntityKind::Egg
+            | EntityKind::EnderPearl
+            | EntityKind::ExperienceBottle
+            | EntityKind::SplashPotion
+            | EntityKind::LingeringPotion
+            | EntityKind::FireworkRocket
+            | EntityKind::EyeOfEnder
+            | EntityKind::LlamaSpit
+            | EntityKind::FishingBobber
+            | EntityKind::LightningBolt
+            | EntityKind::Marker
+            | EntityKind::BlockDisplay
+            | EntityKind::ItemDisplay
+            | EntityKind::TextDisplay
+            | EntityKind::EvokerFangs
+            | EntityKind::OminousItemSpawner
+            | EntityKind::WindCharge
+            | EntityKind::BreezeWindCharge
+            | EntityKind::SmallFireball
+            | EntityKind::DragonFireball
+            | EntityKind::WitherSkull
+    )
 }
 
 /// Turns one frame into the packets a vanilla client would send.
@@ -690,6 +751,31 @@ mod tests {
         }
         assert!(body.on_ground());
         body
+    }
+
+    #[test]
+    fn a_respawn_keeps_the_sequence_and_forgets_the_held_slot() {
+        let mut state = ActuatorState::default();
+        let before = state.next_seq();
+        state.last_selected_slot = Some(6);
+
+        state.respawn();
+
+        assert_eq!(state.last_selected_slot, None, "the new life must select again");
+        assert!(
+            state.next_seq() > before,
+            "the server acks the highest sequence per connection; a reset would go unacked"
+        );
+    }
+
+    #[test]
+    fn items_orbs_and_arrows_are_never_attack_targets() {
+        for kind in [EntityKind::Item, EntityKind::ExperienceOrb, EntityKind::Arrow] {
+            assert!(!is_pickable(kind), "{kind:?} must not be picked");
+        }
+        for kind in [EntityKind::Zombie, EntityKind::Cow, EntityKind::Player] {
+            assert!(is_pickable(kind), "{kind:?} must be pickable");
+        }
     }
 
     #[test]

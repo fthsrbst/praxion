@@ -145,7 +145,10 @@ pub fn summary(shared: &Shared) -> Summary {
         goal: Goal {
             skill: shared.skill.clone(),
             args: shared.args.clone(),
-            outcome: shared.outcome.clone().unwrap_or_else(|| "running".to_owned()),
+            outcome: shared
+                .outcome
+                .clone()
+                .unwrap_or_else(|| "running".to_owned()),
         },
         ticks: shared.ticks,
         tick_time: TickTimes {

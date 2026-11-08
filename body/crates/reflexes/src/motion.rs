@@ -6,12 +6,14 @@
 //! and then follow the returned steps. The fall guard runs on every frame a
 //! reflex emits: a reflex never walks the body off a drop deeper than three.
 
+use std::collections::{HashSet, VecDeque};
+
 use praxion_headless::{Body, Click, ControlFrame, Held, Look};
+use praxion_planner::KnownBlocks;
 use praxion_planner::{
-    Follower, Goal, Inventory, MoveKind, Personality, Planner, PlanStatus, PlanningState, Step,
+    Follower, Goal, Inventory, MoveKind, Personality, PlanStatus, Planner, PlanningState, Step,
     WALK_TOLERANCE_DEG, aim, look_towards,
 };
-use praxion_planner::KnownBlocks;
 use praxion_world::{BlockPos, Vec3};
 
 use crate::reflex::ReflexAction;
@@ -27,6 +29,14 @@ const STRAFE_TICKS: u64 = 8;
 const ATTACK_TICKS: u64 = 30;
 const EAT_TICKS: u64 = 4;
 
+/// How many connected water cells the drowning reflex explores when it looks
+/// for the way out of the water. A short breath search: the surface or the
+/// bank is close in the cases a reflex meets, and every cell costs a
+/// perception query the rest of the tick also wants.
+const AIR_SEARCH_NODES: usize = 96;
+/// At most this many air targets are handed to the planner.
+const MAX_AIR_TARGETS: usize = 4;
+
 /// One running routine.
 #[derive(Clone, Debug)]
 pub enum Motion {
@@ -37,13 +47,28 @@ pub enum Motion {
         deadline: u64,
         /// A flee sprints; a careful step does not.
         sprint: bool,
+        /// For a drowning plan, the cell the route ends at: a water cell the
+        /// body can breathe from, or a bank. The engine measures progress
+        /// against it; every other routine passes `None`.
+        air_target: Option<BlockPos>,
     },
-    Strafe { right: bool, until: u64 },
+    Strafe {
+        right: bool,
+        until: u64,
+    },
     SwimUp,
-    Attack { target: i32, until: u64 },
-    Eat { until: u64, clicked: bool },
+    Attack {
+        target: i32,
+        until: u64,
+    },
+    Eat {
+        until: u64,
+        clicked: bool,
+    },
     /// The body is already in the water the fire routine wanted.
-    Wait { until: u64 },
+    Wait {
+        until: u64,
+    },
 }
 
 impl Motion {
@@ -76,29 +101,35 @@ impl Motion {
                 } else {
                     view.feet.east(1)
                 };
-                Self::path(goal, body, tick, blocks, true).or_else(|| {
+                Self::path(goal, body, tick, blocks, true, None).or_else(|| {
                     Self::single_step(view, &[away_cell, side, view.feet.up(1)], true, blocks)
                 })
             }
-            ReflexAction::StepBack { to } => Self::path(Goal::Block(to), body, tick, blocks, false)
-                .or_else(|| Self::single_step(view, &steps_from(view, to), false, blocks)),
+            ReflexAction::StepBack { to } => {
+                Self::path(Goal::Block(to), body, tick, blocks, false, None)
+                    .or_else(|| Self::single_step(view, &steps_from(view, to), false, blocks))
+            }
             ReflexAction::ToWater { pos } => {
                 if view.feet_in_water {
                     Some(Motion::Wait { until: tick + 1 })
                 } else {
-                    Self::path(Goal::Block(pos), body, tick, blocks, false).or_else(|| {
+                    Self::path(Goal::Block(pos), body, tick, blocks, false, None).or_else(|| {
                         let toward = cardinal_towards(view.feet, pos);
                         Self::single_step(view, &[toward], false, blocks)
                     })
                 }
             }
-            ReflexAction::OffFire { to } => Self::path(Goal::Block(to), body, tick, blocks, false)
-                .or_else(|| Self::single_step(view, &steps_from(view, to), false, blocks)),
+            ReflexAction::OffFire { to } => {
+                Self::path(Goal::Block(to), body, tick, blocks, false, None)
+                    .or_else(|| Self::single_step(view, &steps_from(view, to), false, blocks))
+            }
             ReflexAction::Strafe { right } => Some(Motion::Strafe {
                 right,
                 until: tick + STRAFE_TICKS,
             }),
-            ReflexAction::SwimUp => Some(Motion::SwimUp),
+            ReflexAction::SwimUp => {
+                Some(Self::surface_plan(body, tick, blocks).unwrap_or(Motion::SwimUp))
+            }
             ReflexAction::Attack { target, .. } => Some(Motion::Attack {
                 target,
                 until: tick + ATTACK_TICKS.min(u64::from(settings.max_reflex_ticks)),
@@ -116,6 +147,7 @@ impl Motion {
         tick: u64,
         blocks: &mut dyn KnownBlocks,
         sprint: bool,
+        air_target: Option<BlockPos>,
     ) -> Option<Motion> {
         let mut planner = Planner::new();
         planner.set_max_drop(i32::from(SAFE_DROP));
@@ -124,7 +156,10 @@ impl Motion {
         let start = body.position().to_block_pos_floor();
         let state = PlanningState::new(Inventory::empty());
         let plan = planner.plan(blocks, &state, start, goal);
-        let reachable = matches!(plan.status, PlanStatus::Success | PlanStatus::Partial { .. });
+        let reachable = matches!(
+            plan.status,
+            PlanStatus::Success | PlanStatus::Partial { .. }
+        );
         if !reachable || plan.steps.is_empty() {
             return None;
         }
@@ -136,7 +171,42 @@ impl Motion {
             ),
             deadline: tick + ticks,
             sprint,
+            air_target,
         })
+    }
+
+    /// The air cell the current plan heads for, if its route ends at one.
+    /// The engine measures a drowning reflex's progress against it.
+    pub fn air_target(&self) -> Option<BlockPos> {
+        match self {
+            Motion::Follow { air_target, .. } => *air_target,
+            _ => None,
+        }
+    }
+
+    /// Plan to the nearest reachable air: a water cell whose head cell is open
+    /// air, or a bank the body can stand on.
+    ///
+    /// The search walks the connected water from the body outwards (BFS, so
+    /// the first target is the nearest by swim distance) and stops at the
+    /// first water cell whose head is open. Banks are the same search's
+    /// neighbours. A known air cell always wins; when none is known, a water
+    /// cell whose head cell is unknown is the frontier to rise into.
+    ///
+    /// The plan is the planner's own water moves (`Swim`, `SwimUp`,
+    /// `ExitWater`), so a capped 1x1 shaft is escaped sideways exactly as a
+    /// normal swim path would. When no plan exists the caller falls back to
+    /// holding jump.
+    fn surface_plan(body: &Body, tick: u64, blocks: &mut dyn KnownBlocks) -> Option<Motion> {
+        let start = body.position().to_block_pos_floor();
+        for target in air_targets(start, blocks) {
+            if let Some(motion) =
+                Self::path(Goal::Block(target), body, tick, blocks, false, Some(target))
+            {
+                return Some(motion);
+            }
+        }
+        None
     }
 
     /// One direct step, for a cell the planner could not reach in one segment.
@@ -173,6 +243,7 @@ impl Motion {
             )),
             deadline: u64::MAX,
             sprint,
+            air_target: None,
         })
     }
 
@@ -253,21 +324,105 @@ impl Motion {
     pub fn ended(&self, tick: u64, view: &View, body: &Body) -> bool {
         match self {
             Motion::Follow {
-                follower,
-                deadline,
-                ..
+                follower, deadline, ..
             } => follower.is_done() || follower.is_stalled() || tick >= *deadline,
             Motion::Strafe { until, .. } => tick >= *until,
             Motion::SwimUp => !view.head_in_water,
             Motion::Attack { target, until } => {
                 tick >= *until
-                    || attack_target(view, *target)
-                        .is_none_or(|mob| view.horizontal_to(mob) > 6.0)
+                    || attack_target(view, *target).is_none_or(|mob| view.horizontal_to(mob) > 6.0)
             }
             Motion::Eat { until, .. } => tick >= *until,
             Motion::Wait { until } => tick >= *until || body.is_in_water(),
         }
     }
+}
+
+/// The nearest air targets reachable through connected water, nearest by swim
+/// distance first.
+///
+/// A target is either a water cell whose head cell is open air (the body can
+/// breathe there) or a standable bank next to the water. The search is a
+/// breadth-first walk over known water cells, so it cannot leave the water
+/// body and cannot step through an unknown cell. The north/south/east/west
+/// order and the cap make the result deterministic.
+///
+/// A head cell that is *unknown* is not air, but the water cell below it is a
+/// frontier worth reaching: if that hidden cell is air, the body breathes
+/// there. The planner may reach the known water cell even though it refuses to
+/// enter the unknown cell, and the next tick's sight decides what is above.
+/// Known air always wins over a frontier.
+fn air_targets(start: BlockPos, blocks: &mut dyn KnownBlocks) -> Vec<BlockPos> {
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut air = Vec::new();
+    let mut frontiers = Vec::new();
+    let mut visited = 0usize;
+    seen.insert(start);
+    queue.push_back(start);
+
+    while let Some(cell) = queue.pop_front() {
+        if air.len() >= MAX_AIR_TARGETS || visited >= AIR_SEARCH_NODES {
+            break;
+        }
+        visited += 1;
+        let feet_cell = Cell::probe(blocks, cell);
+        if !feet_cell.is_water() {
+            continue;
+        }
+        let head_cell = Cell::probe(blocks, cell.up(1));
+
+        if head_cell.is_passable() {
+            // The head cell is the cell the body breathes from. Open air there
+            // is the top of this water column.
+            air.push(cell);
+            continue;
+        }
+        if head_cell.is_water() {
+            // Rise along the water column.
+            let above = cell.up(1);
+            if seen.insert(above) {
+                queue.push_back(above);
+            }
+        } else if !head_cell.is_known() {
+            // A hidden cell above: this water cell is the frontier. Reaching it
+            // puts the body's head in the hidden cell, which may be air.
+            frontiers.push(cell);
+        }
+        // A solid lid stops the rise here but not a sideways swim, so the
+        // neighbours are always walked.
+
+        for next in [cell.north(1), cell.south(1), cell.east(1), cell.west(1)] {
+            if !seen.insert(next) {
+                continue;
+            }
+            if Cell::probe(blocks, next).is_water() {
+                queue.push_back(next);
+            } else if is_shore(blocks, next) {
+                air.push(next);
+            } else if is_shore(blocks, next.up(1)) {
+                // The planner's `ExitWater { rise: true }` climbs one block
+                // onto the bank; its goal is the bank top.
+                air.push(next.up(1));
+            }
+        }
+    }
+
+    if !air.is_empty() {
+        air.truncate(MAX_AIR_TARGETS);
+        air
+    } else {
+        frontiers.truncate(MAX_AIR_TARGETS);
+        frontiers
+    }
+}
+
+/// A cell the body can stand in with its head in air: passable feet, passable
+/// head, solid floor. Water never counts.
+fn is_shore(blocks: &mut dyn KnownBlocks, cell: BlockPos) -> bool {
+    Cell::probe(blocks, cell).is_passable()
+        && Cell::probe(blocks, cell.up(1)).is_passable()
+        && Cell::probe(blocks, cell.down(1)).is_solid()
 }
 
 /// The fall guard: a moving frame whose next cell drops more than three blocks,
@@ -276,9 +431,11 @@ impl Motion {
 ///
 /// `next_drop` is `DROP_PROBE` for a column nobody saw, so an unknown cell is
 /// refused here as well: the guard never moves the body over a floor it cannot
-/// name.
+/// name. A body in water is not falling: the drop probe describes the land
+/// below the water, so the depth part of the guard is skipped there.
 fn guard_drop(frame: &mut ControlFrame, view: &View) {
-    if frame.held.moves() && (view.next_drop > SAFE_DROP || view.next_cell_lava) {
+    let deep = !view.feet_in_water && view.next_drop > SAFE_DROP;
+    if frame.held.moves() && (deep || view.next_cell_lava) {
         frame.held = Held {
             sneak: true,
             ..Held::NONE

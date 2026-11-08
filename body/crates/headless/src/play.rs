@@ -127,6 +127,23 @@ impl PlayState {
         }
     }
 
+    /// Begin a new life after a respawn or a new world registration.
+    ///
+    /// The server builds a *new* player and resets its held slot to 0, but it
+    /// sends no held-slot packet for the reset. Our actuator dedups held-slot
+    /// packets against the last slot it sent, so the old life's slot would stay
+    /// in that field and the first selection of the new life would never reach
+    /// the server. Seed 202 (2026-11-08) drowned, re-gathered wood and crafted
+    /// a table in hotbar slot 6; the server still held slot 0, so 87 `place`
+    /// calls acked and placed nothing. A new life is also a fresh actuator:
+    /// no destroy or use from the old player can legitimately continue.
+    fn respawn(&mut self) {
+        self.dead = false;
+        self.client_loaded = false;
+        self.actuator.respawn();
+        self.body.respawn();
+    }
+
     /// One client tick.
     async fn tick(
         &mut self,
@@ -439,8 +456,7 @@ pub(crate) async fn run(
                 conn = config::enter(play_conn.config(), ctx.trace).await?;
                 // A new configuration means a new world registration; the server
                 // sends the chunks again and wants a fresh player_loaded.
-                state.client_loaded = false;
-                state.body.respawn();
+                state.respawn();
             }
             Outcome::Closed(error) => {
                 ctx.stats.set_world_summary(world_summary(&state));
@@ -606,10 +622,8 @@ async fn handle(
             }
         }
         ClientboundGamePacket::Respawn(_) => {
-            state.dead = false;
             // The new world arrives with new chunks and a new teleport.
-            state.client_loaded = false;
-            state.body.respawn();
+            state.respawn();
         }
         ClientboundGamePacket::CookieRequest(p) => {
             login::send(
@@ -680,4 +694,61 @@ fn chunk_of(position: Vec3) -> ChunkPos {
 
 fn apply_change<T: std::ops::Add<Output = T>>(base: T, relative: bool, change: T) -> T {
     if relative { base + change } else { change }
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use praxion_world::World;
+
+    use super::*;
+    use crate::frame::{ControlFrame, Held};
+    use crate::interact::plan;
+
+    fn carried_slot(packets: &[Outgoing]) -> Option<u16> {
+        packets.iter().find_map(|packet| {
+            let Outgoing::Packet(packet) = packet else {
+                return None;
+            };
+            let ServerboundGamePacket::SetCarriedItem(packet) = packet.as_ref() else {
+                return None;
+            };
+            Some(packet.slot)
+        })
+    }
+
+    #[test]
+    fn a_respawn_forgets_the_hotbar_slot_sent_in_the_old_life() {
+        let mut state = PlayState::new(
+            false,
+            None,
+            None,
+            None,
+            Vec3::ZERO,
+            LookDirection::default(),
+        );
+        let body = Body::new(Vec3::ZERO);
+        let world = World::new();
+        let mut frame = ControlFrame::new(0, body.generation(), Held::NONE);
+        frame.select_slot = Some(6);
+
+        let (first, _) = plan(&mut state.actuator, &body, &world, &frame, 0);
+        assert_eq!(carried_slot(&first), Some(6));
+        let (again, _) = plan(&mut state.actuator, &body, &world, &frame, 0);
+        assert_eq!(
+            carried_slot(&again),
+            None,
+            "an unchanged slot is not re-sent"
+        );
+
+        // The server resets the held slot to 0 on respawn and sends no packet
+        // for it, so the client must not trust the old life's last-sent slot.
+        state.respawn();
+        let (after, _) = plan(&mut state.actuator, &body, &world, &frame, 0);
+        assert_eq!(
+            carried_slot(&after),
+            Some(6),
+            "the first selection of the new life must reach the server"
+        );
+    }
 }

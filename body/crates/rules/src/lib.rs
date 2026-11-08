@@ -21,6 +21,7 @@
 //! carries a line and a column ([`Error`]).
 
 pub mod ast;
+pub mod candidates;
 mod check;
 pub mod error;
 mod lexer;
@@ -32,8 +33,9 @@ pub use ast::{
     Action, ActionKind, ArgType, ArgValue, CmpOp, Expr, ExprKind, FactCall, Param, Pos, Rule, Skill,
     Span, ValueType,
 };
+pub use candidates::{CandidateError, CandidateErrorKind, CandidateReport, check_candidates};
 pub use check::{
-    CORE_COMPOSITION_DEPTH, MAX_COMPOSITION_DEPTH, MAX_RULES, Program, freeze, freeze_with_depth,
+    CORE_COMPOSITION_DEPTH, MAX_COMPOSITION_DEPTH, MAX_RULES, PROGRAM_COMPOSITION_DEPTH, Program, freeze, freeze_with_depth,
 };
 pub use error::Error;
 pub use parser::parse;

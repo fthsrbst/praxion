@@ -4,22 +4,37 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use praxion_body::{
-    Args, BodyDriver, BodyOptions, Versions, find_root, git_commit, load_skill_files,
-    resolve_goal_args, settings_path, skills_dir, summary,
-};
 use praxion_body::summary::{SessionSummary, Shared};
+use praxion_body::{
+    Args, BodyDriver, BodyOptions, CheckArgs, ProgramLoadError, Versions, find_root, git_commit,
+    load_program, load_skill_files, read_skill_files, resolve_goal_args, settings_path, skills_dir,
+    summary,
+};
 use praxion_headless::{ConnectOptions, DriverHandle, Event, Session, TICK};
 use praxion_manifest::Manifest;
 use praxion_reflexes::Settings;
-use praxion_rules::CORE_COMPOSITION_DEPTH;
+use praxion_rules::check_candidates;
 
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     // `--verbose` shows the debug diagnostics (packet traces); RUST_LOG overrides.
-    let level = if std::env::args().any(|a| a == "--verbose") { "debug" } else { "info" };
+    let level = if std::env::args().any(|a| a == "--verbose") {
+        "debug"
+    } else {
+        "info"
+    };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("check-skills") {
+        return match run_check_skills(args) {
+            Ok(code) => code,
+            Err(message) => {
+                eprintln!("praxion-body: {message}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match run() {
         Ok(code) => code,
         Err(message) => {
@@ -29,25 +44,89 @@ fn main() -> ExitCode {
     }
 }
 
+/// The core skills directory for `check-skills`: an explicit `--skills` path
+/// needs no repository root; only the default is derived from it.
+fn check_skills_dir(skills: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
+    match skills {
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => {
+            let root =
+                find_root().ok_or("cannot find the repository root (versions/manifest.toml)")?;
+            Ok(skills_dir(&root))
+        }
+    }
+}
+
+/// `check-skills`: no server and no network; one JSON object on stdout.
+fn run_check_skills<I: Iterator<Item = String>>(args: I) -> Result<ExitCode, String> {
+    let args = CheckArgs::parse(args)?;
+    let skills = check_skills_dir(args.skills.as_deref())?;
+    let core = load_skill_files(&skills)?;
+    let candidates = read_skill_files(&args.candidates)?;
+    let reports = check_candidates(&core, &candidates)?;
+
+    let ok = reports.iter().all(|report| report.ok);
+    let candidate_json: Vec<_> = reports
+        .iter()
+        .map(|report| {
+            let errors: Vec<_> = report
+                .errors
+                .iter()
+                .map(|error| {
+                    serde_json::json!({
+                        "kind": error.kind.as_str(),
+                        "message": &error.message,
+                        "line": error.line,
+                        "col": error.col,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "file": &report.file,
+                "skills": &report.skills,
+                "ok": report.ok,
+                "errors": errors,
+            })
+        })
+        .collect();
+    let text = serde_json::to_string(&serde_json::json!({
+        "ok": ok,
+        "candidates": candidate_json,
+    }))
+    .map_err(|error| error.to_string())?;
+    println!("{text}");
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
 fn run() -> Result<ExitCode, String> {
     let args = Args::parse(std::env::args().skip(1))?;
     interrupt::install();
 
-    let root = find_root()
-        .ok_or("cannot find the repository root (versions/manifest.toml)")?;
+    let root = find_root().ok_or("cannot find the repository root (versions/manifest.toml)")?;
     let skills = args.skills.clone().unwrap_or_else(|| skills_dir(&root));
-    let files = load_skill_files(&skills)?;
-    let program = praxion_rules::load_files_with_depth(&files, CORE_COMPOSITION_DEPTH)
-        .map_err(|errors| {
-            errors
-                .iter()
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
-        })?;
+    let core_files = load_skill_files(&skills)?;
+    let candidate_files = match &args.candidates {
+        Some(dir) => read_skill_files(dir)?,
+        None => Vec::new(),
+    };
+    let program = match load_program(&core_files, &candidate_files) {
+        Ok(program) => program,
+        Err(ProgramLoadError::NameCollision(message) | ProgramLoadError::Candidate(message)) => {
+            log::error!("praxion-body: {message}");
+            return Ok(ExitCode::from(2));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let goal_args = resolve_goal_args(&program, &args.goal, &args.goal_args)?;
 
-    let settings_file = args.settings.clone().unwrap_or_else(|| settings_path(&root));
+    let settings_file = args
+        .settings
+        .clone()
+        .unwrap_or_else(|| settings_path(&root));
     let settings = Settings::load(&settings_file).map_err(|error| error.to_string())?;
 
     let manifest = Manifest::load(root.join("versions").join("manifest.toml"))
@@ -108,10 +187,7 @@ fn run() -> Result<ExitCode, String> {
     let linger = Duration::from_millis(args.linger_ticks.saturating_mul(50));
     let mut settled_at: Option<Instant> = None;
     loop {
-        let done = handle
-            .lock()
-            .map(|driver| driver.done())
-            .unwrap_or(true);
+        let done = handle.lock().map(|driver| driver.done()).unwrap_or(true);
         let ticks = lock(&shared).ticks;
 
         if lock(&shared).outcome.is_none() {
@@ -166,11 +242,17 @@ fn run() -> Result<ExitCode, String> {
         let world = stats.world_summary();
         lock(&shared).session = Some(SessionSummary {
             ticks_ran: stats.ticks_ran.load(std::sync::atomic::Ordering::Relaxed),
-            physics_ticks: stats.physics_ticks.load(std::sync::atomic::Ordering::Relaxed),
+            physics_ticks: stats
+                .physics_ticks
+                .load(std::sync::atomic::Ordering::Relaxed),
             frames: stats.frames.load(std::sync::atomic::Ordering::Relaxed),
-            frames_dropped: stats.frames_dropped.load(std::sync::atomic::Ordering::Relaxed),
+            frames_dropped: stats
+                .frames_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
             corrections: stats.corrections(),
-            attack_clicks: stats.attack_clicks.load(std::sync::atomic::Ordering::Relaxed),
+            attack_clicks: stats
+                .attack_clicks
+                .load(std::sync::atomic::Ordering::Relaxed),
             use_clicks: stats.use_clicks.load(std::sync::atomic::Ordering::Relaxed),
             world,
         });
@@ -178,7 +260,10 @@ fn run() -> Result<ExitCode, String> {
 
     session.disconnect();
     let _ = session.recv_event_timeout(DISCONNECT_TIMEOUT);
-    let outcome = lock(&shared).outcome.clone().unwrap_or_else(|| "failed(no_outcome)".to_owned());
+    let outcome = lock(&shared)
+        .outcome
+        .clone()
+        .unwrap_or_else(|| "failed(no_outcome)".to_owned());
     write_summary(&args, &shared);
 
     let text = serde_json::to_string_pretty(&summary::summary(&lock(&shared)))
@@ -200,7 +285,24 @@ fn write_summary(args: &Args, shared: &Arc<Mutex<Shared>>) {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_explicit_skills_dir_does_not_need_the_repository_root() {
+        // A given `--skills` path is used as is: `find_root` runs only for the
+        // default. A check from a checkout without versions/manifest.toml
+        // therefore still works when the caller names the directory.
+        let dir = check_skills_dir(Some(std::path::Path::new("body/skills")))
+            .expect("an explicit skills dir is enough");
+        assert_eq!(dir, std::path::PathBuf::from("body/skills"));
+    }
 }
 
 mod interrupt {
