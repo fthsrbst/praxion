@@ -37,6 +37,8 @@ You plan the next goal of Praxion, a Minecraft agent that plays through skills.
 - The goal must be reachable with the known skills plus at most one new skill.
 - Prefer the first unmet ladder rung, unless a prerequisite for it is missing.
 - Never repeat a goal that the briefing marks as blocked.
+- Never propose the same condition as the newest recent goal: after a failure,
+  play a different goal first and retry later.
 - When the briefing names a skill being written, its goal cannot be played
   yet: propose a different goal that the known skills reach, preferably one
   that stocks what the next rungs need (more cobblestone, logs, a spare tool).
