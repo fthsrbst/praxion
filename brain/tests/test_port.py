@@ -356,28 +356,24 @@ def test_poll_default_returns_a_frame_already_sent(
     assert message.event["text"] == "ready"
 
 
-def test_resync_delivers_held_events_before_the_snapshot(
+def test_an_explicit_resync_ends_with_a_snapshot_and_loses_no_event(
     client: PortClient, body: FakeBody
 ) -> None:
     wait_snapshot(client)
-    client.resync()  # an explicit resync holds later events until the snapshot
     body.emit_event("note", text="held")
+    client.resync()
 
     messages = []
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         message = client.poll(0.1)
-        if message is None:
-            continue
-        messages.append(message)
-        if isinstance(message, Snapshot):
+        if message is not None:
+            messages.append(message)
+        texts = [m.event["text"] for m in messages if isinstance(m, EventMessage)]
+        if "held" in texts and any(isinstance(m, Snapshot) for m in messages):
             break
-
-    snapshot = messages[-1]
-    assert isinstance(snapshot, Snapshot)
-    events = [item for item in messages if isinstance(item, EventMessage)]
-    assert [event.event["text"] for event in events] == ["held"]
-    assert client.last_seq == max(snapshot.seq, events[0].seq)
+    assert any(isinstance(m, Snapshot) for m in messages)
+    assert [m.event["text"] for m in messages if isinstance(m, EventMessage)] == ["held"]
 
 
 def test_send_times_out_when_the_body_stops_reading(

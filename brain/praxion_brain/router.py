@@ -59,14 +59,29 @@ def route(
     evidence: Evidence | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Route:
-    """Ask Jev about every known skill and decide from the probabilities."""
+    """Ask Jev about every known skill and decide from the probabilities.
+
+    Code decides first where code can: a known skill named exactly
+    ``get_<item>`` plays without a Jev call.
+    """
     ledger = ledger if ledger is not None else Ledger()
     evidence = evidence if evidence is not None else Evidence(config.local_brain_dir())
 
+    exact = f"get_{goal.item}"
+    if exact in skills.names:
+        evidence.write("router_decision", decision="play", skill=exact, scores={}, source="exact_name")
+        return Route(kind="play", skill=exact, scores={})
+
+    # Jev sees what a person would look at: the doc line and the rules, which
+    # name what the skill crafts or mines. With the doc alone, `get_planks`
+    # scored 0.21 for "oak planks" and the brain wrote a duplicate skill
+    # (first autonomous run, 2026-11-08).
     state = {
         "goal": goal.text,
         "item": goal.item,
-        "skills": {skill.name: {"doc": skill.doc} for skill in skills.skills},
+        "skills": {
+            skill.name: {"doc": skill.doc, "rules": skill.source} for skill in skills.skills
+        },
     }
     questions = {
         skill.name: Noul(instructions=question_text(skill.name, goal))

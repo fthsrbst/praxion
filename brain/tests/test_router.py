@@ -76,8 +76,8 @@ def test_decision_table(scores, kind, skill) -> None:
 
 
 def test_route_asks_one_question_per_skill(tmp_path) -> None:
-    catalog = _catalog("get_wood", "get_furnace")
-    fake = FakeClient({"get_wood": 0.1, "get_furnace": 0.2})
+    catalog = _catalog("get_wood", "get_planks")
+    fake = FakeClient({"get_wood": 0.1, "get_planks": 0.2})
     ledger = Ledger(tmp_path / "ledger.jsonl")
     evidence = Evidence(tmp_path / "evidence")
 
@@ -85,15 +85,15 @@ def test_route_asks_one_question_per_skill(tmp_path) -> None:
 
     assert result.kind == "write"
     assert result.skill is None
-    assert result.scores == {"get_wood": 0.1, "get_furnace": 0.2}
+    assert result.scores == {"get_wood": 0.1, "get_planks": 0.2}
 
     call = fake.calls[0]
     assert call["state"] == {
         "goal": "have a furnace",
         "item": "furnace",
         "skills": {
-            "get_wood": {"doc": "doc for get_wood"},
-            "get_furnace": {"doc": "doc for get_furnace"},
+            name: {"doc": f"doc for {name}", "rules": skill.source}
+            for name, skill in ((s.name, s) for s in catalog.skills)
         },
     }
     assert call["questions"]["get_wood"].instructions == (
@@ -148,3 +148,17 @@ def test_a_missing_answer_is_an_error(tmp_path) -> None:
             ledger=Ledger(tmp_path / "ledger.jsonl"),
             evidence=Evidence(tmp_path / "evidence"),
         )
+
+
+def test_an_exact_skill_name_plays_without_asking_jev(tmp_path) -> None:
+    catalog = _catalog("get_wood", "get_furnace")
+    fake = FakeClient({})
+    result = route(
+        _goal(),
+        catalog,
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+    )
+    assert (result.kind, result.skill) == ("play", "get_furnace")
+    assert fake.calls == []
