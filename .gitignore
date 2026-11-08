@@ -37,3 +37,7 @@ spikes/round0/jdk/
 spikes/round0/src/
 spikes/round0/*.log
 .worktrees/
+
+# Python caches
+__pycache__/
+.pytest_cache/

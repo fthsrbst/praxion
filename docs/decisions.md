@@ -3,6 +3,37 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-08
+
+Thin Demo-2 slice, designed by Claude and approved by the user ("demo 2 yi yap"), with the user's budget:
+
+- **Slice: Praxion writes one skill, admits it, plays it, on the headless body.** First target `get_furnace`
+  (8 cobblestone and a table, then `craft(furnace)`; no new primitive). Flow: goal text -> Jev router ->
+  known skill, or the LLM writer -> static check -> practice room -> active.
+- **The LLM writes the existing `.skill` rule-list DSL directly.** The step-program compiler of
+  architecture §6 is not built: the DSL, checker and interpreter exist, and the compiler is added only if
+  measured guard errors call for it. Amends §6 "the LLM writes a step program".
+- **Admission for the slice:** (1) `praxion-body check-skills`: parse and freeze with the core skills, at most
+  30 rules, candidate-to-candidate depth at most 2 (core skills count as leaves), no coordinate literals;
+  (2) practice room: 3/3 referee-checked fresh-seed runs on the skill's goal plus 1 held-out seed. At most
+  3 repairs per goal, each with the typed failure and a trace digest. Probation (Wilson >= 8 uses) comes
+  with the full Demo-2.
+- **No body port in the slice.** The brain starts practice runs through the harness and reads summaries
+  and events. The port (§5.4) comes with the autonomous loop, the next Demo-2 step. Rules out for now:
+  building the port before anything uses it.
+- **Learned skills live in `local/skills/` (candidates/, active/)**, the machine-local ignored directory,
+  not in the product repository (architecture §10, per-installation data). A run gets the core skills plus
+  the candidate in one skills directory inside its run dir.
+- **Models by measurement, budget $5 per key (user).** Writer: `gpt-6-luna` and `gpt-6.1-terra` are
+  measured on the slice goals; the cheaper one that passes admission is used, a repair may escalate to the
+  stronger one. Router: Jev (`jev-latest`), one Noul per known skill ("does it reach the goal?"); code
+  decides: one skill > 0.7 -> play it, all < 0.3 -> write a new one, otherwise ask the writer. A cost
+  ledger stops LLM calls before the budget is spent. Every request and response is logged as JSONL
+  evidence under the run's `brain/` folder.
+- **`brain/` is a Python package (`praxion_brain`)** with the official `openai` and `typesafe-sdk` clients
+  and structured output (`responses.parse` with Pydantic). Reason: decided language split (Python brain,
+  Rust core).
+
 ## 2026-11-07
 
 User complaints: the code is too complicated to explain, and the bot moves like a bot. Agreed plan

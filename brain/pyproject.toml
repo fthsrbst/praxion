@@ -1,0 +1,30 @@
+[project]
+name = "praxion-brain"
+version = "0.0.0"
+description = "Praxion brain: skill writer, Jev router, admission and practice runs for the thin Demo-2 slice"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "openai>=2",
+    "typesafe-sdk>=0.7",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+# The only test tool; runtime dependencies are above.
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+# Run pytest from `brain/` and `import praxion_brain` still resolves; `tests`
+# lets test modules import `fake_body` from the same directory.
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
+# Default run: no paid API calls and no servers. Live tests use `-m live`.
+addopts = "-m 'not live'"
+markers = [
+    "live: calls paid APIs or starts servers",
+]
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+    "error::pytest.PytestCollectionWarning",
+]
