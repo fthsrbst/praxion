@@ -6,6 +6,18 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-08, Claude Opus 5.5: autonomous run 3: six rungs, then a self-written skill
+- Brain loop + body port, fresh seed 202, no help: proposer -> Jev/code routing -> body played wood, crafting
+  table, wooden pickaxe, 8 cobblestone, stone pickaxe, stone sword (`runs/test-body-7ad57f43c2664f0f86d620b722cbf912`).
+- At the furnace rung no skill existed: route `write`; `gpt-6-luna` wrote `get_furnace` on the first attempt and
+  admission passed it 4/4 (seeds 101, 202, 303 + held-out 404); it went to `local/skills/active/`. Session cost
+  $0.035 in all.
+- The live body then refused `get_furnace` (`unknown_skill`): it loads skills only at startup. Hot load of the active
+  skills directory is the next body piece.
+- Runs 1-3 fixed on the way: Jev routing (exact names in code, rules in the state), cumulative ladder, tags over
+  variants, live port tick, unverifiable conditions not sent, count args, anti-spin backoff, per-run memory, the wet
+  stone rule, mine's search radius.
+
 ## 2026-11-08, user: building, persona, combat, farms (wishes, not yet decided)
 - The bot must build shelters, and not the same shelter every time: a design that fits the site and the
   moment, and beautiful when it wants to be. It should have a persona.
