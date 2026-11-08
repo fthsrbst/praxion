@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
 from praxion_brain.ledger import (
@@ -76,3 +79,45 @@ def test_corrupt_ledger_line_is_reported(tmp_path) -> None:
     path.write_text("{not json}\n", encoding="utf-8")
     with pytest.raises(ValueError):
         Ledger(path).entries()
+
+def test_spent_since_counts_only_lines_after_the_cutoff(tmp_path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    old = {
+        "timestamp": "2020-01-01T00:00:00+00:00",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "input_tokens": 1,
+        "output_tokens": 0,
+        "cost": 1.50,
+        "purpose": "write_skill",
+    }
+    ledger.path.write_text(json.dumps(old) + "\n", encoding="utf-8")
+    ledger.record("openai", "gpt-6-luna", 1_000_000, 0, "write")  # $0.10 now
+
+    assert ledger.spent_since(0.0) == pytest.approx(1.60)
+    assert ledger.spent_since(time.time() - 60) == pytest.approx(0.10)
+    assert ledger.spent_since(time.time() + 60) == 0.0
+
+
+def test_entries_are_cached_until_the_file_changes(tmp_path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    assert ledger.entries() == []
+    ledger.record("openai", "gpt-6-luna", 1_000_000, 0, "write")
+    assert len(ledger.entries()) == 1
+    # A line appended outside record() is still seen (the file changed).
+    ledger.path.write_text(ledger.path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert len(ledger.entries()) == 1
+    with ledger.path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"provider": "typesafe", "cost": 0.02}) + "\n")
+    assert len(ledger.entries()) == 2
+    assert ledger.spent("typesafe") == pytest.approx(0.02)
+
+
+def test_an_unreadable_timestamp_is_not_guessed(tmp_path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.path.write_text(
+        json.dumps({"provider": "openai", "cost": 1.0, "timestamp": "not a date"}) + "\n",
+        encoding="utf-8",
+    )
+    assert ledger.spent("openai") == pytest.approx(1.0)
+    assert ledger.spent_since(0.0) == 0.0

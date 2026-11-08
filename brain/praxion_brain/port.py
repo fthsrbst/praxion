@@ -6,11 +6,11 @@ followed by one UTF-8 JSON object with a ``t`` field; a frame larger than
 ``event`` it is the event-log sequence, for every other body message it is the
 last event sequence at send time.
 
-The client is blocking and single-threaded on purpose: the loop calls
-:meth:`PortClient.poll` and :meth:`PortClient.keepalive` itself, so no thread
-is hidden inside the client. A seq gap is repaired automatically: the client
-sends ``resync_request``, holds later events, delivers every held event, then
-the snapshot, and resumes with the events after it.
+The client is blocking and thread-free on purpose: :class:`PortReader` owns the
+one reader thread section 3.1 asks for, and the loop calls
+:meth:`PortClient.poll` through it. A seq gap is repaired automatically: the
+client sends ``resync_request``, holds later events, delivers every held event,
+then the snapshot, and resumes with the events after it.
 
 Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` section 2.
 """
@@ -18,9 +18,11 @@ Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` section 2.
 from __future__ import annotations
 
 import json
+import queue
 import select
 import socket
 import struct
+import threading
 import time
 from collections import deque
 from typing import (
@@ -335,8 +337,9 @@ class PortClient:
     ``connect`` performs the handshake (body ``hello`` first, then the brain's
     ``hello``). ``poll`` returns one body message or ``None`` on timeout; an
     ``event`` whose ``seq`` jumps triggers ``resync_request`` automatically.
-    Call :meth:`keepalive` at least once per second; the client never starts a
-    thread of its own.
+    The client never starts a thread of its own: :class:`PortReader` runs
+    ``poll`` and ``keepalive`` on its one reader thread and the loop writes
+    from its own thread, serialized by an internal write lock.
     """
 
     def __init__(
@@ -379,6 +382,9 @@ class PortClient:
         self._last_received: Optional[float] = None
         self._last_sent: Optional[float] = None
         self._command_number = 0
+        #: The loop sends commands while the reader thread pings, so one frame
+        #: must never interleave with another on the wire.
+        self._write_lock = threading.Lock()
 
     # -- connection ------------------------------------------------------ #
     @property
@@ -459,6 +465,10 @@ class PortClient:
 
     # -- sending --------------------------------------------------------- #
     def _send(self, message: BaseModel) -> None:
+        with self._write_lock:
+            self._send_locked(message)
+
+    def _send_locked(self, message: BaseModel) -> None:
         sock = self._sock
         if sock is None:
             raise PortClosed("not connected")
@@ -551,11 +561,21 @@ class PortClient:
         return command_id
 
     def resync(self) -> None:
-        """Ask for a snapshot; later events are held until it arrives."""
+        """Ask for a snapshot; later events are held until it arrives.
+
+        The flag is raised *before* the request leaves: the reader thread may
+        receive the snapshot reply between the send and the assignment, and
+        clearing a flag that is set afterwards would strand every later event
+        in ``_held`` (the loop would read nothing else on this connection).
+        """
         if self._resyncing:
             return
-        self._send(ResyncRequest())
         self._resyncing = True
+        try:
+            self._send(ResyncRequest())
+        except PortError:
+            self._resyncing = False
+            raise
         self.resync_count += 1
 
     def ping(self) -> None:
@@ -737,6 +757,82 @@ class PortClient:
         raise ProtocolError(f"unknown body message: {type(message).__name__}")
 
 
+# --------------------------------------------------------------------------- #
+# Reader thread (proposal section 3.1)
+# --------------------------------------------------------------------------- #
+class PortReader:
+    """The one thread of section 3.1: it owns the socket reads and pings at 1 Hz.
+
+    :class:`PortClient` stays blocking and thread-free; this wrapper owns the
+    read side and puts every message in a queue. The loop thread writes
+    (commands, pops, resync requests) and consumes the queue, so a slow
+    proposal, Jev or admission call cannot stop the brain from answering: the
+    reader keeps reading and keeps the link alive with
+    :meth:`PortClient.keepalive`, and the body never sees 3 s of silence.
+
+    A read error closes the connection in the client and arrives in the queue
+    as the :class:`PortError` instance; the loop turns it into evidence and
+    reconnects.
+    """
+
+    def __init__(self, client: PortClient, *, poll_seconds: float = 0.1) -> None:
+        self.client = client
+        self.poll_seconds = float(poll_seconds)
+        self._messages: "queue.Queue[Any]" = queue.Queue()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """(Re)start reading; anything left from an earlier connection is dropped."""
+        self.stop()
+        self._drain()
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="port-reader", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Ask the reader to finish and wait for it (a poll is at most one tick)."""
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    @property
+    def running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def get(self, timeout: Optional[float]) -> Any:
+        """The next message, a :class:`PortError`, or ``None`` on timeout."""
+        try:
+            return self._messages.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                self._messages.get_nowait()
+            except queue.Empty:
+                return
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                message = self.client.poll(self.poll_seconds)
+                if message is not None:
+                    self._messages.put(message)
+                self.client.keepalive()
+            except PortError as error:
+                self._messages.put(error)
+                return
+            except Exception as error:  # noqa: BLE001 - the loop records what it gets
+                self._messages.put(PortError(f"{type(error).__name__}: {error}"))
+                return
+
+
 __all__ = [
     "BodyMessage",
     "Bye",
@@ -759,6 +855,7 @@ __all__ = [
     "PortClient",
     "PortClosed",
     "PortError",
+    "PortReader",
     "PORT_VERSION",
     "Pong",
     "ProtocolError",

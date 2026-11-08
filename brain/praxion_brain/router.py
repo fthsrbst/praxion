@@ -23,6 +23,8 @@ from .skills import SkillCatalog
 PLAY_THRESHOLD = 0.7
 #: Every skill below this probability means the goal needs a new skill.
 WRITE_THRESHOLD = 0.3
+#: The Jev model the router calls and the loop estimates with.
+DEFAULT_MODEL = "jev-latest"
 
 
 class Route(BaseModel):
@@ -55,7 +57,7 @@ def route(
     client: TypeSafeClient | None = None,
     ledger: Ledger | None = None,
     evidence: Evidence | None = None,
-    model: str = "jev-latest",
+    model: str = DEFAULT_MODEL,
 ) -> Route:
     """Ask Jev about every known skill and decide from the probabilities."""
     ledger = ledger if ledger is not None else Ledger()
@@ -128,6 +130,7 @@ def route(
 
 
 __all__ = [
+    "DEFAULT_MODEL",
     "PLAY_THRESHOLD",
     "WRITE_THRESHOLD",
     "Route",

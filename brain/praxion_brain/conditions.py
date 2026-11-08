@@ -659,6 +659,18 @@ def item_of_condition(text: str) -> Optional[str]:
     return None
 
 
+def count_of_condition(text: str) -> int:
+    """The ``n`` of a ``count(X) >= n`` shape, else 1; never below 1.
+
+    This is the order of magnitude a goal asks for, which the slice's
+    :class:`~praxion_brain.goal.Goal` carries to the referee and the writer.
+    """
+    node = parse(text)
+    if isinstance(node, Compare) and isinstance(node.right, Number):
+        return max(1, node.right.value)
+    return 1
+
+
 __all__ = [
     "And",
     "Call",
@@ -675,6 +687,7 @@ __all__ = [
     "String",
     "TAGS",
     "canonical_text",
+    "count_of_condition",
     "evaluate",
     "is_verifiable",
     "item_of_condition",

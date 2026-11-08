@@ -29,7 +29,11 @@ the budget values, and a final tail truncation cuts the last non-``Now``
 section when a single line alone is too big. The ``Now`` section is never
 trimmed; if it alone exceeds the cap, it is returned alone.
 
-Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` section 3.4.
+The module also owns :func:`heartbeat_change`, the code diff over these facts
+that turns a 60 s heartbeat into a wake (proposal section 3.2): a change in the
+facts is a briefing fact, so its diff belongs beside the text it feeds.
+
+Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` sections 3.2 and 3.4.
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ from .skills import SkillCatalog, SkillInfo
 BRIEFING_MAX_TOKENS = 1500
 #: The contract's token estimate: characters divided by four.
 CHARS_PER_TOKEN = 4
+#: Inventory suffixes that make an item a tool, for the heartbeat diff.
+TOOL_SUFFIXES = ("_pickaxe", "_axe", "_shovel", "_sword", "_hoe")
 
 Record = Union[GoalRecord, Mapping[str, Any]]
 
@@ -110,6 +116,58 @@ def _age(timestamp: Any, now: float) -> str:
 def _time(record: Any, first: str, second: str) -> Any:
     value = _get(record, first)
     return value if value is not None else _get(record, second)
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeat diff over briefing facts
+# --------------------------------------------------------------------------- #
+def _as_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _tool_counts(inventory: Mapping[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name, amount in inventory.items():
+        if str(name).endswith(TOOL_SUFFIXES):
+            try:
+                counts[str(name)] = int(amount)
+            except (TypeError, ValueError):
+                continue
+    return counts
+
+
+def heartbeat_change(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    was_playing: bool,
+    is_playing: bool,
+) -> list[str]:
+    """The code diff over briefing facts that makes a heartbeat a wake.
+
+    Relevant changes: the body went from a running intent to none, health
+    crossed below 10, food crossed below 8, night began, or a tool left the
+    inventory. Everything is code; no model is involved (proposal section
+    3.2).
+    """
+    reasons: list[str] = []
+    if was_playing and not is_playing:
+        reasons.append("no_running_intent")
+    if _as_float(before.get("health"), 20) >= 10 and _as_float(after.get("health"), 20) < 10:
+        reasons.append("low_health")
+    if _as_float(before.get("food"), 20) >= 8 and _as_float(after.get("food"), 20) < 8:
+        reasons.append("low_food")
+    if before.get("is_night") is False and after.get("is_night") is True:
+        reasons.append("night_began")
+    old_tools = _tool_counts(before.get("inventory") or {})
+    new_tools = _tool_counts(after.get("inventory") or {})
+    for tool, amount in old_tools.items():
+        if amount > 0 and new_tools.get(tool, 0) == 0:
+            reasons.append(f"tool_lost:{tool}")
+    return reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +375,8 @@ def build(
 __all__ = [
     "BRIEFING_MAX_TOKENS",
     "CHARS_PER_TOKEN",
+    "TOOL_SUFFIXES",
     "build",
     "estimate_tokens",
+    "heartbeat_change",
 ]

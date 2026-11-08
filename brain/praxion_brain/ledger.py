@@ -11,7 +11,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from . import config
 
@@ -54,17 +54,52 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int = 0) -> floa
     return cost(model, input_tokens, output_tokens)
 
 
+def entry_epoch(entry: Dict[str, Any]) -> Optional[float]:
+    """One ledger line's UTC timestamp as a POSIX epoch, or ``None`` if unreadable.
+
+    Money is wall-clock time: the ledger writes ISO-8601 UTC stamps, so every
+    window ("last hour", "this session") is compared on this scale.
+    """
+    raw = entry.get("timestamp")
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
 class Ledger:
-    """Append-only cost log with a per-provider budget."""
+    """Append-only cost log with a per-provider budget.
+
+    ``entries`` is cached against the file's (mtime, size), so one decision can
+    ask several questions about the same file without re-parsing it; an append
+    through :meth:`record` invalidates the cache. Callers that append to the
+    file themselves are seen on the next stat, which the file system changes.
+    """
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path is not None else config.ledger_path()
+        self._cache_key: Optional[tuple[int, int]] = None
+        self._cache: list[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------ #
     def entries(self) -> list[Dict[str, Any]]:
         try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            self._cache_key, self._cache = None, []
+            return []
+        key = (stat.st_mtime_ns, stat.st_size)
+        if key == self._cache_key:
+            return list(self._cache)
+        try:
             text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
+            self._cache_key, self._cache = None, []
             return []
         entries = []
         for number, line in enumerate(text.splitlines(), start=1):
@@ -78,7 +113,8 @@ class Ledger:
             if not isinstance(entry, dict):
                 raise ValueError(f"corrupt ledger line {number} in {self.path}: not an object")
             entries.append(entry)
-        return entries
+        self._cache_key, self._cache = key, entries
+        return list(entries)
 
     def record(
         self,
@@ -102,6 +138,7 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self._cache_key = None
         return entry
 
     def spent(self, provider: str) -> float:
@@ -110,6 +147,20 @@ class Ledger:
             for entry in self.entries()
             if entry.get("provider") == provider
         )
+
+    def spent_since(self, timestamp: float) -> float:
+        """USD spent on lines recorded at or after ``timestamp`` (POSIX epoch).
+
+        This is the session and hourly window: the caller passes the wall-clock
+        moment the loop started or ``now - 3600``. Lines with an unreadable
+        timestamp are ignored rather than guessed.
+        """
+        total = 0.0
+        for entry in self.entries():
+            moment = entry_epoch(entry)
+            if moment is not None and moment >= float(timestamp):
+                total += float(entry.get("cost", 0.0) or 0.0)
+        return total
 
     def totals(self) -> Dict[str, float]:
         """Spent USD per provider present in the ledger."""
@@ -153,6 +204,7 @@ __all__ = [
     "Ledger",
     "PRICES",
     "cost",
+    "entry_epoch",
     "estimate_cost",
     "price",
 ]

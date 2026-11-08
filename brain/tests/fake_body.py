@@ -107,6 +107,7 @@ class FakeBody:
         self.receipts: list[dict[str, Any]] = []
         self.settled: list[dict[str, Any]] = []
         self.pops: list[int] = []
+        self.pings = 0
         self.errors: list[str] = []
         self.connections = 0
         self.port = 0
@@ -219,6 +220,16 @@ class FakeBody:
         """Send an arbitrary body-to-brain message."""
         with self._state:
             self._send(message)
+
+    def send_raw(self, payload: dict[str, Any]) -> None:
+        """Send one correctly framed but invalid message (a protocol error)."""
+        with self._state:
+            conn = self._conn
+            if conn is None:
+                raise RuntimeError("no brain connected")
+            data = encode_frame(payload)
+            with self._send_lock:
+                conn.sendall(data)
 
     def disconnect(self) -> None:
         """Close the current connection; the listener keeps accepting."""
@@ -425,6 +436,7 @@ class FakeBody:
             return
         if isinstance(message, Ping):
             with self._state:
+                self.pings += 1
                 self._send(Pong(seq=self.seq, tick=self.tick))
             return
         if isinstance(message, ResyncRequest):

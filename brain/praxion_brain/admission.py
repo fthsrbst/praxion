@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from . import config
 from .evidence import Evidence
 from .goal import Goal
-from .ledger import Ledger
+from .ledger import Ledger, estimate_cost
 from .practice import PracticeResult, practice
 from .skills import (
     CandidateReport,
@@ -36,6 +36,11 @@ PracticeFn = Callable[..., PracticeResult]
 SPARE_SEEDS = (505, 606, 707)
 #: Body failures an admission tolerates before it stops without a verdict.
 BODY_FAILURE_LIMIT = 3
+#: Estimated tokens of one writer call, used by the governor before admission.
+WRITE_INPUT_ESTIMATE = 4_000
+WRITE_OUTPUT_ESTIMATE = 2_000
+#: Attempts before the writer escalates to the stronger model.
+WRITE_ESCALATE_AFTER = 2
 
 
 class AttemptRecord(BaseModel):
@@ -91,6 +96,32 @@ def _static_failure(report: CheckReport, filename: str) -> tuple[str, str]:
 def _practice_failure(result: PracticeResult) -> tuple[str, str]:
     kind = result.failure_kind or ("goal_not_met" if not result.passed else "practice")
     return kind, result.digest
+
+
+def write_model(
+    writer_model: str,
+    attempt: int,
+    escalation_model: str | None = "gpt-6.1-terra",
+) -> str:
+    """The model one admission attempt uses.
+
+    One owner for the escalation rule: the attempt's call and the governor's
+    pre-call estimate must agree (A5).
+    """
+    if (
+        attempt >= WRITE_ESCALATE_AFTER
+        and writer_model == "gpt-6-luna"
+        and escalation_model
+    ):
+        return escalation_model
+    return writer_model
+
+
+def estimate(writer_model: str, *, attempt: int = 0) -> float:
+    """The governor's pre-call estimate for one writer call of this admission."""
+    return estimate_cost(
+        write_model(writer_model, attempt), WRITE_INPUT_ESTIMATE, WRITE_OUTPUT_ESTIMATE
+    )
 
 
 def _record_body_failure(path: Path, result: PracticeResult) -> None:
@@ -170,9 +201,7 @@ def admit(
     required_passes = len(seeds)
 
     for attempt in range(max_repairs + 1):
-        model = writer_model
-        if attempt >= 2 and writer_model == "gpt-6-luna" and escalation_model:
-            model = escalation_model
+        model = write_model(writer_model, attempt, escalation_model)
 
         attempt_dir = attempts_root / f"{stamp}-{attempt}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -346,7 +375,12 @@ def admit(
 __all__ = [
     "BODY_FAILURE_LIMIT",
     "SPARE_SEEDS",
+    "WRITE_ESCALATE_AFTER",
+    "WRITE_INPUT_ESTIMATE",
+    "WRITE_OUTPUT_ESTIMATE",
     "AdmissionReport",
     "AttemptRecord",
     "admit",
+    "estimate",
+    "write_model",
 ]

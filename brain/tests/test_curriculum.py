@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from praxion_brain.curriculum import GoalProposal, validate
+from praxion_brain.curriculum import GoalProposal, goal_of, validate
 from praxion_brain.memory import GoalRecord, Memory
 
 
@@ -174,3 +174,18 @@ def test_a_different_last_goal_does_not_reject(tmp_path) -> None:
 def test_rationale_is_capped_at_two_hundred_characters() -> None:
     with pytest.raises(ValidationError):
         GoalProposal(text="x", condition="has(furnace)", rationale="y" * 201)
+
+
+def test_goal_of_adapts_a_proposal_once() -> None:
+    item = goal_of(proposal("count(cobblestone) >= 8", "get cobblestone"))
+    assert item.item == "cobblestone"
+    assert item.count == 8
+    assert item.skill_name == "get_cobblestone"
+
+    # A compound condition has no item: the rung, then a generic name.
+    compound = goal_of(proposal("has(a) and has(b)", "both"))
+    assert compound.item == "goal"
+    with_rung = GoalProposal(
+        text="dig", condition="has(a) and has(b)", rung="stone_pickaxe", rationale=""
+    )
+    assert goal_of(with_rung).item == "stone_pickaxe"

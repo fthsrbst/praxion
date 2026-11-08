@@ -3,10 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from praxion_brain.admission import admit
+import pytest
+
+from praxion_brain.admission import (
+    WRITE_ESCALATE_AFTER,
+    WRITE_INPUT_ESTIMATE,
+    WRITE_OUTPUT_ESTIMATE,
+    admit,
+    estimate,
+    write_model,
+)
 from praxion_brain.evidence import Evidence
 from praxion_brain.goal import Goal
-from praxion_brain.ledger import Ledger
+from praxion_brain.ledger import Ledger, estimate_cost
 from praxion_brain.practice import PracticeResult
 from praxion_brain.skills import (
     CandidateReport,
@@ -316,3 +325,20 @@ def test_mixed_body_and_skill_failures(tmp_path) -> None:
     assert writer.calls[1]["failure"].kind == "no_rule"
     lines = (tmp_path / "body_failures.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
+
+def test_the_writer_model_escalates_after_two_attempts() -> None:
+    assert write_model("gpt-6-luna", 0) == "gpt-6-luna"
+    assert write_model("gpt-6-luna", 1) == "gpt-6-luna"
+    assert write_model("gpt-6-luna", WRITE_ESCALATE_AFTER) == "gpt-6.1-terra"
+    # A writer that is already stronger does not "escalate" to terra.
+    assert write_model("gpt-6.1-sol", 2) == "gpt-6.1-sol"
+    assert write_model("gpt-6-luna", 2, None) == "gpt-6-luna"
+
+
+def test_the_writer_estimate_uses_the_model_the_attempt_really_uses() -> None:
+    assert estimate("gpt-6-luna") == pytest.approx(
+        estimate_cost("gpt-6-luna", WRITE_INPUT_ESTIMATE, WRITE_OUTPUT_ESTIMATE)
+    )
+    assert estimate("gpt-6-luna", attempt=2) == pytest.approx(
+        estimate_cost("gpt-6.1-terra", WRITE_INPUT_ESTIMATE, WRITE_OUTPUT_ESTIMATE)
+    )

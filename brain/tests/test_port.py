@@ -630,3 +630,24 @@ def test_rust_body_frames_parse() -> None:
     assert parse_golden("rust_pong.bin") == Pong(seq=812, tick=4521)
     assert parse_golden("rust_bye_replaced.bin") == Bye(reason="replaced")
     assert parse_golden("rust_bye_protocol.bin") == Bye(reason="protocol")
+
+def test_resync_is_marked_before_the_request_is_sent(client: PortClient) -> None:
+    # The reader thread may see the snapshot reply before resync() returns;
+    # the flag must already be up or it would clear a flag set afterwards.
+    wait_snapshot(client)
+    seen: list[bool] = []
+    original = client._send
+
+    def spy(message) -> None:
+        seen.append(client._resyncing)
+        original(message)
+
+    client._send = spy
+    client.resync()
+    assert seen == [True]
+    assert client.resync_count == 1
+    # A second request while one is in flight is a no-op.
+    client.resync()
+    assert seen == [True]
+    assert client.resync_count == 1
+    wait_snapshot(client)

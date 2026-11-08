@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from praxion_brain.briefing import build, estimate_tokens
+from praxion_brain.briefing import build, estimate_tokens, heartbeat_change
 from praxion_brain.ladder import LadderProgress
 
 SNAPSHOT = {
@@ -173,3 +173,24 @@ def test_cap_is_a_hard_bound_for_a_huge_goal_line() -> None:
     assert "## Now  [live, tick 4521]" in text
     assert "goal y" not in text  # the huge goal was trimmed
     assert "## Recent goals  [goals.jsonl]\n(none)" in text
+
+def test_heartbeat_change_is_a_diff_over_briefing_facts() -> None:
+    before = {"health": 20, "food": 18, "is_night": False, "inventory": {"stone_pickaxe": 1}}
+    after = {"health": 6, "food": 7, "is_night": True, "inventory": {"stone_pickaxe": 0}}
+    reasons = heartbeat_change(before, after, was_playing=True, is_playing=False)
+    assert reasons == [
+        "no_running_intent",
+        "low_health",
+        "low_food",
+        "night_began",
+        "tool_lost:stone_pickaxe",
+    ]
+
+
+def test_heartbeat_change_is_empty_when_nothing_relevant_moved() -> None:
+    facts = {"health": 20, "food": 18, "is_night": False, "inventory": {"oak_log": 3}}
+    assert heartbeat_change(facts, dict(facts), was_playing=False, is_playing=False) == []
+    # A non-tool item leaving the inventory is not a wake.
+    assert heartbeat_change(
+        {"inventory": {"oak_log": 3}}, {"inventory": {}}, was_playing=False, is_playing=False
+    ) == []

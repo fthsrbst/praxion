@@ -26,7 +26,14 @@ from typing import Any, Mapping, Optional
 
 from pydantic import BaseModel, Field
 
-from .conditions import ConditionError, evaluate, is_verifiable, item_of_condition
+from .conditions import (
+    ConditionError,
+    count_of_condition,
+    evaluate,
+    is_verifiable,
+    item_of_condition,
+)
+from .goal import Goal
 from .memory import normalize_condition
 
 _SKILL_ITEM = re.compile(r"[A-Za-z0-9_]+")
@@ -126,4 +133,22 @@ def validate(
     )
 
 
-__all__ = ["GoalProposal", "Validation", "validate"]
+def goal_of(proposal: GoalProposal, validation: Optional[Validation] = None) -> Goal:
+    """Adapt a proposal to the slice's :class:`Goal` for the router and writer.
+
+    The item comes from a simple ``has(X)``/``count(X)`` shape; a compound
+    condition falls back to the ladder rung, then the skill name validation
+    derived, then the generic ``goal``. The count is the condition's own ``n``.
+    This is the one place the loop turns a proposal into a goal.
+    """
+    item = item_of_condition(proposal.condition)
+    if not item:
+        item = proposal.rung or (validation.skill_name if validation else None) or "goal"
+    return Goal(
+        text=proposal.text,
+        item=item,
+        count=count_of_condition(proposal.condition),
+    )
+
+
+__all__ = ["GoalProposal", "Validation", "goal_of", "validate"]

@@ -5,6 +5,7 @@ import pytest
 from praxion_brain.conditions import (
     ConditionError,
     canonical_text,
+    count_of_condition,
     evaluate,
     is_verifiable,
     item_of_condition,
@@ -175,3 +176,9 @@ def test_canonical_text_ignores_spelling_and_namespaces() -> None:
     )
     assert canonical_text("#logs") == "#logs"
     assert canonical_text("count(#minecraft:logs) >= 1 # x") == "count(#logs) >= 1"
+
+def test_count_of_condition_is_the_goal_count() -> None:
+    assert count_of_condition("count(cobblestone) >= 8") == 8
+    assert count_of_condition("count(oak_log) >= 0") == 1  # never below one
+    assert count_of_condition("has(furnace)") == 1
+    assert count_of_condition("has(a) and count(b) >= 3") == 1

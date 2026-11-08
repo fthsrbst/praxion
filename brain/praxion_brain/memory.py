@@ -46,14 +46,24 @@ class EvidenceSink(Protocol):
 
 
 class GoalRecord(BaseModel):
-    """One line of ``goals.jsonl`` (proposal section 5)."""
+    """One line of ``goals.jsonl`` (proposal section 5).
+
+    ``status`` is the goal's life: ``open`` while a command is in flight,
+    ``done`` only when the body verified the condition, ``unverified`` for a
+    ``done`` whose condition it could not decide (excluded from the success
+    statistics, A7), ``interrupted`` for a goal the brain lost track of without
+    a failure (A1; it does not count toward blocking), ``failed`` for a real
+    failure and ``blocked`` for a blocked key.
+    """
 
     goal_id: str
     text: str
     condition: str
     unverifiable: bool = False
     rung: Optional[str] = None
-    status: Literal["open", "done", "failed", "blocked"] = "open"
+    status: Literal[
+        "open", "done", "unverified", "interrupted", "failed", "blocked"
+    ] = "open"
     command_id: Optional[str] = None
     intent_id: Optional[int] = None
     skill: Optional[str] = None
@@ -245,7 +255,12 @@ class Memory:
     # Failure memory
     # ------------------------------------------------------------------ #
     def failures(self) -> Dict[str, FailureEntry]:
-        """Failure memory per normalized condition, from the goal history."""
+        """Failure memory per normalized condition, from the goal history.
+
+        Only ``failed`` records count. ``interrupted`` (the brain lost the
+        intent, A1) and ``unverified`` (a done the body could not verify, A7)
+        are not failures and never block a goal.
+        """
         groups: Dict[str, list[GoalRecord]] = {}
         for record in self.goals():
             if record.status != "failed":

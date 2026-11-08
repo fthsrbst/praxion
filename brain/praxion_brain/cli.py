@@ -11,7 +11,11 @@ from . import config
 from .admission import admit
 from .evidence import Evidence
 from .goal import Goal
+from .governor import Governor
 from .ledger import BudgetExceeded, Ledger
+from .loop import Loop
+from .memory import Memory
+from .port import PortClient
 from .router import route
 from .skills import check as run_check
 from .skills import load_catalog
@@ -94,6 +98,37 @@ def _cmd_spent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    ledger = Ledger()
+    evidence = Evidence(config.local_brain_dir())
+    world_id = args.world or "default"
+    memory = Memory(world_id, evidence=evidence)
+    catalog = load_catalog()
+    governor = Governor(ledger, evidence=evidence)
+    port = PortClient(args.port, host=args.host)
+    loop = Loop(
+        port,
+        world_id=world_id,
+        memory=memory,
+        catalog=catalog,
+        ledger=ledger,
+        evidence=evidence,
+        governor=governor,
+    )
+    print(
+        f"loop: world {world_id}, port {args.host}:{args.port}, "
+        f"hard stop ${governor.hard_stop_usd:.2f}"
+    )
+    loop.start()
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        print("loop: interrupted")
+    finally:
+        loop.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="praxion-brain", description="Praxion brain")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -121,6 +156,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     spent_parser = commands.add_parser("spent", help="print the ledger totals")
     spent_parser.set_defaults(func=_cmd_spent)
+
+    run_parser = commands.add_parser(
+        "run", help="run the autonomous loop against a body port"
+    )
+    run_parser.add_argument("--port", type=int, required=True, help="the body port")
+    run_parser.add_argument(
+        "--world",
+        default=None,
+        help="world id under local/worlds/ (default: \"default\")",
+    )
+    run_parser.add_argument("--host", default="127.0.0.1")
+    run_parser.set_defaults(func=_cmd_run)
 
     return parser
 

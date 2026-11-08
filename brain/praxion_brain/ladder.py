@@ -18,7 +18,9 @@ from typing import Mapping, Optional
 
 from pydantic import BaseModel, Field
 
-from .conditions import evaluate
+from .conditions import evaluate, item_of_condition
+from .curriculum import GoalProposal
+from .skills import SkillCatalog
 
 
 class Rung(BaseModel):
@@ -82,4 +84,51 @@ def progress(inventory: Mapping[str, int]) -> LadderProgress:
     )
 
 
-__all__ = ["LadderProgress", "RUNGS", "Rung", "first_unmet", "progress"]
+class CodeOnlyGoal(BaseModel):
+    """The code-only fallback: a ladder goal plus the skill that covers it."""
+
+    goal: GoalProposal
+    skill: str
+
+
+def code_only_goal(
+    inventory: Mapping[str, int], catalog: SkillCatalog
+) -> Optional[CodeOnlyGoal]:
+    """The first unmet rung, if an active or core skill already covers it.
+
+    This is the governor's code-only mode: no model is called, and when no
+    known skill covers the next rung the loop stays idle.
+    """
+    rung = first_unmet(inventory)
+    if rung is None:
+        return None
+
+    candidates = [f"get_{rung.id}"]
+    item = item_of_condition(rung.condition)
+    if item is not None and not item.startswith("#"):
+        name = f"get_{item}"
+        if name not in candidates:
+            candidates.insert(0, name)
+    for name in candidates:
+        if catalog.by_name(name) is not None:
+            return CodeOnlyGoal(
+                goal=GoalProposal(
+                    text=f"get {rung.id.replace('_', ' ')}",
+                    condition=rung.condition,
+                    rung=rung.id,
+                    rationale="code-only fallback",
+                ),
+                skill=name,
+            )
+    return None
+
+
+__all__ = [
+    "CodeOnlyGoal",
+    "LadderProgress",
+    "RUNGS",
+    "Rung",
+    "code_only_goal",
+    "first_unmet",
+    "progress",
+]
