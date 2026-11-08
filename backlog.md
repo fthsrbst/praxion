@@ -33,9 +33,13 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Walking limits: diagonal A* steps are not string-pulled (a naive version broke the narrowing
   corridor test); the hazard window measures to a step's end, so a Descend edge can sit up to one block
   inside the 4.0 window before it counts.
-- Watcher handoff (user, 2026-11-07): after C3 gaze, C4 far cue AND the thin Demo-2 LLM/Jev slice are all
-  done, write `logs/BUILDER_DONE.signal` (final hash + summary) and message the watcher session. Prompt:
-  `logs/watcher-prompt.md`; review base `logs/WATCH_FROM`. Never signal on a partial milestone.
+- Thin Demo-2 LLM/Jev slice (2026-11-08): moved to a separate session by the user. Proposed design
+  (not yet agreed): `brain/` Python package; Jev maps a goal to a known skill or "new skill needed";
+  an OpenAI model (gpt-6.1-terra vs gpt-6.1-sol, measured) writes a `.skill` into `skills/candidates/`;
+  admission = new body flag `--check-skills` + k=3 practice runs on a fresh-seed harness server with
+  a referee checking the effect; first target `get_furnace`; no body port in the slice (deviation to approve).
+- Watcher signalled 2026-11-08 for the movement work (`logs/WATCH_FROM` e6ac44c .. ca9bf47+); the
+  watcher's review covers the unreviewed explore and `known.rs` edits.
 - Explore frontier strategy (2026-11-08): with the view scan live (debug `view scan` lines show rays
   reaching 64 blocks), seed 303 spawns where a hill hides the tree still fail `explore #logs` at 1200
   ticks in about 2 of 5 runs: the nearest-frontier order wanders downhill and west. A person would climb

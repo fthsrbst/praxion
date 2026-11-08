@@ -6,6 +6,16 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-08, Claude Opus 5.5: lively gaze, far sight, explore
+- C3 lively gaze (1026235), C4 far cue (6a9a1da, 799a476) and explore seek-while-walking plus a
+  look-around turn (ca9bf47) landed. Live run 2: 18/18 receipts, pitch now varies (123 distinct values).
+- `nearest_known` at radius 64 was 148 ms worst case (O(r^4) shell scan); the section-ordered
+  `KnownMap::nearest_seen` brings it to 15 ms.
+- Explore still fails about 2 of 5 runs on seed 303: a hill hides the tree. Proposal: score frontiers by
+  height or unseen sky area so the bot climbs for a view (backlog).
+- Never `git worktree remove --force` a worktree that holds a `third_party` junction: it empties the
+  real `third_party` (recovered with `python setup.py`).
+
 ## 2026-11-07, Claude Opus 5.5: movement style and worker notes
 - Gaze (15e512d), walking (00ea434) and clippy/duplicates (b75d50f) landed. Physics following tests got
   no slower (terrain 2210 -> 2190 ticks). The real test of "less robotic" is a live `watch` run, not yet done.
