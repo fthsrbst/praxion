@@ -13,9 +13,8 @@ use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, 
 use praxion_world::{BlockState, World};
 
 use crate::common::{block_name, idle, plan_inventory};
-use crate::frontier::{
-    FrontierChoice, near_block, nearest_known_block, rank_frontiers, rank_frontiers_from,
-};
+use crate::frontier::{FrontierChoice, near_block, nearest_known_block, scan_frontiers};
+use crate::heading::SearchHeading;
 use crate::runner::{Ctx, IntentSpec, PrimitiveEvent};
 
 /// How far `explore` looks for its target before it reports `not_found`. The
@@ -152,9 +151,6 @@ pub(crate) struct Explore {
     /// bounded refresh period rather than a cache invalidation storm.
     target_search_tick: u64,
     frontier_scan_tick: u64,
-    /// How many `explore` calls this run has made, so a retry starts from a
-    /// different frontier instead of repeating the same walk.
-    rotation: usize,
     /// Ticks with nowhere to go. A closed or fully known pocket fails early so
     /// the skill's bounded retries can try another direction instead of
     /// sleeping through the whole 1200-tick budget.
@@ -170,10 +166,6 @@ pub(crate) struct Explore {
     /// most expensive thing explore does, so a doomed candidate list is
     /// consumed a few ticks apart, not one per tick.
     next_plan_tick: u64,
-    /// How many goals this call has reached. The first few stay nearest-first,
-    /// so a nearby forest is found quickly; after that the ranking heads away
-    /// from the origin instead of circling the sight ring (seed 202).
-    goals: u32,
     /// Bounded diagnostics for the driver's event log.
     pub(crate) events: Vec<PrimitiveEvent>,
     waited: u32,
@@ -250,10 +242,9 @@ const RECENT_EXPLORED_CELLS: usize = 128;
 pub(crate) struct ExploreMemory {
     /// Cells recent `explore` calls reached or rejected, oldest first.
     recent: VecDeque<BlockPos>,
-    /// The first cell this run explored, as `(x, z)`.
-    origin: Option<(i32, i32)>,
-    /// How many `explore` calls this run has started.
-    calls: u64,
+    /// The direction the search keeps from call to call; see
+    /// [`SearchHeading`].
+    heading: SearchHeading,
 }
 
 impl ExploreMemory {
@@ -272,26 +263,6 @@ impl ExploreMemory {
             self.recent.pop_front();
         }
         self.recent.push_back(pos);
-    }
-
-    /// The first cell this body explored, as (x, z). Frontier ranking pushes
-    /// away from it, so a call heads outward instead of circling the nearest
-    /// ring of the known map. One run is one body, so a per-run origin is
-    /// exact.
-    fn origin(&mut self, start: BlockPos) -> BlockPos {
-        let (x, z) = *self.origin.get_or_insert((start.x, start.z));
-        BlockPos::new(x, start.y, z)
-    }
-
-    /// A per-run counter so consecutive `explore` calls (a failed call and its
-    /// retry, or a new skill after a failure) start from a different frontier
-    /// in the ranked list. Without it, a retry repeated the same walk from an
-    /// empty explored set and could burn every 1200-tick budget in the same
-    /// direction.
-    fn next_rotation(&mut self) -> usize {
-        let rotation = (self.calls % 8) as usize;
-        self.calls = self.calls.wrapping_add(1);
-        rotation
     }
 }
 
@@ -343,12 +314,10 @@ impl Explore {
             candidates: VecDeque::new(),
             target_search_tick: 0,
             frontier_scan_tick: 5,
-            rotation: memory.next_rotation(),
             idle_ticks: 0,
             allow_water: false,
             walk_backs: 0,
             next_plan_tick: 0,
-            goals: 0,
             events: Vec::new(),
             waited: 0,
             budget: praxion_rules::registry::EXPLORE_MAX_TICKS,
@@ -433,10 +402,10 @@ impl Explore {
                     } else {
                         memory.remember(goal);
                         remember(&mut self.explored, goal);
-                        // Only a real frontier arrival advances the outward
-                        // ranking; a cue or target leg is not exploration.
+                        // Only a real frontier arrival measures the heading's
+                        // progress; a cue or target leg is not exploration.
                         if self.chase == Chase::Frontier {
-                            self.goals = self.goals.saturating_add(1);
+                            memory.heading.arrived(goal);
                         }
                     }
                 }
@@ -564,35 +533,6 @@ impl Explore {
                 .min(ctx.perception.config().known_radius)
                 .max(8) as i32;
             let known = |pos: BlockPos| ctx.perception.known(pos).map(|cell| cell.state);
-            // Stay nearest-first while a nearby target may still be close, then
-            // walk outward from the origin rather than around the sight ring.
-            const OUTWARD_AFTER_GOALS: u32 = 8;
-            let ranked = if self.goals < OUTWARD_AFTER_GOALS {
-                rank_frontiers(
-                    start,
-                    horizontal,
-                    EXPLORE_FRONTIER_VERTICAL,
-                    &self.explored,
-                    &self.rejected,
-                    known,
-                    self.allow_water,
-                )
-            } else {
-                rank_frontiers_from(
-                    memory.origin(start),
-                    start,
-                    horizontal,
-                    EXPLORE_FRONTIER_VERTICAL,
-                    &self.explored,
-                    &self.rejected,
-                    known,
-                    self.allow_water,
-                )
-            };
-            self.candidates = ranked.into();
-            self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
-            self.candidates
-                .retain(|choice| !self.rejected.contains(&choice.cell));
             // Keep only cells whose column is open to the sky. Wood does not
             // grow in the cave a chain of one-block descents leads to, and an
             // open column is the real property that tells a valley from a
@@ -601,21 +541,31 @@ impl Explore {
             // at y 99, at y 88 every frontier toward the trees was refused).
             // `choice.cell` is the feet cell (`frontier::standable` keeps the
             // body cell and checks its floor), so the scan starts at its head.
-            // Before the tier cut: a best tier made only of covered cells
-            // emptied the list while open cells waited in a lower tier (seed
-            // 101, 2026-11-08: 106 `not_found` in a row).
-            let ranked = self.candidates.len();
-            self.candidates.retain(|choice| {
-                open_to_sky(
-                    choice.cell,
-                    ctx.world.surface_y(choice.cell.x, choice.cell.z),
-                    |pos| ctx.world.block_state(pos),
-                )
-            });
+            // It runs inside the scan, before the tier cut and the cap: a best
+            // tier made only of covered cells emptied the list while open
+            // cells waited in a lower tier (seed 101, 2026-11-08: 106
+            // `not_found` in a row).
+            let scan = scan_frontiers(
+                start,
+                horizontal,
+                EXPLORE_FRONTIER_VERTICAL,
+                &self.explored,
+                &self.rejected,
+                known,
+                self.allow_water,
+                |cell| {
+                    open_to_sky(cell, ctx.world.surface_y(cell.x, cell.z), |pos| {
+                        ctx.world.block_state(pos)
+                    })
+                },
+            );
+            let heading = memory.heading.direction(start, &scan.sector_weights());
+            self.candidates = scan.rank(heading).into();
+            self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
             log::debug!(
-                "explore frontiers ranked={} open_to_sky={}",
-                ranked,
-                self.candidates.len()
+                "explore frontiers ranked={} heading={:?}",
+                self.candidates.len(),
+                heading
             );
             // Keep the best quality tier (not avoided, on level, dry) before
             // fanning out or preferring a longer leg; distance never overrides
@@ -623,18 +573,9 @@ impl Explore {
             if let Some(tier) = self.candidates.front().map(|choice| choice.tier) {
                 self.candidates.retain(|choice| choice.tier == tier);
             }
-            if self.rotation > 0 && self.candidates.len() > 1 {
-                // Start at a different eighth of the ranked ring per call, so
-                // bounded retries fan out around the player instead of all
-                // walking the same nearest edge.
-                let shift = self.rotation * self.candidates.len() / 8;
-                self.candidates
-                    .rotate_left(shift.min(self.candidates.len() - 1));
-            }
-            // The candidate list is already nearest-first (after the
-            // rotation); hopping is fine because the follower walks a whole
-            // path. Long legs were tried and made the follower stall on
-            // terrain, so the score is not inflated here.
+            // The list is ordered farthest-forward first along the heading.
+            // A leg the follower cannot finish is rejected and the next
+            // candidate is tried.
         }
         if ctx.tick >= self.next_plan_tick {
             for _ in 0..EXPLORE_PLAN_ATTEMPTS {
@@ -779,6 +720,8 @@ impl Explore {
                 self.explored.len(),
                 self.walk_backs
             );
+            // Nothing reachable ahead: turn instead of retrying the same way.
+            memory.heading.give_up();
             return (frame, None, Some(Outcome::Failed("not_found".into())));
         }
         (frame, None, None)
@@ -1166,8 +1109,8 @@ mod tests {
     #[test]
     fn a_cue_cell_already_within_reach_starts_no_follower() {
         // Standing next to a known leaf: the planner succeeds with no steps.
-        // That is "already there", not a goal: no follower, no goal count, and
-        // the ranking mode must not change.
+        // That is "already there", not a goal: no follower, no goal, and the
+        // chase mode must not change.
         let mut memory = ExploreMemory::default();
         let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
         let body = Body::new(Vec3::new(0.5, 64.0, 0.5));
@@ -1176,15 +1119,14 @@ mod tests {
         let start = at(0, 64, 0);
         let leaf = at(2, 64, 0);
         let mut ctx = ctx(0, &body, &world, &mut perception);
-        let goals_before = explore.goals;
         let chase_before = explore.chase;
         assert!(
             !explore.approach(&mut ctx, start, leaf, Chase::Cue),
             "an empty plan is not a walk"
         );
         assert!(explore.follower.is_none(), "no follower for zero steps");
-        assert_eq!(explore.goals, goals_before, "a cue is not a goal");
-        assert_eq!(explore.chase, chase_before, "the ranking mode is unchanged");
+        assert!(explore.goal.is_none(), "a cue is not a goal");
+        assert_eq!(explore.chase, chase_before, "the chase mode is unchanged");
         assert!(
             explore.cue_done.contains(&leaf),
             "the reached cue cell is remembered in its own list"
@@ -1377,29 +1319,23 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_explore_calls_rotate() {
-        let mut memory = ExploreMemory::default();
-        let first = memory.next_rotation();
-        let second = memory.next_rotation();
-        assert_ne!(first, second, "a retry starts from a different frontier");
-    }
-
-    #[test]
     fn explore_memory_is_per_runner() {
-        // Two runners must not share explore's history: the cells one
-        // remembers and the rotations one has consumed stay invisible to the
-        // other.
+        // Two runners must not share explore's history: the cells and the
+        // heading one has stay invisible to the other.
         let mut first = ExploreMemory::default();
         let mut second = ExploreMemory::default();
         first.remember(at(1, 64, 2));
-        first.next_rotation();
-        first.next_rotation();
+        first.heading.direction(at(0, 64, 0), &[1; 8]);
         assert_eq!(first.recent(), vec![at(1, 64, 2)]);
         assert!(
             second.recent().is_empty(),
             "the other run remembers nothing"
         );
-        assert_eq!(second.next_rotation(), 0, "the other run has not rotated");
+        assert_eq!(
+            second.heading.direction(at(0, 64, 0), &[0; 8]),
+            None,
+            "the other run has no heading"
+        );
 
         // The memory is bounded: it keeps the newest cells and drops the
         // oldest, and re-remembering a cell does not grow it.

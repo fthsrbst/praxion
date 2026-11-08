@@ -9,6 +9,7 @@ mod craft;
 mod dig_down;
 mod explore;
 mod frontier;
+mod heading;
 mod mine;
 mod move_to;
 mod place;
