@@ -39,7 +39,10 @@ You plan the next goal of Praxion, a Minecraft agent that plays through skills.
 - Never repeat a goal that the briefing marks as blocked.
 - `condition` is guard text over inventory facts: `has(item)`,
   `count(item) >= n`, joined with `and`/`not` and parentheses. Use the item
-  ids the skills and ladder use (`oak_log`, `cobblestone`, `#logs`).
+  ids the skills and ladder use; for wood use the tags (`#logs`, `#planks`),
+  never one variant such as `oak_planks`.
+- Prefer the ladder rung's own item as the goal (`has(wooden_pickaxe)`), not an
+  intermediate ingredient: the skills gather their ingredients themselves.
 - The condition must be false in the current world. Its truth is how the body
   verifies the goal after the skill settles.
 - `text` is one short imperative sentence, for example "get a furnace".

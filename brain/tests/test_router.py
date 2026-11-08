@@ -162,3 +162,18 @@ def test_an_exact_skill_name_plays_without_asking_jev(tmp_path) -> None:
     )
     assert (result.kind, result.skill) == ("play", "get_furnace")
     assert fake.calls == []
+
+
+def test_a_variant_item_plays_the_skill_for_its_last_word(tmp_path) -> None:
+    catalog = _catalog("get_wood", "get_planks")
+    fake = FakeClient({})
+    goal = Goal(text="get four oak planks", item="oak_planks", count=4)
+    result = route(
+        goal,
+        catalog,
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+    )
+    assert (result.kind, result.skill) == ("play", "get_planks")
+    assert fake.calls == []

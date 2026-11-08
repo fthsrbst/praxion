@@ -58,23 +58,33 @@ class LadderProgress(BaseModel):
     next_index: int = 0
 
 
+def _met(inventory: Mapping[str, int]) -> list[bool]:
+    """Which rungs are met. The ladder is cumulative: a later rung met means
+    every earlier one is too (a crafting table made from the only logs still
+    passed the wood rung; without this the loop went back to wood after the
+    table, first autonomous run 2026-11-08)."""
+    direct = [evaluate(rung.condition, inventory) is True for rung in RUNGS]
+    met = [False] * len(RUNGS)
+    later = False
+    for index in range(len(RUNGS) - 1, -1, -1):
+        later = later or direct[index]
+        met[index] = later
+    return met
+
+
 def first_unmet(inventory: Mapping[str, int]) -> Optional[Rung]:
-    """The first rung whose condition is not ``True``; ``None`` when all pass."""
-    for rung in RUNGS:
-        if evaluate(rung.condition, inventory) is not True:
+    """The first rung not met (cumulatively); ``None`` when all pass."""
+    for rung, met in zip(RUNGS, _met(inventory)):
+        if not met:
             return rung
     return None
 
 
 def progress(inventory: Mapping[str, int]) -> LadderProgress:
     """Every met rung in ladder order, plus the first unmet one."""
-    done: list[str] = []
-    first_index: Optional[int] = None
-    for index, rung in enumerate(RUNGS, start=1):
-        if evaluate(rung.condition, inventory) is True:
-            done.append(rung.id)
-        elif first_index is None:
-            first_index = index
+    met = _met(inventory)
+    done = [rung.id for rung, ok in zip(RUNGS, met) if ok]
+    first_index = next((index for index, ok in enumerate(met, start=1) if not ok), None)
     return LadderProgress(
         done=done,
         next=RUNGS[first_index - 1].id if first_index is not None else None,

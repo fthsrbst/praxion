@@ -67,10 +67,11 @@ def route(
     ledger = ledger if ledger is not None else Ledger()
     evidence = evidence if evidence is not None else Evidence(config.local_brain_dir())
 
-    exact = f"get_{goal.item}"
-    if exact in skills.names:
-        evidence.write("router_decision", decision="play", skill=exact, scores={}, source="exact_name")
-        return Route(kind="play", skill=exact, scores={})
+    # `oak_planks` is served by `get_planks`: try the item, then its last word.
+    for name in (f"get_{goal.item}", f"get_{goal.item.rsplit('_', 1)[-1]}"):
+        if name in skills.names:
+            evidence.write("router_decision", decision="play", skill=name, scores={}, source="exact_name")
+            return Route(kind="play", skill=name, scores={})
 
     # Jev sees what a person would look at: the doc line and the rules, which
     # name what the skill crafts or mines. With the doc alone, `get_planks`

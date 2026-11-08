@@ -58,13 +58,13 @@ def test_full_inventory_completes_the_ladder() -> None:
     assert state.next_index == 12
 
 
-def test_progress_keeps_later_met_rungs_while_an_earlier_one_is_unmet() -> None:
+def test_a_later_met_rung_meets_every_earlier_one() -> None:
+    # A furnace in hand means the rungs below it were climbed, even if the
+    # pickaxe broke since; the skills re-make their own prerequisites.
     inventory = {"oak_log": 1, "crafting_table": 1, "furnace": 1}
     state = progress(inventory)
-    assert state.done == ["wood", "crafting_table", "furnace"]
-    assert state.next == "wooden_pickaxe"
-    assert state.met == 3
-    assert state.next_index == 3
+    assert state.done == [rung.id for rung in RUNGS[: RUNGS.index(next(r for r in RUNGS if r.id == "furnace")) + 1]]
+    assert state.next == "coal"
 
 
 def test_eight_cobblestone_is_the_rung_threshold() -> None:
@@ -77,3 +77,10 @@ def test_eight_cobblestone_is_the_rung_threshold() -> None:
         {"oak_log": 1, "crafting_table": 1, "wooden_pickaxe": 1, "cobblestone": 8}
     )
     assert meeting is not None and meeting.id == "stone_pickaxe"
+
+
+def test_the_ladder_is_cumulative() -> None:
+    # The logs went into the table: wood still counts as met.
+    inventory = {"crafting_table": 1}
+    assert first_unmet(inventory).id == "wooden_pickaxe"
+    assert progress(inventory).done[:2] == ["wood", "crafting_table"]
