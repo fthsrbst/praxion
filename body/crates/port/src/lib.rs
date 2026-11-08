@@ -24,7 +24,8 @@
 //! - `hello { port_version }`
 //! - `command { id, skill, args, tier, expires_at_tick, based_on_generation,
 //!   condition, budget_ticks }`
-//! - `pop { id, intent_id }`
+//! - `pop { id, intent_id }` — cancel the running intent, or remove a done or
+//!   suspended one (architecture §5.4 "stop and cancel always work")
 //! - `resync_request`
 //! - `ping`
 //!

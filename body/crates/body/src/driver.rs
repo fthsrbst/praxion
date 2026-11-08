@@ -371,7 +371,9 @@ impl BodyDriver {
         for message in messages {
             match message {
                 BrainMessage::Command(command) => self.accept_command(command, tick, ts_ns, world),
-                BrainMessage::Pop { intent_id, .. } => self.pop_intent(intent_id, tick, ts_ns),
+                BrainMessage::Pop { intent_id, .. } => {
+                    self.pop_intent(intent_id, tick, ts_ns, world);
+                }
                 // The handshake, pings and resync are the port's own business.
                 BrainMessage::Hello { .. } | BrainMessage::ResyncRequest | BrainMessage::Ping => {}
             }
@@ -600,14 +602,21 @@ impl BodyDriver {
         }
     }
 
-    /// A brain may pop only a `done` or `suspended` intent (proposal §2.2).
-    fn pop_intent(&mut self, intent_id: u64, tick: u64, ts_ns: u64) {
-        let poppable = self
+    /// A brain `pop` releases an intent. Stop and cancel always work
+    /// (architecture §5.4): a pop of the **running** intent cancels it now, so
+    /// the console's stop reaches a skill that owns the body. A pop of a `done`
+    /// or `suspended` intent only removes it (proposal §2.2).
+    fn pop_intent(&mut self, intent_id: u64, tick: u64, ts_ns: u64, world: &World) {
+        let Some(state) = self
             .arbiter
             .stack()
             .get(intent_id)
-            .is_some_and(|entry| entry.state != IntentState::Running);
-        if !poppable {
+            .map(|entry| entry.state)
+        else {
+            return;
+        };
+        if state == IntentState::Running {
+            self.cancel_goal(intent_id, tick, ts_ns, world);
             return;
         }
         if let Some(record) = self.commands.get(&intent_id) {
@@ -633,32 +642,46 @@ impl BodyDriver {
         self.commands.remove(&intent_id);
     }
 
+    /// A pop of the running intent: stop its skill now. The in-flight
+    /// primitive is abandoned, the command settles `cancelled` (the brain's
+    /// proof that the stop happened), the entry is done, and a suspended goal
+    /// underneath gets the body back through the one settle path.
+    fn cancel_goal(&mut self, intent_id: u64, tick: u64, ts_ns: u64, world: &World) {
+        let Some(record) = self.commands.remove(&intent_id) else {
+            // A running intent no command owns (a reflex's or a meal's skill):
+            // there is no command to settle, but it still leaves the body.
+            self.abandon_flight();
+            let events = self.arbiter.end_command(intent_id, &mut self.mirror, tick);
+            for event in events {
+                self.record(tick, ts_ns, event);
+            }
+            return;
+        };
+        // The body does not evaluate the goal's condition: the goal ended by
+        // the user's stop, not by its own rule, so `condition` stays absent.
+        self.close_goal(intent_id, record, "cancelled", None, None, tick, ts_ns, world);
+    }
+
     /// One goal ended: the receipt first, then `stack.done`, the summary entry
-    /// and the snapshot. The process does not end (proposal §2.3).
-    fn settle_goal(
+    /// and the snapshot. The process does not end (proposal §2.3). Every end —
+    /// a skill's `done`/`failed` or a pop's `cancelled` — comes through here, so
+    /// a cancel resumes a suspended goal exactly like any other settle.
+    #[allow(clippy::too_many_arguments)]
+    fn close_goal(
         &mut self,
         intent_id: u64,
+        record: CommandRecord,
+        outcome: &str,
         failure_kind: Option<String>,
+        condition: Option<String>,
         tick: u64,
         ts_ns: u64,
         world: &World,
     ) {
-        let Some(record) = self.commands.remove(&intent_id) else {
-            return;
-        };
         // A settled goal must never leave its primitive running with an idle
         // owner (review of A2-A3, finding 1).
         self.abandon_flight();
-        let condition = record
-            .condition
-            .as_deref()
-            .map(|text| self.condition_result(text, world));
         let generation = self.arbiter.generation();
-        let outcome = if failure_kind.is_some() {
-            "failed"
-        } else {
-            "done"
-        };
         self.receipt(
             tick,
             ts_ns,
@@ -676,8 +699,10 @@ impl BodyDriver {
             self.record(tick, ts_ns, event);
         }
 
-        let summary_outcome =
-            failure_kind.map_or_else(|| "done".to_owned(), |kind| format!("failed({kind})"));
+        let summary_outcome = match (outcome, failure_kind) {
+            ("failed", Some(kind)) => format!("failed({kind})"),
+            _ => outcome.to_owned(),
+        };
         {
             let mut shared = lock(&self.shared);
             shared.outcome = Some(summary_outcome.clone());
@@ -709,6 +734,40 @@ impl BodyDriver {
             self.cli = CliGoal::Settled;
         }
         self.publish_state(world, tick);
+    }
+
+    /// One goal ended by its own rule: evaluate its guard text and settle
+    /// `done` or `failed(kind)` (proposal §2.3).
+    fn settle_goal(
+        &mut self,
+        intent_id: u64,
+        failure_kind: Option<String>,
+        tick: u64,
+        ts_ns: u64,
+        world: &World,
+    ) {
+        let Some(record) = self.commands.remove(&intent_id) else {
+            return;
+        };
+        let condition = record
+            .condition
+            .as_deref()
+            .map(|text| self.condition_result(text, world));
+        let outcome = if failure_kind.is_some() {
+            "failed"
+        } else {
+            "done"
+        };
+        self.close_goal(
+            intent_id,
+            record,
+            outcome,
+            failure_kind,
+            condition,
+            tick,
+            ts_ns,
+            world,
+        );
     }
 
     /// A resume path handed the body to an intent whose skill the interpreter
@@ -2432,8 +2491,8 @@ skill stall()
         // c-3 owns the body; c-2 is suspended and therefore poppable.
         accept(&mut harness, command("c-3", "stall"));
 
-        harness.driver.pop_intent(2, harness.tick, now_ns());
-        harness.driver.pop_intent(2, harness.tick, now_ns());
+        harness.driver.pop_intent(2, harness.tick, now_ns(), &harness.world);
+        harness.driver.pop_intent(2, harness.tick, now_ns(), &harness.world);
         flush(&mut harness);
 
         let settled = harness.receipts("settled");
@@ -2453,6 +2512,66 @@ skill stall()
         assert_eq!(done, 1, "a second pop must not re-emit intent_state done");
         assert_eq!(*harness.driver.arbiter.owner(), Owner::Skill { intent_id: 3 });
         assert_eq!(harness.driver.commands.len(), 2);
+    }
+
+    #[test]
+    fn a_popped_running_command_is_cancelled_and_the_older_goal_returns() {
+        let mut harness = harness();
+        accept(&mut harness, command("c-1", "stall"));
+        accept(&mut harness, command("c-2", "stall"));
+        harness.run(3);
+        // c-2 owns the body and its continuous wait is in flight.
+        assert_eq!(
+            *harness.driver.arbiter.owner(),
+            Owner::Skill { intent_id: 2 }
+        );
+        assert!(
+            harness.driver.runner.is_continuous(),
+            "stall holds a continuous primitive"
+        );
+
+        // The console's Stop goal: a pop of the running intent.
+        harness.driver.pop_intent(2, harness.tick, now_ns(), &harness.world);
+        flush(&mut harness);
+
+        let settled = harness.receipts("settled");
+        assert_eq!(settled.len(), 1, "{settled:?}");
+        assert_eq!(settled[0].0, "c-2");
+        assert_eq!(settled[0].3.as_deref(), Some("cancelled"));
+        assert_eq!(
+            harness.driver.arbiter.stack().get(2).map(|entry| entry.state),
+            Some(praxion_arbiter::IntentState::Done),
+            "the cancelled entry is done"
+        );
+        assert_eq!(
+            *harness.driver.arbiter.owner(),
+            Owner::Skill { intent_id: 1 },
+            "the suspended goal gets the body back"
+        );
+        assert_eq!(
+            harness.driver.commands.len(),
+            1,
+            "only c-1 is still an open command"
+        );
+        assert_eq!(harness.summary()["goal"]["outcome"], "cancelled");
+
+        // The cancelled goal's primitive is stopped on the next tick, then the
+        // resumed goal restarts from the top and owns the next one.
+        harness.run(1);
+        assert!(
+            !harness.driver.runner.is_active(),
+            "the cancelled primitive must not keep the runner busy"
+        );
+        harness.run(1);
+        assert_eq!(harness.driver.interpreter_intent, Some(1));
+        assert_eq!(harness.driver.interpreter.current_skill(), Some("stall"));
+        assert!(
+            harness
+                .receipts("settled")
+                .iter()
+                .all(|receipt| receipt.0 != "c-1"),
+            "the cancelled goal's frames must not settle the older goal"
+        );
     }
 
     #[test]
@@ -2510,7 +2629,7 @@ skill stall()
         );
 
         // The brain pops c-2 while the reflex owns the body.
-        harness.driver.pop_intent(2, 11, now_ns());
+        harness.driver.pop_intent(2, 11, now_ns(), &harness.world);
         flush(&mut harness);
         assert_eq!(
             harness.receipts("settled")[0].3.as_deref(),

@@ -21,7 +21,8 @@ pub enum Capability {
     Command,
     /// Send `snapshot` on demand.
     Snapshot,
-    /// Remove a `done` or `suspended` intent from the stack.
+    /// Release an intent: cancel it when it runs, remove it when it is done or
+    /// suspended.
     Pop,
 }
 
@@ -132,7 +133,8 @@ pub enum BodyMessage {
 pub enum BrainMessage {
     Hello { port_version: u16 },
     Command(Command),
-    /// Remove a `done` or `suspended` entry from the stack.
+    /// Release an intent: `running` is cancelled (the command settles
+    /// `cancelled`), `done` or `suspended` is removed from the stack.
     Pop { id: String, intent_id: u64 },
     /// Ask for a snapshot at the current cut.
     ResyncRequest,

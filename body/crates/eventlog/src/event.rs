@@ -166,8 +166,10 @@ pub enum EventKind {
     /// `Arbiter::command` returned, with the generation it bumped to. A
     /// `rejected` carries `reason` (`stale_generation`, `unknown_skill`,
     /// `stack_full`, `bad_condition`, `bad_args`); a `settled` carries
-    /// `outcome` (`done`, `failed` or `popped`), the typed `failure_kind`, and
-    /// the guard's `condition` result (`true`, `false` or `unknown`).
+    /// `outcome` (`done`, `failed`, `cancelled` or `popped`), the typed
+    /// `failure_kind`, and the guard's `condition` result (`true`, `false` or
+    /// `unknown`). `cancelled` is a brain `pop` of the running intent: the stop
+    /// is confirmed by this receipt (architecture §5.4).
     CommandReceipt {
         command_id: String,
         state: String,

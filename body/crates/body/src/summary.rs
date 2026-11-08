@@ -41,7 +41,7 @@ pub struct GoalResult {
     pub command_id: String,
     pub skill: String,
     pub args: Vec<String>,
-    /// `done` or `failed(...)`.
+    /// `done`, `failed(...)` or `cancelled` (a brain pop of a running goal).
     pub outcome: String,
 }
 
