@@ -13,6 +13,14 @@ use crate::common::{HandSelect, ToolStep, aim_precise, block_target_where, hold_
 use crate::frontier::nearest_known_block;
 use crate::runner::{Ctx, IntentSpec};
 
+/// How far `mine` looks in the known map for a target it cannot see yet. One
+/// block wider than the skills' `near(T, 5)`: the fact measures from the eye
+/// position and this search from the eye cell, so a block at the edge was near
+/// for the skill and missing here, and `mine` failed `no_block` one tick after
+/// `find_stone` ended (autonomous run 3, 2026-11-08). Out-of-reach targets are
+/// walked to anyway.
+const KNOWN_SEARCH_RADIUS: u32 = 6;
+
 /// How many soft occluders one `mine` call may dig through before it gives up.
 const MAX_OCCLUDERS: u32 = 3;
 
@@ -226,7 +234,7 @@ impl Mine {
                 // where the sight ray meets first: the wanted block itself or
                 // a soft block hiding it.
                 if let Some((cell, _)) =
-                    nearest_known_block(ctx.perception, ctx.world, &self.name, 5, &[])
+                    nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &[])
                 {
                     // No reach check on the hidden cell itself: the block to
                     // dig is the first one the ray meets, which is nearer, and
@@ -287,7 +295,7 @@ impl Mine {
                     // `craft` does for its table; only a block the known map
                     // lost too is gone.
                     if let Some((cell, _)) =
-                        nearest_known_block(ctx.perception, ctx.world, &self.name, 5, &[])
+                        nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &[])
                     {
                         if self.waited > 80 {
                             log::debug!(
