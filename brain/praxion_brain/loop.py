@@ -17,6 +17,12 @@ class, so no provider can hang the loop (section 3.7). A failing step is
 recorded and the loop reconnects or stops cleanly; it never dies on one bad
 frame.
 
+A failed goal is not retried at once: the pick waits
+:data:`FAILURE_GAP_TICKS` body ticks (or :data:`FAILURE_STREAK_GAP_TICKS`
+after :data:`FAILURE_STREAK` failures in a row) while the loop stays IDLE.
+Code-only picks obey the same failure memory as proposals, so a blocked goal
+idles instead of spinning.
+
 Every expensive step is injectable so the loop is tested against
 :class:`FakeBody` with fake proposal, router and admission callables.
 
@@ -63,6 +69,13 @@ BODY_WAKE_LIMIT_SECONDS = 30.0
 MAX_PROPOSALS = 3
 #: Consecutive step errors before the loop stops cleanly (A6).
 MAX_STEP_ERRORS = 5
+#: Minimum body ticks between a failed goal and the next pick (5 s at 20 TPS):
+#: an always-failing goal must not spin the loop (autonomous run 2, 2026-11-08).
+FAILURE_GAP_TICKS = 100
+#: The longer gap after :data:`FAILURE_STREAK` consecutive failures (30 s).
+FAILURE_STREAK_GAP_TICKS = 600
+#: Consecutive failed goals after which the longer gap applies.
+FAILURE_STREAK = 3
 
 
 class LoopState(str, Enum):
@@ -145,9 +158,12 @@ class Loop:
         self._last_heartbeat = self._clock()
         self._heartbeat_facts: Optional[dict[str, Any]] = None
         self._was_playing = False
+        self._blocked_goals: set[str] = set()
         self._last_body_wake = -float("inf")
         self._step_errors = 0
         self._step_failed = False
+        self._consecutive_failures = 0
+        self._next_pick_tick = 0
 
         self.session = BodySession(
             port,
@@ -317,6 +333,12 @@ class Loop:
             was_playing=was_playing,
             is_playing=is_playing,
         )
+        # A goal block that has run out is a change too: an idle body with an
+        # unchanged world would otherwise never pick again.
+        blocked_now = set(self.memory.blocked())
+        if self._blocked_goals - blocked_now:
+            reasons.append("block_expired")
+        self._blocked_goals = blocked_now
         if reasons:
             self.evidence.write("heartbeat_change", reasons=reasons, tick=tick)
             if self.state == LoopState.IDLE:
@@ -427,10 +449,8 @@ class Loop:
 
     def _retry_stale(self, open_goal: OpenGoal) -> None:
         try:
-            command_id = self.session.send_goal(
-                open_goal.skill,
-                open_goal.proposal.condition,
-                self._goal_args(open_goal.skill, open_goal.proposal.condition),
+            command_id = self._send_goal(
+                open_goal.skill, open_goal.proposal.condition
             )
         except PortError as error:
             self.records.finish(
@@ -451,6 +471,10 @@ class Loop:
     # -- state machine -------------------------------------------------- #
     def _advance(self) -> None:
         if self.state == LoopState.IDLE and self._wake is not None:
+            if not self._pick_ready():
+                # The gap after a failure has not passed yet; keep the wake
+                # pending and let the next step (heartbeat/poll) try again.
+                return
             wake = self._wake
             self._wake = None
             self._transition(LoopState.PICKING, reason=wake.value)
@@ -480,10 +504,34 @@ class Loop:
         self._wake = cause
         self.evidence.write("loop_wake", cause=cause.value, state=self.state.value)
 
+    def _pick_ready(self) -> bool:
+        """Whether the body tick has passed the gap a failed goal asked for."""
+        return int(self.session.tick or 0) >= self._next_pick_tick
+
     def _goal_finished(self, record: GoalRecord) -> None:
-        """Records closed a goal: idle and pick again on the causing wake."""
+        """Records closed a goal: idle, wait out a failed goal's gap, pick again."""
         self._open_goal = None
         self._transition(LoopState.IDLE, reason=f"goal_{record.status}")
+        if record.status == "failed":
+            self._consecutive_failures += 1
+            gap = (
+                FAILURE_STREAK_GAP_TICKS
+                if self._consecutive_failures >= FAILURE_STREAK
+                else FAILURE_GAP_TICKS
+            )
+            now = int(self.session.tick or 0)
+            self._next_pick_tick = now + gap
+            self.evidence.write(
+                "pick_gap",
+                ticks=gap,
+                consecutive_failures=self._consecutive_failures,
+                from_tick=now,
+                next_pick_tick=self._next_pick_tick,
+                failure_kind=record.failure_kind,
+            )
+        else:
+            self._consecutive_failures = 0
+            self._next_pick_tick = 0
         self._set_wake(
             WakeCause.GOAL_SETTLED if record.status == "done" else WakeCause.GOAL_FAILED
         )
@@ -587,17 +635,33 @@ class Loop:
         return proposal, ""
 
     def _pick_code_only(self, reason: str) -> bool:
-        fallback = code_only_goal(self._inventory(), self.catalog)
+        inventory = self._inventory()
+        fallback = code_only_goal(inventory, self.catalog)
         self._pending = None
         if fallback is None:
             self.evidence.write(
                 "code_only_idle",
                 reason=reason,
-                inventory=self._inventory(),
+                inventory=inventory,
             )
             self._transition(LoopState.IDLE, reason="code_only_idle")
             return False
         proposal = fallback.goal
+        # The same failure memory the proposal path validates against: two
+        # failures block a goal for two hours, so code-only must idle rather
+        # than send the same doomed goal again (autonomous run 2).
+        if self.memory.is_blocked(proposal.condition):
+            entry = self.memory.failures().get(normalize_condition(proposal.condition))
+            self.evidence.write(
+                "code_only_blocked",
+                reason=reason,
+                condition=proposal.condition,
+                skill=fallback.skill,
+                attempts=entry.attempts if entry is not None else None,
+                blocked_until=entry.blocked_until if entry is not None else None,
+            )
+            self._transition(LoopState.IDLE, reason="code_only_blocked")
+            return False
         validation = Validation(ok=True, skill_name=fallback.skill)
         self._last_proposal = proposal
         self._pending = PendingGoal(
@@ -814,11 +878,7 @@ class Loop:
             return
 
         try:
-            command_id = self.session.send_goal(
-                skill,
-                pending.proposal.condition,
-                self._goal_args(skill, pending.proposal.condition),
-            )
+            command_id = self._send_goal(skill, pending.proposal.condition)
         except PortError as error:
             self.evidence.write("command_send_failed", error=str(error), skill=skill)
             self._transition(LoopState.IDLE, reason="send_failed")
@@ -853,6 +913,18 @@ class Loop:
         self._transition(LoopState.PLAYING, reason="command_sent")
 
     # -- helpers -------------------------------------------------------- #
+    def _send_goal(self, skill: str, condition: str) -> str:
+        """Send one command; the one send path, so the count always travels.
+
+        Code-only, proposal and stale-retry sends all come through here, which
+        is why :meth:`_goal_args` cannot be forgotten on one of them.
+        """
+        return self.session.send_goal(
+            skill,
+            condition,
+            self._goal_args(skill, condition),
+        )
+
     def _goal_args(self, skill: str, condition: str) -> list[str]:
         """The count a `count(X) >= n` goal asks for, as the skill's first
         argument when the skill takes one: `get_wood()` alone stops at its
@@ -891,6 +963,9 @@ class Loop:
 
 __all__ = [
     "BODY_WAKE_LIMIT_SECONDS",
+    "FAILURE_GAP_TICKS",
+    "FAILURE_STREAK",
+    "FAILURE_STREAK_GAP_TICKS",
     "HEARTBEAT_SECONDS",
     "MAX_PROPOSALS",
     "MAX_STEP_ERRORS",

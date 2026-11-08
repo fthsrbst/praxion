@@ -157,6 +157,29 @@ def test_one_failure_does_not_block(tmp_path) -> None:
     assert memory.is_blocked("has(coal)") is False
 
 
+def test_every_failure_kind_counts_toward_the_block(tmp_path) -> None:
+    # A skill that lies (skill_wrong), a timeout, a rejection and a loop error
+    # are all `failed` records; none of them may slip past the 2-failure block.
+    clock = FakeClock(1000)
+    kinds = (
+        "skill_wrong",
+        "not_found",
+        "needs_tool",
+        "timeout",
+        "rejected",
+        "budget",
+        "loop_error",
+    )
+    for kind in kinds:
+        memory = Memory("w", root=tmp_path / kind, clock=clock)
+        memory.append_goal(failed("g1", "has(coal)", at=900, kind=kind))
+        memory.append_goal(failed("g2", "has(coal)", at=950, kind=kind))
+        assert memory.is_blocked("has(coal)") is True, kind
+        entry = memory.failures()["has(coal)"]
+        assert entry.attempts == 2
+        assert entry.kinds == {kind: 2}
+
+
 def test_failure_counts_come_from_skill_uses(tmp_path) -> None:
     memory = Memory("w", root=tmp_path, clock=FakeClock())
     for index, kind in enumerate(["not_found", "not_found", "budget"]):

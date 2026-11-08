@@ -18,7 +18,14 @@ from praxion_brain.evidence import Evidence
 from praxion_brain.goal import Goal
 from praxion_brain.governor import Governor
 from praxion_brain.ledger import Ledger, estimate_cost
-from praxion_brain.loop import MAX_STEP_ERRORS, Loop, LoopState
+from praxion_brain.loop import (
+    FAILURE_GAP_TICKS,
+    FAILURE_STREAK,
+    FAILURE_STREAK_GAP_TICKS,
+    MAX_STEP_ERRORS,
+    Loop,
+    LoopState,
+)
 from praxion_brain.memory import GoalRecord, Memory
 from praxion_brain.practice import PracticeResult
 from praxion_brain.port import Bye, PortClient, StackEntry
@@ -134,6 +141,20 @@ def pump(loop: Loop, predicate, timeout: float = 4.0, what: str = "state") -> No
         f"no {what} within {timeout}s; state={loop.state} "
         f"wake={loop._wake} open={loop._open_goal}"
     )
+
+
+def set_tick(loop: Loop, body: FakeBody, target: int) -> None:
+    """Move the body tick to exactly ``target`` and let the loop see it.
+
+    The event carries the new tick, so no test has to sleep or poll pongs.
+    """
+    current = int(loop.session.tick or 0)
+    if target <= current:
+        raise AssertionError(f"target tick {target} is not past the body tick {current}")
+    if target - current > 1:
+        body.advance(target - current - 1)
+    body.emit_event("note", text="tick")
+    pump(loop, lambda: int(loop.session.tick or 0) >= target, what=f"tick {target}")
 
 
 def wait_accepted(body: FakeBody, command_id: str, timeout: float = 3.0) -> None:
@@ -429,6 +450,14 @@ def test_two_failures_block_the_goal(tmp_path) -> None:
                 failure_kind="not_found",
             )
 
+            pump(
+                loop,
+                lambda: loop.state == LoopState.IDLE
+                and loop._consecutive_failures == 1,
+                what="failed goal",
+            )
+            # The failure gap holds the pick until the body tick moves on.
+            set_tick(loop, body, loop._next_pick_tick)
             pump(
                 loop,
                 lambda: loop.state == LoopState.IDLE
@@ -1128,3 +1157,198 @@ def test_a_count_goal_passes_its_count_to_a_skill_with_a_parameter() -> None:
     assert loop._goal_args("get_wood", "count(#logs) >= 5") == ["5"]
     assert loop._goal_args("get_wood", "has(oak_log)") == []
     assert loop._goal_args("get_crafting_table", "count(crafting_table) >= 2") == []
+
+
+# --------------------------------------------------------------------------- #
+# The never-spin rules: code-only obeys memory, count and the failure gap
+# --------------------------------------------------------------------------- #
+def test_code_only_passes_the_count_and_blocks_after_two_wrong_skills(tmp_path) -> None:
+    clock = Clock()
+    inventory = {"oak_log": 1, "crafting_table": 1, "wooden_pickaxe": 1}
+    skills = SkillCatalog(
+        skills=[
+            SkillInfo(
+                name="get_cobblestone",
+                params=["n: int = 3"],
+                source="",
+                path="",
+                origin="core",
+            )
+        ]
+    )
+    condition = "count(cobblestone) >= 8"
+
+    with FakeBody(skills={"get_cobblestone"}, facts={"inventory": inventory}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("code-only must not propose")
+            ),
+            route_fn=lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("code-only must not route")
+            ),
+            skills=skills,
+            clock=clock,
+            governor_kwargs={"hard_stop_usd": 0.0},
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: len(body.commands) >= 1, what="first code-only command")
+            first = body.commands[0]
+            assert first.skill == "get_cobblestone"
+            assert first.args == ["8"]  # the rung's count, not the default 3
+            wait_accepted(body, first.id)
+            body.settle(first.id, outcome="done", condition="false")  # skill_wrong
+
+            pump(
+                loop,
+                lambda: loop.state == LoopState.IDLE
+                and loop._consecutive_failures == 1,
+                what="first failure",
+            )
+            deadline = loop._next_pick_tick
+            assert deadline == int(loop.session.tick or 0) + FAILURE_GAP_TICKS
+
+            set_tick(loop, body, deadline - 1)
+            for _ in range(20):
+                loop.step(0.0)
+            assert len(body.commands) == 1  # still inside the gap
+            assert loop.state == LoopState.IDLE
+
+            set_tick(loop, body, deadline)
+            pump(loop, lambda: len(body.commands) >= 2, what="second code-only command")
+            second = body.commands[1]
+            assert second.skill == "get_cobblestone"
+            assert second.args == ["8"]
+            wait_accepted(body, second.id)
+            body.settle(second.id, outcome="done", condition="false")
+
+            pump(
+                loop,
+                lambda: loop.memory.is_blocked(condition)
+                and loop.state == LoopState.IDLE,
+                what="blocked goal",
+            )
+            assert loop._consecutive_failures == 2
+
+            set_tick(loop, body, loop._next_pick_tick)
+            for _ in range(40):
+                loop.step(0.0)
+            assert len(body.commands) == 2  # blocked: never a third try
+            blocked = evidence_entries(loop, "code_only_blocked")
+            assert blocked and blocked[0]["condition"] == condition
+            assert blocked[0]["skill"] == "get_cobblestone"
+        finally:
+            loop.close()
+
+
+def test_a_failed_goal_waits_the_gap_and_three_failures_wait_longer(tmp_path) -> None:
+    clock = Clock()
+    proposals = [
+        proposal("has(furnace)", "get a furnace", "furnace"),
+        proposal("has(coal)", "get coal", "coal"),
+        proposal("has(diamond)", "get diamond", "diamond"),
+        proposal("has(furnace)", "get a furnace", "furnace"),
+    ]
+    def propose_fn(briefing, catalog, **kwargs):
+        return proposals.pop(0)
+
+    with FakeBody(skills={"get_furnace", "get_coal", "get_diamond"}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=propose_fn,
+            route_fn=lambda goal, skills, **kwargs: Route(
+                kind="play", skill=goal.skill_name
+            ),
+            skills=catalog("get_furnace", "get_coal", "get_diamond"),
+            clock=clock,
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: len(body.commands) >= 1, what="first command")
+
+            for attempt in range(FAILURE_STREAK):
+                command = body.commands[attempt]
+                wait_accepted(body, command.id)
+                body.settle(command.id, outcome="done", condition="false")
+                pump(
+                    loop,
+                    lambda expected=attempt + 1: loop.state == LoopState.IDLE
+                    and loop._consecutive_failures == expected,
+                    what=f"failure {attempt + 1}",
+                )
+                expected_gap = (
+                    FAILURE_STREAK_GAP_TICKS
+                    if loop._consecutive_failures >= FAILURE_STREAK
+                    else FAILURE_GAP_TICKS
+                )
+                deadline = loop._next_pick_tick
+                assert deadline == int(loop.session.tick or 0) + expected_gap
+
+                set_tick(loop, body, deadline - 1)
+                for _ in range(20):
+                    loop.step(0.0)
+                assert len(body.commands) == attempt + 1  # no pick inside the gap
+
+                set_tick(loop, body, deadline)
+                pump(
+                    loop,
+                    lambda count=attempt + 2: len(body.commands) >= count,
+                    what=f"command {attempt + 2} after the gap",
+                )
+
+            assert loop._consecutive_failures == FAILURE_STREAK
+            gaps = [entry["ticks"] for entry in evidence_entries(loop, "pick_gap")]
+            assert gaps == [
+                FAILURE_GAP_TICKS,
+                FAILURE_GAP_TICKS,
+                FAILURE_STREAK_GAP_TICKS,
+            ]
+
+            # A good goal ends the streak; the next failure gets the short gap.
+            last = body.commands[FAILURE_STREAK]
+            wait_accepted(body, last.id)
+            body.settle(last.id, outcome="done", condition="true")
+            pump(
+                loop,
+                lambda: loop.state == LoopState.IDLE
+                and loop._consecutive_failures == 0,
+                what="streak reset by done",
+            )
+        finally:
+            loop.close()
+
+
+def test_an_expired_goal_block_wakes_an_idle_loop() -> None:
+    from praxion_brain.loop import Loop, LoopState
+
+    class Memory:
+        def __init__(self) -> None:
+            self.now = {"count(cobblestone)>=8": object()}
+
+        def blocked(self):
+            return self.now
+
+    class Evidence:
+        def __init__(self) -> None:
+            self.lines = []
+
+        def write(self, kind, **fields):
+            self.lines.append((kind, fields))
+
+    loop = Loop.__new__(Loop)
+    loop.memory, loop.evidence = Memory(), Evidence()
+    loop.state = LoopState.IDLE
+    loop._heartbeat_facts, loop._was_playing, loop._blocked_goals = None, False, set()
+    woken = []
+    loop._set_wake = woken.append
+    facts = {"health": 20, "food": 20, "is_night": False, "inventory": {}}
+    loop._check_heartbeat(facts, is_playing=False, tick=1, heartbeat_pending=False)
+    loop._check_heartbeat(facts, is_playing=False, tick=2, heartbeat_pending=False)
+    assert woken == []
+    loop.memory.now = {}
+    loop._check_heartbeat(facts, is_playing=False, tick=3, heartbeat_pending=False)
+    assert len(woken) == 1
+    assert ("heartbeat_change", {"reasons": ["block_expired"], "tick": 3}) in loop.evidence.lines
