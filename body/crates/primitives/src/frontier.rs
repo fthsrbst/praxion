@@ -6,15 +6,16 @@ use std::collections::{HashSet, VecDeque};
 use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockKind;
 use praxion_gamedata as gamedata;
-use praxion_perception::Perception;
+use praxion_perception::{Perception, workable};
 use praxion_world::{BlockState, World};
 
 use crate::heading::{Dir, SECTORS, sector_of};
 
-/// The `near` fact over the perception known map: a target is near when a cell
-/// this perception has seen inside `radius` holds it. No rays are spent, and
-/// the answer is `false` when the map knows of none, so `not near(T, R)` can
-/// start an exploration. `None` only when the eye itself is not known yet.
+/// The `near` fact over the perception known map: a target is near when a
+/// workable cell this perception has seen inside `radius` holds it. No rays are
+/// spent, and the answer is `false` when the map knows of none, so
+/// `not near(T, R)` can start an exploration. `None` only when the eye itself
+/// is not known yet.
 pub(crate) fn near_block(
     perception: &Perception,
     world: &World,
@@ -25,9 +26,15 @@ pub(crate) fn near_block(
     Some(nearest_known_block(perception, world, wanted, radius, &[]).is_some())
 }
 
-/// The nearest cell in the perception known map that holds `wanted`, with its
-/// distance from the eye. `None` when nothing is known inside `radius`.
-/// `exclude` skips cells a failed plan already rejected.
+/// The nearest cell in the perception known map that holds `wanted` and is
+/// workable (breaking it would not expose water or lava), with its distance from
+/// the eye. `None` when nothing is known inside `radius`. `exclude` skips cells
+/// a failed plan already rejected.
+///
+/// This is the one known-map target search behind `explore`'s approach, `mine`'s
+/// walk toward a remembered cell, `craft`'s table and `dig_down`'s stop check.
+/// The [`workable`] rule keeps all of them from choosing a lake-bed cell that
+/// `mine` would refuse, so a search cannot end on a stone the body cannot dig.
 pub(crate) fn nearest_known_block(
     perception: &Perception,
     world: &World,
@@ -46,13 +53,14 @@ pub(crate) fn nearest_known_block(
         world,
         radius,
         |pos| excluded.contains(&pos),
-        |state| {
+        |pos, state| {
             let kind = BlockKind::from(state);
-            match (tag, wanted_kind) {
+            let matches = match (tag, wanted_kind) {
                 (Some(tag), _) => gamedata::block_in_tag(kind.to_str(), tag),
                 (None, Some(wanted_kind)) => kind == wanted_kind,
                 (None, None) => false,
-            }
+            };
+            matches && workable(pos, state, |cell| world.block_state(cell))
         },
     )
 }

@@ -5,6 +5,11 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-11-08
 
+- **One "workable" rule for `near`, explore and `mine` (Claude).** A block that would let water or lava in
+  when broken does not count for `near(block, r)`, explore's target search or `mine`'s target choice; blocks
+  that are used rather than mined (crafting table, furnace, chest, smoker, blast furnace, barrel) always count.
+  One predicate, `praxion_perception::workable`. Reason: `near(stone, 5)` saw lake-bed stone that `mine`
+  refused, so `get_cobblestone` failed `no_block` in autonomous run 2.
 - **Demo-3 is the building and fighting bot, right after Demo-2 (user).** Contents (proposal in `notes.md`
   2026-11-08, designed with the user before code): a build layer (the LLM designs a voxel blueprint for the
   site from a persona, the terrain and the inventory; code validates supports, materials, reach and, for a

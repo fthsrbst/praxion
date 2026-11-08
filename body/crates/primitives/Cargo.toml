@@ -23,3 +23,8 @@ praxion-perception = { path = "../perception" }
 praxion-planner = { path = "../planner" }
 praxion-rules = { path = "../rules" }
 praxion-world = { path = "../world" }
+
+[dev-dependencies]
+azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
+azalea-world = { path = "../../../third_party/azalea/azalea-world" }

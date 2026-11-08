@@ -2312,9 +2312,12 @@ name = "praxion-primitives"
 version = "0.0.0"
 dependencies = [
  "azalea-block",
+ "azalea-buf",
  "azalea-core",
  "azalea-inventory",
+ "azalea-protocol",
  "azalea-registry",
+ "azalea-world",
  "log",
  "praxion-gamedata",
  "praxion-headless",

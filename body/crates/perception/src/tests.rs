@@ -1244,7 +1244,7 @@ fn a_changed_chunk_revalidates_its_seen_cells_against_the_world() {
         Some(Provenance::Sight)
     );
     assert!(
-        p.nearest_known(&world, 64, |_| false, |state| state == log_state)
+        p.nearest_known(&world, 64, |_| false, |_, state| state == log_state)
             .is_some(),
         "the fresh sighting is returned"
     );
@@ -1254,7 +1254,7 @@ fn a_changed_chunk_revalidates_its_seen_cells_against_the_world() {
     set_block(&mut world, BlockPos::new(50, 64, 0), stone());
     p.begin_tick(&world);
     assert_eq!(
-        p.nearest_known(&world, 64, |_| false, |state| state == log_state)
+        p.nearest_known(&world, 64, |_| false, |_, state| state == log_state)
             .map(|(pos, _)| pos),
         Some(log),
         "an unrelated change in the chunk keeps the log"
@@ -1265,10 +1265,56 @@ fn a_changed_chunk_revalidates_its_seen_cells_against_the_world() {
     set_block(&mut world, log, BlockState::AIR);
     p.begin_tick(&world);
     assert_eq!(
-        p.nearest_known(&world, 64, |_| false, |state| state == log_state),
+        p.nearest_known(&world, 64, |_| false, |_, state| state == log_state),
         None,
         "a remembered log that is gone must not answer nearest_known"
     );
+}
+
+#[test]
+fn workable_keeps_fluids_out_except_for_the_blocks_skills_use() {
+    use std::collections::HashMap;
+
+    let water = find_block("water", &[]);
+    let dry = BlockPos::new(0, 64, 0);
+    let wet = BlockPos::new(2, 64, 0);
+    // A lava floor is just as bad as a water ceiling.
+    let over_lava = BlockPos::new(4, 64, 0);
+    let mut map: HashMap<BlockPos, BlockState> = HashMap::new();
+    map.insert(dry, stone());
+    map.insert(wet, stone());
+    map.insert(BlockPos::new(2, 65, 0), water);
+    map.insert(over_lava, stone());
+    map.insert(BlockPos::new(4, 63, 0), find_block("lava", &[]));
+    let lookup = |pos: BlockPos| map.get(&pos).copied();
+
+    assert!(workable(dry, stone(), lookup), "dry stone is workable");
+    assert!(
+        !workable(wet, stone(), lookup),
+        "a stone holding back water is not a target"
+    );
+    assert!(exposes_fluid(wet, &lookup));
+    assert!(!workable(over_lava, stone(), lookup));
+
+    // A workstation is used where it stands, not mined: water beside it does
+    // not hide it.
+    for name in [
+        "crafting_table",
+        "furnace",
+        "chest",
+        "smoker",
+        "blast_furnace",
+        "barrel",
+    ] {
+        let pos = BlockPos::new(6, 64, 0);
+        let state = find_block(name, &[]);
+        let mut station: HashMap<BlockPos, BlockState> = HashMap::new();
+        station.insert(pos, state);
+        station.insert(BlockPos::new(6, 65, 0), water);
+        let lookup = |cell: BlockPos| station.get(&cell).copied();
+        assert!(exposes_fluid(pos, &lookup), "{name} is next to water");
+        assert!(workable(pos, state, lookup), "{name} still counts");
+    }
 }
 
 #[test]
@@ -1364,7 +1410,7 @@ fn bench_nearest_known_worst_case() {
     let mut samples = Vec::new();
     for _ in 0..3 {
         let started = Instant::now();
-        let found = p.nearest_known(&world, radius as u32, |_| false, |state| state == stone);
+        let found = p.nearest_known(&world, radius as u32, |_| false, |_, state| state == stone);
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
         assert!(found.is_none(), "the full map holds no stone");
     }

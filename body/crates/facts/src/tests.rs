@@ -341,6 +341,70 @@ fn known_block_facts_use_the_known_map() {
     );
 }
 
+/// A perception whose known map has been filled by sweeping `world`.
+fn swept(world: &World) -> Perception {
+    let mut perception = Perception::new(Config::default());
+    for _ in 0..SWEEP_TICKS {
+        perception.begin_tick(world);
+        perception.sweep(world);
+    }
+    perception
+}
+
+/// `near(block, 4)` through the fact mapping.
+fn near_fact(perception: &mut Perception, world: &World, block: &str) -> Truth {
+    Facts::new(perception, world).bool_fact(&call(
+        "near",
+        vec![ArgValue::Block(block.to_owned()), ArgValue::Int(4)],
+    ))
+}
+
+#[test]
+fn near_skips_a_stone_that_holds_back_water_but_counts_a_workstation() {
+    let dry_world = world();
+    let mut dry = swept(&dry_world);
+    assert_eq!(
+        near_fact(&mut dry, &dry_world, "stone"),
+        Truth::True,
+        "a dry stone is near"
+    );
+
+    // The only stone is a lake bed's: `mine` would refuse it, so `near` must
+    // not end a search on it (seed 202 live run 2026-11-08).
+    let mut wet_world = world();
+    set_block(
+        &mut wet_world,
+        BlockPos::new(2, 66, 0),
+        praxion_world::BlockState::from(BlockKind::Water),
+    );
+    let mut wet = swept(&wet_world);
+    assert_eq!(
+        near_fact(&mut wet, &wet_world, "stone"),
+        Truth::False,
+        "a stone holding back water is not a target"
+    );
+
+    // A crafting table is used where it stands, not mined: water beside it must
+    // not hide it.
+    let mut table_world = world();
+    set_block(
+        &mut table_world,
+        BlockPos::new(1, 65, 0),
+        praxion_world::BlockState::from(BlockKind::CraftingTable),
+    );
+    set_block(
+        &mut table_world,
+        BlockPos::new(1, 66, 0),
+        praxion_world::BlockState::from(BlockKind::Water),
+    );
+    let mut table = swept(&table_world);
+    assert_eq!(
+        near_fact(&mut table, &table_world, "crafting_table"),
+        Truth::True,
+        "a workstation next to water still counts"
+    );
+}
+
 #[test]
 fn f3_facts_read_health_food_and_the_day_clock() {
     let world = with_time(with_health(world(), 17.5, 14), 13_000);

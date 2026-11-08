@@ -15,6 +15,8 @@ mod move_to;
 mod place;
 mod runner;
 mod small;
+#[cfg(test)]
+mod test_world;
 
 pub use common::block_name;
 pub use frontier::{FrontierChoice, choose_frontier, rank_frontiers};

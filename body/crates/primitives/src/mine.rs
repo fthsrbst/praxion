@@ -5,11 +5,12 @@ use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
-use praxion_perception::{Answer, Caller, EntityFilter};
+use praxion_perception::{Answer, Caller, EntityFilter, exposes_fluid, workable};
 use praxion_planner::{WALK_TOLERANCE_DEG, center, look_towards};
 use praxion_world::BlockState;
 
 use crate::common::{HandSelect, ToolStep, aim_precise, block_target_where, hold_tool, idle};
+use crate::frontier::nearest_known_block;
 use crate::runner::{Ctx, IntentSpec};
 
 /// How many soft occluders one `mine` call may dig through before it gives up.
@@ -203,10 +204,14 @@ impl Mine {
         if self.target.is_none() {
             // Never break a block that holds back water or lava: digging the
             // stone of a lake bed flooded the hole and the body drowned
-            // (seed 202 live run 2026-11-08).
+            // (seed 202 live run 2026-11-08). `near`, `explore` and this search
+            // ask the same `workable` rule, so a search cannot end on a cell
+            // this call would then refuse.
             let world = ctx.world;
-            let is_dry = |pos: BlockPos| dry(world, pos);
-            if let Some(target) = block_target_where(ctx, &self.name, 5, is_dry) {
+            let accept = |pos: BlockPos, state: BlockState| {
+                workable(pos, state, |cell| world.block_state(cell))
+            };
+            if let Some(target) = block_target_where(ctx, &self.name, 5, accept) {
                 self.set_target(target, false);
             } else {
                 if self.waited == 0
@@ -220,7 +225,9 @@ impl Mine {
                 // The wanted cell is known but not in sight. Ask perception
                 // where the sight ray meets first: the wanted block itself or
                 // a soft block hiding it.
-                if let Some((cell, _)) = nearest_dry_known_block(ctx, &self.name, 5) {
+                if let Some((cell, _)) =
+                    nearest_known_block(ctx.perception, ctx.world, &self.name, 5, &[])
+                {
                     // No reach check on the hidden cell itself: the block to
                     // dig is the first one the ray meets, which is nearer, and
                     // a chosen target out of reach is walked to below (seed 101:
@@ -279,7 +286,9 @@ impl Mine {
                     // Walk toward a known cell until a ray reaches it, as
                     // `craft` does for its table; only a block the known map
                     // lost too is gone.
-                    if let Some((cell, _)) = nearest_dry_known_block(ctx, &self.name, 5) {
+                    if let Some((cell, _)) =
+                        nearest_known_block(ctx.perception, ctx.world, &self.name, 5, &[])
+                    {
                         if self.waited > 80 {
                             log::debug!(
                                 "mine: known {:?} at {:?} never came into sight; body at {:?}",
@@ -463,11 +472,12 @@ fn through_decision(
     if matches_wanted(wanted, state) {
         // A wanted block that holds back water or lava is not a target even
         // when it is the nearest match: breaking the lake-bed stone floods the
-        // hole and drowns the body.
-        return if exposes_fluid(cell, &lookup) {
-            DigThrough::Nothing
-        } else {
+        // hole and drowns the body. Workstations always count, as everywhere
+        // else the rule is applied.
+        return if workable(cell, state, &lookup) {
             DigThrough::Target(cell)
+        } else {
+            DigThrough::Nothing
         };
     }
     let support = BlockPos::new(feet.x, feet.y.saturating_sub(1), feet.z);
@@ -479,26 +489,6 @@ fn through_decision(
     } else {
         DigThrough::Nothing
     }
-}
-
-/// Whether removing `cell` is safe from water and lava. This is the one filter
-/// both the visible target and the known-map walk use, so the body never walks
-/// toward a lake-bed cell it would then refuse to dig.
-fn dry(world: &praxion_world::World, pos: BlockPos) -> bool {
-    !exposes_fluid(pos, &|cell| world.block_state(cell))
-}
-
-/// The nearest known `wanted` cell whose removal would not expose a fluid.
-/// Same predicate as the visible `block_target_where` filter; the plain
-/// `nearest_known_block` would send the body toward a wet cell.
-pub(crate) fn nearest_dry_known_block(ctx: &Ctx<'_>, wanted: &str, radius: u32) -> Option<(BlockPos, f64)> {
-    let world = ctx.world;
-    ctx.perception.nearest_known(
-        world,
-        radius,
-        |pos| !dry(world, pos),
-        |state| matches_wanted(wanted, state),
-    )
 }
 
 /// Whether `state` is a block `wanted` names: a block kind or a `#tag`.
@@ -549,22 +539,6 @@ fn walk_point(feet: BlockPos, cell: BlockPos) -> Vec3 {
         return center(BlockPos::new(cell.x + 2 * sx, feet.y, cell.z + 2 * sz));
     }
     center(cell)
-}
-
-/// Whether removing `cell` would let water or lava reach it.
-pub(crate) fn exposes_fluid(cell: BlockPos, lookup: &impl Fn(BlockPos) -> Option<BlockState>) -> bool {
-    const FACES: [(i32, i32, i32); 6] = [
-        (1, 0, 0),
-        (-1, 0, 0),
-        (0, 1, 0),
-        (0, -1, 0),
-        (0, 0, 1),
-        (0, 0, -1),
-    ];
-    FACES.into_iter().any(|(dx, dy, dz)| {
-        let neighbor = BlockPos::new(cell.x + dx, cell.y + dy, cell.z + dz);
-        lookup(neighbor).is_some_and(|state| praxion_planner::blocks::fluid(state).is_some())
-    })
 }
 
 /// Whether removing `cell` leaves the body's own column over a drop deeper
@@ -1012,5 +986,50 @@ mod tests {
             "the new target waits for its own registration"
         );
         assert_eq!(mine.tool_waited, 0, "the tool is chosen again");
+    }
+
+    #[test]
+    fn mine_chooses_a_dry_stone_over_the_nearer_wet_one() {
+        use crate::test_world::{feet, set_block, world};
+
+        // The nearer stone holds back water; the farther one is dry. A lake-bed
+        // stone is exactly what `near(stone, 5)` used to accept and `mine` then
+        // refused with `no_block` (seed 202 live run 2026-11-08).
+        let mut world = world();
+        let wet = BlockPos::new(0, 64, 2);
+        let dry = BlockPos::new(2, 64, 2);
+        set_block(&mut world, wet, BlockState::from(BlockKind::Stone));
+        set_block(&mut world, dry, BlockState::from(BlockKind::Stone));
+        set_block(
+            &mut world,
+            BlockPos::new(0, 65, 2),
+            BlockState::from(BlockKind::Water),
+        );
+
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        perception.begin_tick(&world);
+        let body = Body::new(feet());
+        let mut mine = Mine {
+            name: "stone".to_owned(),
+            target: None,
+            waited: 0,
+            tool_waited: 0,
+            hand: HandSelect::default(),
+            pickup: None,
+            dig_through: None,
+        };
+        let mut ctx = Ctx {
+            tick: 0,
+            body: &body,
+            world: &world,
+            perception: &mut perception,
+            style: praxion_planner::Personality::default(),
+        };
+        let _ = mine.tick(&mut ctx, false);
+        assert_eq!(
+            mine.target,
+            Some(dry),
+            "the wet stone is nearer but cannot be worked"
+        );
     }
 }

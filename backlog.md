@@ -51,6 +51,10 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   removed as tautological. The same fixture is needed for tests of the walk-back cap (`EXPLORE_MAX_WALK_BACKS`),
   the empty walk-back/frontier plan skips, the look-around ending when a target is found mid-turn, and
   `open_to_sky` against a real heightmap (GLM review `logs/review/r1108/r-explore-fixes.answer.txt` Q6).
+- `craft` vs `near(crafting_table, 4)` disagree (autonomous run 2, seed 202,
+  `runs/test-body-774ebe1d772149d8b028db880afe62eb`): `get_stone_sword` chose its craft rule (near true) and `craft`
+  failed `needs_table` after 195 ticks. Same class as wet stone (near vs mine): give craft and near one predicate
+  (the table known within 4 and reachable to click), or have craft walk until it sees the table.
 - Watch: the `place` registry budget (80 ticks) is tight with human aiming (GLM review, about 74-81
   ticks worst case); check for place timeouts in the first live runs.
 - Decision owed (user): the raw-store/perception boundary in architecture §4/§5.1 is not enforced in

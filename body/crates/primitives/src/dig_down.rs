@@ -25,11 +25,13 @@
 use azalea_core::position::BlockPos;
 use praxion_headless::{Click, ControlFrame};
 use praxion_interpreter::Outcome;
+use praxion_perception::exposes_fluid;
 use praxion_planner::{blocks, center};
 use praxion_world::BlockState;
 
 use crate::common::{HandSelect, ToolStep, aim_precise, hold_tool, idle};
-use crate::mine::{block_gone, exposes_fluid, nearest_dry_known_block, pickup_frame};
+use crate::frontier::nearest_known_block;
+use crate::mine::{block_gone, pickup_frame};
 use crate::runner::{Ctx, IntentSpec};
 
 /// How deep the staircase may go below where the call started.
@@ -286,10 +288,12 @@ impl DigDown {
         // The stop condition is checked between digs only: a dig in flight
         // always settles its receipt first.
         if self.walking.is_none()
-            && nearest_dry_known_block(
-                ctx,
+            && nearest_known_block(
+                ctx.perception,
+                ctx.world,
                 &self.wanted,
                 praxion_rules::registry::EXPLORE_NEAR_RADIUS,
+                &[],
             )
             .is_some()
         {

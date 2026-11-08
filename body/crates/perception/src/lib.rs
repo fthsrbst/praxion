@@ -24,6 +24,7 @@ mod see_through;
 mod sight;
 mod sweep;
 mod view;
+mod workable;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,7 @@ pub use config::{
 pub use known::Remembered;
 pub use ledger::{FactKind, Ledger, LedgerEntry, QueryKind};
 pub use sweep::Sweep;
+pub use workable::{exposes_fluid, workable};
 
 use sight::{CellReader, CrossedChunks, SightTable};
 
@@ -346,7 +348,10 @@ impl Perception {
     }
 
     /// The nearest cell of the known map within `radius` of the eye whose
-    /// remembered state `accept` returns true for, with the eye distance.
+    /// remembered cell `accept` returns true for, with the eye distance.
+    ///
+    /// `accept` gets the cell as well as its state so a caller can apply the
+    /// [`workable`] rule, which reads the cell's neighbours.
     ///
     /// This is the one query behind both `near(block, r)` and `explore`: they
     /// must agree, or a skill would think nothing is near while `explore`
@@ -358,13 +363,13 @@ impl Perception {
         world: &World,
         radius: u32,
         exclude: impl Fn(BlockPos) -> bool,
-        mut accept: impl FnMut(BlockState) -> bool,
+        mut accept: impl FnMut(BlockPos, BlockState) -> bool,
     ) -> Option<(BlockPos, f64)> {
         let eye = self.eye(world)?;
         let pos = self
             .known
             .nearest_seen(world, eye.to_block_pos_floor(), radius, |pos, state| {
-                !exclude(pos) && accept(state)
+                !exclude(pos) && accept(pos, state)
             })?;
         Some((pos, eye.distance_to(pos.center())))
     }

@@ -18,7 +18,7 @@
 
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_interpreter::{Facts as InterpreterFacts, IntValue, Truth};
-use praxion_perception::{Answer, Caller, Perception};
+use praxion_perception::{Answer, Caller, Perception, workable};
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::{ItemStack, World};
 
@@ -158,12 +158,18 @@ pub fn count_in(inventory: &[ItemStack], wanted: &str) -> u32 {
 /// known yet.
 ///
 /// The answer comes from the perception known map, exactly like `explore`'s
-/// completion check (docs/rule-lists.md): a target is near when a cell this
-/// perception has seen inside `radius` holds it. It spends no rays, and it
+/// completion check (docs/rule-lists.md): a target is near when a workable cell
+/// this perception has seen inside `radius` holds it. It spends no rays, and it
 /// answers `Some(false)` when the map knows of none, so `not near(T, R)` can
 /// start an exploration. A ray-based answer would disagree with `explore` when
 /// a remembered cell is out of sight, which made a skill restart an explore
 /// that finished instantly, forever.
+///
+/// A cell `mine` would refuse to break — one that holds back water or lava —
+/// does not count, so `near(stone, r)` cannot end a search on a lake-bed stone
+/// `mine` then rejects with `no_block` (seed 202 live run 2026-11-08). Both
+/// sides ask the same [`workable`] rule, with the raw world as the neighbour
+/// reader; that only ever removes a candidate, it never invents one.
 pub fn near_block(
     perception: &mut Perception,
     world: &World,
@@ -178,13 +184,14 @@ pub fn near_block(
     } else {
         None
     };
-    let found = perception.nearest_known(world, radius, |_| false, |state| {
+    let found = perception.nearest_known(world, radius, |_| false, |pos, state| {
         let kind = BlockKind::from(state);
-        match (tag, wanted_kind) {
+        let matches = match (tag, wanted_kind) {
             (Some(tag), _) => praxion_gamedata::block_in_tag(kind.to_str(), tag),
             (None, Some(wanted_kind)) => kind == wanted_kind,
             (None, None) => false,
-        }
+        };
+        matches && workable(pos, state, |cell| world.block_state(cell))
     });
     Some(found.is_some())
 }

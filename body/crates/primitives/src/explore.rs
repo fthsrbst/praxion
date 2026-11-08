@@ -1094,6 +1094,42 @@ mod tests {
     }
 
     #[test]
+    fn explore_does_not_finish_on_a_stone_that_holds_back_water() {
+        use crate::test_world::{set_block, swept, world};
+
+        // Seed 202: the only stone in reach was a lake bed's. If `near` reports
+        // it, explore returns instantly and the skill calls `mine`, which
+        // refuses the wet cell and fails with `no_block`.
+        let mut wet_world = world();
+        let wet = BlockPos::new(0, 64, 2);
+        set_block(&mut wet_world, wet, BlockState::from(BlockKind::Stone));
+        set_block(
+            &mut wet_world,
+            BlockPos::new(0, 65, 2),
+            BlockState::from(BlockKind::Water),
+        );
+        let perception = swept(&wet_world);
+        assert!(
+            perception.known(wet).is_some(),
+            "the sweep reached the wet stone"
+        );
+        assert_eq!(
+            near_block(&perception, &wet_world, "stone", EXPLORE_NEAR_RADIUS),
+            Some(false),
+            "explore must not complete on a cell it would refuse to mine"
+        );
+
+        // A dry stone counts, so the false above is the wetness, not the map.
+        let mut dry_world = world();
+        set_block(&mut dry_world, wet, BlockState::from(BlockKind::Stone));
+        let perception = swept(&dry_world);
+        assert_eq!(
+            near_block(&perception, &dry_world, "stone", EXPLORE_NEAR_RADIUS),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn an_empty_plan_is_already_here_only_at_the_start_cell() {
         // `explore` asks for `Goal::Block`, which means exactly one cell. An
         // empty successful plan can only mean the body already stands on it;

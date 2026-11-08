@@ -271,15 +271,16 @@ pub(crate) fn held_matches(world: &World, wanted: &str) -> bool {
 
 /// The nearest visible block of `wanted` within `radius`.
 pub(crate) fn block_target(ctx: &mut Ctx<'_>, wanted: &str, radius: u32) -> Option<BlockPos> {
-    block_target_where(ctx, wanted, radius, |_| true)
+    block_target_where(ctx, wanted, radius, |_, _| true)
 }
 
-/// The nearest visible `wanted` block within `radius` that `accept` allows.
+/// The nearest visible `wanted` block within `radius` that `accept` allows for
+/// its cell and state.
 pub(crate) fn block_target_where(
     ctx: &mut Ctx<'_>,
     wanted: &str,
     radius: u32,
-    accept: impl Fn(BlockPos) -> bool,
+    accept: impl Fn(BlockPos, BlockState) -> bool,
 ) -> Option<BlockPos> {
     if let Some(tag) = wanted.strip_prefix('#') {
         let eye = ctx.perception.eye_cell(ctx.world)?;
@@ -290,7 +291,9 @@ pub(crate) fn block_target_where(
         let blocks = answer.value()?;
         return blocks
             .iter()
-            .filter(|fact| gamedata::block_in_tag(fact.kind.to_str(), tag) && accept(fact.pos))
+            .filter(|fact| {
+                gamedata::block_in_tag(fact.kind.to_str(), tag) && accept(fact.pos, fact.state)
+            })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
             .map(|fact| fact.pos);
     }
@@ -299,9 +302,11 @@ pub(crate) fn block_target_where(
         .perception
         .nearest_block(Caller::Other, ctx.world, kind, radius)
         .value()
-        .map(|fact| fact.pos)?;
-    if accept(nearest) {
-        return Some(nearest);
+        .map(|fact| (fact.pos, fact.state));
+    if let Some((pos, state)) = nearest
+        && accept(pos, state)
+    {
+        return Some(pos);
     }
     // The nearest one is refused: look at every visible one in the radius.
     let eye = ctx.perception.eye_cell(ctx.world)?;
@@ -312,7 +317,7 @@ pub(crate) fn block_target_where(
     answer
         .value()?
         .iter()
-        .filter(|fact| fact.kind == kind && accept(fact.pos))
+        .filter(|fact| fact.kind == kind && accept(fact.pos, fact.state))
         .min_by(|a, b| a.distance.total_cmp(&b.distance))
         .map(|fact| fact.pos)
 }
