@@ -36,6 +36,7 @@ from .admission import (
     estimate as admission_estimate,
 )
 from .briefing import build as build_briefing
+from .conditions import ConditionError, count_of_condition
 from .briefing import heartbeat_change
 from .curriculum import GoalProposal, Validation, goal_of, validate
 from .evidence import Evidence
@@ -427,7 +428,9 @@ class Loop:
     def _retry_stale(self, open_goal: OpenGoal) -> None:
         try:
             command_id = self.session.send_goal(
-                open_goal.skill, open_goal.proposal.condition
+                open_goal.skill,
+                open_goal.proposal.condition,
+                self._goal_args(open_goal.skill, open_goal.proposal.condition),
             )
         except PortError as error:
             self.records.finish(
@@ -811,7 +814,11 @@ class Loop:
             return
 
         try:
-            command_id = self.session.send_goal(skill, pending.proposal.condition)
+            command_id = self.session.send_goal(
+                skill,
+                pending.proposal.condition,
+                self._goal_args(skill, pending.proposal.condition),
+            )
         except PortError as error:
             self.evidence.write("command_send_failed", error=str(error), skill=skill)
             self._transition(LoopState.IDLE, reason="send_failed")
@@ -846,6 +853,19 @@ class Loop:
         self._transition(LoopState.PLAYING, reason="command_sent")
 
     # -- helpers -------------------------------------------------------- #
+    def _goal_args(self, skill: str, condition: str) -> list[str]:
+        """The count a `count(X) >= n` goal asks for, as the skill's first
+        argument when the skill takes one: `get_wood()` alone stops at its
+        default and a "collect more wood" goal settled `skill_wrong` at once
+        (autonomous run 2, 2026-11-08)."""
+        info = next((s for s in self.catalog.skills if s.name == skill), None)
+        if info is None or not info.params or "count(" not in condition:
+            return []
+        try:
+            return [str(count_of_condition(condition))]
+        except ConditionError:
+            return []
+
     def _maybe_heartbeat(self) -> None:
         if self.session.awaiting_snapshot:
             return

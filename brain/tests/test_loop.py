@@ -1112,3 +1112,19 @@ def test_protocol_error_is_recorded_and_the_loop_reconnects(tmp_path) -> None:
             assert body.connections >= 2
         finally:
             loop.close()
+
+
+def test_a_count_goal_passes_its_count_to_a_skill_with_a_parameter() -> None:
+    from praxion_brain.loop import Loop
+    from praxion_brain.skills import SkillCatalog, SkillInfo
+
+    loop = Loop.__new__(Loop)
+    loop.catalog = SkillCatalog(
+        skills=[
+            SkillInfo(name="get_wood", params=["n: int = 1"], source="", path="", origin="core"),
+            SkillInfo(name="get_crafting_table", source="", path="", origin="core"),
+        ]
+    )
+    assert loop._goal_args("get_wood", "count(#logs) >= 5") == ["5"]
+    assert loop._goal_args("get_wood", "has(oak_log)") == []
+    assert loop._goal_args("get_crafting_table", "count(crafting_table) >= 2") == []
