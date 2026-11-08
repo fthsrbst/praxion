@@ -48,7 +48,9 @@ Rules of the DSL:
   example `count(cobblestone) >= 8`; `has(item)` and `near(block, radius)` are
   already true or false.
 - Facts and arguments may use item ids, tags such as `#logs`, parameters as
-  `$n`, and integer counts.
+  `$n`, and integer counts. Prefer a tag over one variant (`#logs`, not
+  `oak_log`; `#planks`, not `oak_planks`): a skill that searches for one wood
+  type fails wherever that tree does not grow.
 - A skill may call the core skills listed below, but not itself. A core
   skill counts as one step; at most two levels of new skills may nest.
 - A skill has at most 30 rules.
