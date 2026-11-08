@@ -1272,6 +1272,55 @@ def test_a_write_route_starts_a_job_and_the_loop_keeps_playing(tmp_path) -> None
             loop.close()
 
 
+def test_repeating_the_goal_being_written_is_excluded_not_invalid(tmp_path) -> None:
+    """Run 5: the proposer repeated the learning goal; it must not escalate."""
+    started, release = threading.Event(), threading.Event()
+    proposals = [
+        proposal("has(furnace)", "get a furnace", "furnace"),
+        proposal("has(furnace)", "get a furnace", "furnace"),
+        proposal("has(coal)", "get coal", "coal"),
+    ]
+
+    def propose_fn(*args, **kwargs):
+        return proposals.pop(0)
+
+    def route_fn(goal, *args, **kwargs):
+        if goal.item == "furnace":
+            return Route(kind="write")
+        return Route(kind="play", skill="get_coal")
+
+    with FakeBody(skills={"get_coal", "get_furnace"}, facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=propose_fn,
+            route_fn=route_fn,
+            skills=catalog("get_coal"),
+            admission_options=admission_options(
+                tmp_path,
+                write_fn=furnace_write_fn,
+                check_fn=furnace_check_fn,
+                practice_fn=gated_practice(started, release),
+            ),
+            catalog_loader=lambda: catalog("get_coal", "get_furnace"),
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            assert started.wait(4.0), "the admission job never started"
+            pump(loop, lambda: len(body.commands) >= 1, what="side goal played")
+
+            assert body.commands[0].skill == "get_coal"
+            excluded = evidence_entries(loop, "proposal_writing_excluded")
+            assert len(excluded) == 1
+            assert excluded[0]["writing"] == "get_furnace"
+            assert not evidence_entries(loop, "proposal_invalid")
+            assert loop._invalid_proposals == 0
+        finally:
+            release.set()
+            loop.close()
+
+
 def test_a_second_write_while_a_job_runs_is_deferred(tmp_path) -> None:
     started, release = threading.Event(), threading.Event()
     proposals = [

@@ -655,6 +655,19 @@ class Loop:
                 return
 
             result = validate(proposal, inventory, self.memory, self._last_proposal)
+            if self._excluded_by_job(proposal):
+                # The skill being written is not ready: ask for another goal.
+                # Not counted invalid, so the repeat of the goal that started
+                # the job does not escalate to the dearer model (run 5).
+                excluded = True
+                self.evidence.write(
+                    "proposal_writing_excluded",
+                    proposal=proposal.model_dump(),
+                    condition=proposal.condition,
+                    validation_reason=result.reason,
+                    writing=self._writing_skill(),
+                )
+                continue
             self.evidence.write(
                 "proposal_result",
                 proposal=proposal.model_dump(),
@@ -662,16 +675,6 @@ class Loop:
                 invalid_count=self._invalid_proposals,
             )
             if result.ok:
-                if self._excluded_by_job(proposal):
-                    # The skill being written is not ready: propose another goal
-                    # rather than routing into a deferred write.
-                    excluded = True
-                    self.evidence.write(
-                        "proposal_writing_excluded",
-                        proposal=proposal.model_dump(),
-                        writing=self._writing_skill(),
-                    )
-                    continue
                 self._pending = PendingGoal(
                     proposal=proposal,
                     validation=result,

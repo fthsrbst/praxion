@@ -37,6 +37,9 @@ You plan the next goal of Praxion, a Minecraft agent that plays through skills.
 - The goal must be reachable with the known skills plus at most one new skill.
 - Prefer the first unmet ladder rung, unless a prerequisite for it is missing.
 - Never repeat a goal that the briefing marks as blocked.
+- When the briefing names a skill being written, its goal cannot be played
+  yet: propose a different goal that the known skills reach, preferably one
+  that stocks what the next rungs need (more cobblestone, logs, a spare tool).
 - `condition` is guard text over inventory facts: `has(item)`,
   `count(item) >= n`, joined with `and`/`not` and parentheses. Use the item
   ids the skills and ladder use; for wood use the tags (`#logs`, `#planks`),

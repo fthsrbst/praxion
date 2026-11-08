@@ -329,7 +329,10 @@ def build(
     moment = time.time() if now is None else float(now)
     now_lines = _now_section(snapshot)
     writing_lines = (
-        ["## Background job  [admission]", f"skill being written: {writing}"]
+        [
+            "## Background job  [admission]",
+            f"skill being written: {writing} (its goal is not playable until it is admitted)",
+        ]
         if writing
         else []
     )
