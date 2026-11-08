@@ -356,7 +356,10 @@ impl BodyDriver {
         let messages = self
             .port
             .as_ref()
-            .map(|port| port.poll_incoming())
+            .map(|port| {
+                port.set_tick(tick);
+                port.poll_incoming()
+            })
             .unwrap_or_default();
         for message in messages {
             match message {

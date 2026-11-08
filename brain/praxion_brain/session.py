@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable, Mapping, Optional, Protocol
 
 from .memory import EvidenceSink
+from .conditions import is_verifiable
 from .port import (
     Bye,
     Dropped,
@@ -240,12 +241,17 @@ class BodySession:
 
     # -- sending -------------------------------------------------------- #
     def send_goal(self, skill: str, condition: str) -> str:
-        """Send one command against the current snapshot and return its id."""
+        """Send one command against the current snapshot and return its id.
+
+        Only a condition the brain can verify (inventory facts) goes to the body:
+        the body rejected others as `bad_condition` and the goal never ran. An
+        unverifiable goal still runs and is recorded unverifiable (session 10).
+        """
         if self.port.tick is None or self.port.generation is None:
             raise PortError("no snapshot yet")
         return self.port.send_command(
             skill,
-            condition=condition,
+            condition=condition if is_verifiable(condition) else None,
             budget_ticks=self.command_budget_ticks,
             expires_at_tick=int(self.port.tick) + self.port.command_ttl_ticks,
             based_on_generation=int(self.port.generation),

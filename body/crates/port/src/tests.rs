@@ -483,6 +483,14 @@ fn a_ping_is_answered_with_the_last_event_seq() {
         brain.receive_until(|message| matches!(message, BodyMessage::Pong { .. })),
         BodyMessage::Pong { seq: 3, tick: 42 }
     );
+
+    // An idle body publishes nothing; the pong still carries the live tick.
+    server.set_tick(900);
+    brain.send(&BrainMessage::Ping);
+    assert_eq!(
+        brain.receive_until(|message| matches!(message, BodyMessage::Pong { .. })),
+        BodyMessage::Pong { seq: 3, tick: 900 }
+    );
 }
 
 #[test]

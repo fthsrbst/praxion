@@ -194,6 +194,14 @@ impl PortServer {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    /// The body's current tick, stored every tick: `pong` answers with it, so
+    /// the brain's expiry arithmetic stays right while no event is published
+    /// (an idle body between goals left it minutes behind and every command
+    /// expired before it started, autonomous run 2026-11-08).
+    pub fn set_tick(&self, tick: u64) {
+        self.shared.latest_tick.store(tick, Ordering::Relaxed);
+    }
+
     /// Ask the connection thread to send `bye { reason: "shutdown" }` and stop
     /// accepting. Idempotent; dropping the server still joins the threads.
     pub fn shutdown(&self) {
