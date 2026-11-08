@@ -35,6 +35,17 @@ after a brain restart, and the body keeps playing while the brain thinks: a
 reader thread owns the socket and pings once a second even while a model call
 blocks, so the body never sees a silent brain.
 
+## Web console
+
+`run` also serves a local console (127.0.0.1 only) at <http://127.0.0.1:8765/>:
+the current mission, vitals, ladder, a live feed of decisions (click one to
+see the full prompt, response, tokens and cost), skills with their admission
+results, metrics, and a command bar (give a goal, pause/resume, stop the
+goal). `--console-port N` changes the port, `--console-port 0` turns it off.
+Your goals go before the proposer's next pick; pause stops new picks only.
+The body ignores a pop of a running intent, so "Stop goal" records the goal as
+interrupted but the skill may play on until the next command preempts it.
+
 ## Files it writes
 
 Machine-local, ignored by git (all under `local/`):

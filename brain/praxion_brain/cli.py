@@ -9,6 +9,8 @@ from pathlib import Path
 
 from . import config
 from .admission import admit
+from .console.hub import Console
+from .console.server import DEFAULT_PORT, ConsoleServer
 from .evidence import Evidence
 from .goal import Goal
 from .governor import Governor
@@ -106,6 +108,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     catalog = load_catalog()
     governor = Governor(ledger, evidence=evidence)
     port = PortClient(args.port, host=args.host)
+    console = Console(evidence=evidence, ledger=ledger, memory=memory, world_id=world_id)
+    server = None
+    if args.console_port != 0:
+        server = ConsoleServer(console, args.console_port).start()
+        print(f"console: {server.url}", flush=True)
     loop = Loop(
         port,
         world_id=world_id,
@@ -114,6 +121,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ledger=ledger,
         evidence=evidence,
         governor=governor,
+        console=console,
     )
     print(
         f"loop: world {world_id}, port {args.host}:{args.port}, "
@@ -126,6 +134,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("loop: interrupted")
     finally:
         loop.close()
+        if server is not None:
+            server.shutdown()
     return 0
 
 
@@ -167,6 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="world id under local/worlds/ (default: \"default\")",
     )
     run_parser.add_argument("--host", default="127.0.0.1")
+    run_parser.add_argument(
+        "--console-port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="web console port on 127.0.0.1 (default: 8765; 0 disables it)",
+    )
     run_parser.set_defaults(func=_cmd_run)
 
     return parser

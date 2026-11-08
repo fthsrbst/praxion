@@ -53,6 +53,8 @@ class PendingGoal:
     goal: Goal
     source: str = "llm"
     forced_skill: Optional[str] = None
+    #: ``"user"`` for a goal the console gave; ``None`` otherwise.
+    origin: Optional[str] = None
 
 
 @dataclass
@@ -126,6 +128,7 @@ class GoalRecords:
             condition=pending.proposal.condition,
             unverifiable=pending.validation.unverifiable,
             rung=pending.proposal.rung,
+            origin=pending.origin,
             status=status,
             command_id=command_id,
             skill=skill,

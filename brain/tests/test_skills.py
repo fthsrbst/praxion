@@ -31,8 +31,9 @@ CORE_NAMES = {
 }
 
 
-def test_load_catalog_reads_the_real_core_skills() -> None:
-    catalog = load_catalog()
+def test_load_catalog_reads_the_real_core_skills(tmp_path) -> None:
+    # An empty active directory: the machine's learned skills must not leak in.
+    catalog = load_catalog(active_dir=tmp_path)
     assert set(catalog.names) == CORE_NAMES
     assert all(skill.origin == "core" for skill in catalog.skills)
 

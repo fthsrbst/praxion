@@ -43,6 +43,7 @@ from .admission import (
 )
 from .briefing import build as build_briefing
 from .conditions import ConditionError, count_of_condition
+from .console.hub import Console
 from .briefing import heartbeat_change
 from .curriculum import GoalProposal, Validation, goal_of, validate
 from .evidence import Evidence
@@ -76,6 +77,8 @@ FAILURE_GAP_TICKS = 100
 FAILURE_STREAK_GAP_TICKS = 600
 #: Consecutive failed goals after which the longer gap applies.
 FAILURE_STREAK = 3
+#: The console state is republished at most this often (seconds).
+PUBLISH_SECONDS = 0.25
 
 
 class LoopState(str, Enum):
@@ -93,6 +96,7 @@ class WakeCause(str, Enum):
     BODY_WAKE = "body_wake"
     HEARTBEAT = "heartbeat"
     RECONNECT = "reconnect"
+    USER = "user"
 
 
 # --------------------------------------------------------------------------- #
@@ -123,6 +127,7 @@ class Loop:
         command_budget_ticks: int = COMMAND_BUDGET_TICKS,
         max_proposals: int = MAX_PROPOSALS,
         writer_model: str = DEFAULT_MODEL,
+        console: Console | None = None,
     ) -> None:
         self.world_id = world_id
         self.memory = memory
@@ -164,6 +169,11 @@ class Loop:
         self._step_failed = False
         self._consecutive_failures = 0
         self._next_pick_tick = 0
+        self._console = console
+        self._paused = False
+        self._user_goals: list[GoalProposal] = []
+        self._last_route: Optional[dict[str, Any]] = None
+        self._last_publish = -float("inf")
 
         self.session = BodySession(
             port,
@@ -227,6 +237,7 @@ class Loop:
         if self._stopped:
             return self.state
 
+        self._apply_controls()
         self._maybe_heartbeat()
         message = self.session.poll(timeout if self.session.connected else 0.0)
         if message is not None:
@@ -248,6 +259,7 @@ class Loop:
         if not self._step_failed:
             self._step_errors = 0
         self._step_failed = False
+        self._publish()
         return self.state
 
     def _on_step_error(self, error: BaseException) -> None:
@@ -471,7 +483,9 @@ class Loop:
     # -- state machine -------------------------------------------------- #
     def _advance(self) -> None:
         if self.state == LoopState.IDLE and self._wake is not None:
-            if not self._pick_ready():
+            if self._paused:
+                return
+            if not self._user_goals and not self._pick_ready():
                 # The gap after a failure has not passed yet; keep the wake
                 # pending and let the next step (heartbeat/poll) try again.
                 return
@@ -559,6 +573,8 @@ class Loop:
         # while the brain was writing; read them before proposing or validating.
         self.session.refresh()
         inventory = self._inventory()
+        if self._pick_user_goal(inventory):
+            return
         if self.governor.code_only:
             self._pick_code_only("governor_code_only")
             return
@@ -601,6 +617,28 @@ class Loop:
             )
 
         self._pick_code_only("proposals_invalid")
+
+    def _pick_user_goal(self, inventory: dict[str, int]) -> bool:
+        """The user's goals come before the proposer; an invalid one is dropped."""
+        while self._user_goals:
+            proposal = self._user_goals.pop(0)
+            result = validate(proposal, inventory, self.memory, self._last_proposal)
+            self.evidence.write(
+                "user_goal_result",
+                proposal=proposal.model_dump(),
+                validation=result.model_dump(),
+            )
+            if result.ok:
+                self._pending = PendingGoal(
+                    proposal=proposal,
+                    validation=result,
+                    goal=goal_of(proposal, result),
+                    origin="user",
+                )
+                self._last_proposal = proposal
+                self._transition(LoopState.ROUTING, reason="user_goal")
+                return True
+        return False
 
     def _proposal_call(self, briefing: str) -> tuple[Optional[GoalProposal], str]:
         """One proposal call with its deadline; ``(None, reason)`` when it fails."""
@@ -713,6 +751,13 @@ class Loop:
                 skill=pending.forced_skill,
                 condition=pending.proposal.condition,
             )
+            self._last_route = {
+                "decision": "play",
+                "skill": pending.forced_skill,
+                "scores": None,
+                "condition": pending.proposal.condition,
+                "source": "code_only",
+            }
             self._play()
             return
 
@@ -754,6 +799,12 @@ class Loop:
             scores=routed.scores,
             condition=pending.proposal.condition,
         )
+        self._last_route = {
+            "decision": routed.kind,
+            "skill": routed.skill,
+            "scores": routed.scores,
+            "condition": pending.proposal.condition,
+        }
         if routed.kind == "play":
             skill = routed.skill or pending.validation.skill_name
             if not skill:
@@ -911,6 +962,149 @@ class Loop:
         )
         self._pending = None
         self._transition(LoopState.PLAYING, reason="command_sent")
+
+    # -- the console ---------------------------------------------------- #
+    def _apply_controls(self) -> None:
+        """Apply what the console queued; each request is written to evidence."""
+        if self._console is None:
+            return
+        for request in self._console.control.drain():
+            action = request.get("action")
+            result = "ok"
+            extra: dict[str, Any] = {}
+            if action == "pause":
+                self._paused = True
+            elif action == "resume":
+                self._paused = False
+                if self.state == LoopState.IDLE:
+                    self._set_wake(WakeCause.USER)
+            elif action == "stop_goal":
+                result, extra = self._stop_goal()
+            elif action == "new_goal":
+                result = self._queue_user_goal(request)
+            else:
+                result = "unknown_action"
+            self.evidence.write(
+                "console_control",
+                action=action,
+                text=request.get("text"),
+                condition=request.get("condition"),
+                result=result,
+                **extra,
+            )
+
+    def _stop_goal(self) -> tuple[str, dict[str, Any]]:
+        """Stop the goal being played, or cancel the one being prepared.
+
+        The body ignores a pop of a *running* intent (it may pop only a done or
+        suspended one), so the intent state is reported: ``pop_sent`` is a
+        request, not proof the skill stopped.
+
+        While no goal is open, a stop cancels the pick, route or write in
+        flight and drops the goals waiting behind it: it is never consumed with
+        no effect and never lets the cancelled pick send a command.
+        """
+        opened = self._open_goal
+        if opened is not None:
+            if opened.intent_id is None:
+                return "no_intent_yet", {"goal_id": opened.record.goal_id}
+            stack = (self.session.snapshot or {}).get("stack") or []
+            entry = next((e for e in stack if e.get("intent_id") == opened.intent_id), None)
+            extra = {
+                "goal_id": opened.record.goal_id,
+                "intent_id": opened.intent_id,
+                "intent_state": entry.get("state") if entry else None,
+            }
+            try:
+                self.session.port.pop(opened.intent_id)
+            except PortError as error:
+                return f"pop_failed: {error}", extra
+            self.records.finish(
+                opened.record,
+                status="interrupted",
+                failure_kind="stopped_by_user",
+                ticks=opened.ticks_since(self.session.tick),
+                source="console",
+            )
+            return "pop_sent", extra
+
+        pending = self._pending
+        if (
+            pending is None
+            and not self._user_goals
+            and self.state
+            not in (LoopState.PICKING, LoopState.ROUTING, LoopState.WRITING)
+        ):
+            return "no_goal", {}
+        self._pending = None
+        self._wake = None
+        self._user_goals.clear()
+        self._transition(LoopState.IDLE, reason="stop_goal")
+        extra = {}
+        if pending is not None:
+            extra["cancelled_condition"] = pending.proposal.condition
+        return "pick_cancelled", extra
+
+    def _queue_user_goal(self, request: Mapping[str, Any]) -> str:
+        """Queue the console's goal; the condition is what can be verified."""
+        condition = str(request.get("condition") or "").strip()
+        text = str(request.get("text") or "").strip()
+        if not condition:
+            return "no_condition"
+        self._user_goals.append(
+            GoalProposal(text=text or condition, condition=condition, rationale="user goal")
+        )
+        if self.state == LoopState.IDLE:
+            self._set_wake(WakeCause.USER)
+        return "queued"
+
+    def _publish(self) -> None:
+        """Hand the console a fresh read-only state (copy on update, no lock)."""
+        if self._console is None:
+            return
+        now = time.monotonic()
+        if now - self._last_publish < PUBLISH_SECONDS:
+            return
+        self._last_publish = now
+        snapshot = self.session.snapshot or {}
+        opened = self._open_goal
+        proposal = self._last_proposal
+        self._console.publish(
+            {
+                "world_id": self.world_id,
+                "state": self.state.value,
+                "paused": self._paused,
+                "connected": self.session.connected,
+                "wake": self._wake.value if self._wake is not None else None,
+                "tick": self.session.tick,
+                "generation": self.session.generation,
+                "owner": snapshot.get("owner"),
+                "facts": snapshot.get("facts"),
+                "stack": snapshot.get("stack"),
+                "goal": None
+                if opened is None
+                else {
+                    "goal_id": opened.record.goal_id,
+                    "text": opened.record.text,
+                    "condition": opened.record.condition,
+                    "skill": opened.skill,
+                    "origin": opened.record.origin,
+                    "sent_tick": opened.sent_tick,
+                    "ticks": opened.ticks_since(self.session.tick),
+                },
+                "proposal": proposal.model_dump() if proposal is not None else None,
+                "route": self._last_route,
+                "ladder": ladder_progress(self._inventory()).model_dump(),
+                "governor": {
+                    "code_only": self.governor.code_only,
+                    "breaker": self.governor.breaker_state,
+                    "hard_stop_usd": self.governor.hard_stop_usd,
+                    "spent_session": self.governor.spent_session(),
+                },
+                "user_goals": len(self._user_goals),
+                "updated": self._wall_clock(),
+            }
+        )
 
     # -- helpers -------------------------------------------------------- #
     def _send_goal(self, skill: str, condition: str) -> str:

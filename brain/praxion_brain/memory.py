@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -61,6 +62,8 @@ class GoalRecord(BaseModel):
     condition: str
     unverifiable: bool = False
     rung: Optional[str] = None
+    #: ``user`` for a goal given through the console.
+    origin: Optional[Literal["user"]] = None
     status: Literal[
         "open", "done", "unverified", "interrupted", "failed", "blocked"
     ] = "open"
@@ -148,6 +151,16 @@ class Memory:
         self._evidence = evidence
         self._best_rungs: Optional[int] = None
         self._without_progress = 0
+        # Goals are read incrementally: the console polls the state once a
+        # second and the history only grows, so only appended lines are parsed.
+        self._goals_lock = threading.RLock()
+        self._goals: Dict[str, GoalRecord] = {}
+        self._goals_offset = 0  # bytes of goals.jsonl already indexed
+        self._goals_stamp: Optional[tuple[int, int]] = None  # (size, mtime_ns)
+        self._goal_lines = 0  # lines consumed, for the warnings
+        self._failures_cache: Optional[Dict[str, FailureEntry]] = None
+        #: Goal lines parsed so far (a cache diagnostic, not state).
+        self.goals_parsed = 0
 
     def now(self) -> float:
         return float(self._clock())
@@ -213,23 +226,84 @@ class Memory:
             yield number, payload
 
     def goals(self) -> list[GoalRecord]:
-        """Every goal, latest line per ``goal_id``, in last-write order."""
-        latest: Dict[str, GoalRecord] = {}
-        for number, payload in self._read_lines(self.goals_path):
+        """Every goal, latest line per ``goal_id``, in last-write order.
+
+        The file is read incrementally (:meth:`_refresh_goals`): a poll of the
+        console state parses only the lines appended since its last look, never
+        the whole unbounded history.
+        """
+        with self._goals_lock:
+            self._refresh_goals()
+            return list(self._goals.values())
+
+    def _refresh_goals(self) -> None:
+        """Extend the goal index from the end of ``goals.jsonl``; lock held."""
+        try:
+            stat = self.goals_path.stat()
+        except OSError:
+            if self._goals or self._goals_offset:
+                self._goals.clear()
+                self._goals_offset = 0
+                self._goal_lines = 0
+                self._goals_stamp = None
+                self._failures_cache = None
+            return
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        if stamp == self._goals_stamp:
+            return
+        if stat.st_size < self._goals_offset:  # truncated or replaced
+            self._goals.clear()
+            self._goals_offset = 0
+            self._goal_lines = 0
+            self._failures_cache = None
+        if stat.st_size > self._goals_offset:
             try:
-                record = GoalRecord.model_validate(payload)
-            except Exception as error:  # pydantic's message names the field
-                _LOGGER.warning(
-                    "skipping invalid goal line %d in %s: %s",
-                    number,
-                    self.goals_path,
-                    error,
-                )
-                continue
-            # Re-insert so dict order follows the newest line.
-            latest.pop(record.goal_id, None)
-            latest[record.goal_id] = record
-        return list(latest.values())
+                with self.goals_path.open("rb") as handle:
+                    handle.seek(self._goals_offset)
+                    chunk = handle.read(stat.st_size - self._goals_offset)
+            except OSError:
+                return
+            position = self._goals_offset
+            for raw in chunk.splitlines(keepends=True):
+                if not raw.endswith(b"\n"):
+                    break  # a line still being written; keep the stamp stale
+                position += len(raw)
+                self._goal_lines += 1
+                self.goals_parsed += 1
+                self._consume_goal_line(self._goal_lines, raw)
+            self._goals_offset = position
+        self._goals_stamp = (
+            stamp if self._goals_offset == stat.st_size else None
+        )
+
+    def _consume_goal_line(self, number: int, raw: bytes) -> None:
+        """Parse one appended goal line into the index; lock held."""
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            _LOGGER.warning(
+                "skipping corrupt line %d in %s: %s", number, self.goals_path, error
+            )
+            return
+        if not isinstance(payload, dict):
+            _LOGGER.warning(
+                "skipping corrupt line %d in %s: not an object", number, self.goals_path
+            )
+            return
+        try:
+            record = GoalRecord.model_validate(payload)
+        except Exception as error:  # pydantic's message names the field
+            _LOGGER.warning(
+                "skipping invalid goal line %d in %s: %s",
+                number,
+                self.goals_path,
+                error,
+            )
+            return
+        # Re-insert so dict order follows the newest line.
+        self._goals.pop(record.goal_id, None)
+        self._goals[record.goal_id] = record
+        self._failures_cache = None
 
     def recent(self, n: int) -> list[GoalRecord]:
         """The newest ``n`` goals, newest first."""
@@ -259,10 +333,18 @@ class Memory:
 
         Only ``failed`` records count. ``interrupted`` (the brain lost the
         intent, A1) and ``unverified`` (a done the body could not verify, A7)
-        are not failures and never block a goal.
+        are not failures and never block a goal. Derived once per goal-history
+        change: the console asks for it for every rung on every state poll.
         """
+        with self._goals_lock:
+            self._refresh_goals()
+            if self._failures_cache is None:
+                self._failures_cache = self._derive_failures()
+            return dict(self._failures_cache)
+
+    def _derive_failures(self) -> Dict[str, FailureEntry]:
         groups: Dict[str, list[GoalRecord]] = {}
-        for record in self.goals():
+        for record in self._goals.values():
             if record.status != "failed":
                 continue
             key = normalize_condition(record.condition)

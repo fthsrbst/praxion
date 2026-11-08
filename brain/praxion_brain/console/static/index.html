@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Praxion Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="mark" aria-hidden="true"></span>praxion</div>
+    <div class="top-meta">
+      <span id="world" class="muted"></span>
+      <span id="link" class="link" role="status"><i class="live-dot"></i><span>connecting</span></span>
+    </div>
+  </header>
+
+  <main class="bento">
+    <section id="hero" class="card hero" aria-label="Current mission"></section>
+    <section id="spend" class="card spend" aria-label="Spend"></section>
+    <section id="ladder" class="card wide" aria-label="Ladder"></section>
+    <section id="feed" class="card feed" aria-label="Live feed"></section>
+    <section id="metrics" class="card metrics" aria-label="Metrics"></section>
+    <section id="skills" class="card wide" aria-label="Skills"></section>
+  </main>
+
+  <form id="dock" class="dock" autocomplete="off">
+    <label class="sr" for="goal-text">Goal</label>
+    <input id="goal-text" type="text" placeholder="What to do, e.g. get a furnace" maxlength="200">
+    <label class="sr" for="goal-cond">Condition (required)</label>
+    <input id="goal-cond" type="text" class="mono" required placeholder="e.g. has(furnace) or count(cobblestone) >= 16" maxlength="200">
+    <button type="submit" class="btn primary" id="give">Give goal</button>
+    <button type="button" class="btn" id="pause-btn">Pause</button>
+    <button type="button" class="btn danger" id="stop-btn">Stop goal</button>
+    <span id="dock-note" class="dock-note" role="status" aria-live="polite"></span>
+  </form>
+
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="Inspector" hidden tabindex="-1"></aside>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
