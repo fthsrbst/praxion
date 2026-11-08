@@ -2297,6 +2297,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxion-port"
+version = "0.0.0"
+dependencies = [
+ "praxion-eventlog",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "praxion-primitives"
 version = "0.0.0"
 dependencies = [

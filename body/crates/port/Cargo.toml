@@ -1,0 +1,16 @@
+[package]
+name = "praxion-port"
+description = "The body port: length-prefixed JSON wire types, framing and the loopback server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "praxion_port"
+path = "src/lib.rs"
+
+[dependencies]
+praxion-eventlog = { path = "../eventlog" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
