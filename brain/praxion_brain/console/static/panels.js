@@ -3,7 +3,7 @@ import { h, icon, svg, el, money, num, sentence, sparkPath } from "./util.js";
 
 const STATE_LABEL = {
   idle: ["Idle", "dot"], picking: ["Picking a goal", "brain"], routing: ["Routing", "route"],
-  writing: ["Writing a skill", "pen"], playing: ["Playing", "play"], starting: ["Starting", "dot"],
+  playing: ["Playing", "play"], starting: ["Starting", "dot"],
 };
 
 // -- hero --------------------------------------------------------------- //
@@ -20,6 +20,7 @@ function buildHero() {
   const root = el("hero");
   hero = {
     chipIcon: h("span"), chipText: h("span"), chip: h("span.chip"),
+    learning: h("span.chip.learning", { hidden: true }),
     tick: h("span.chip", { title: "Body tick" }), wake: h("span.muted"),
     mission: h("h1.mission"), sub: h("p.mission-sub"), progress: h("i"),
     health: bar("Health"), food: bar("Food"), air: bar("Air"),
@@ -27,7 +28,7 @@ function buildHero() {
   };
   hero.chip.append(h("i.live-dot"), hero.chipIcon, hero.chipText);
   root.replaceChildren(
-    h("div.eyebrow", {}, hero.chip, hero.tick, hero.wake),
+    h("div.eyebrow", {}, hero.chip, hero.learning, hero.tick, hero.wake),
     hero.mission, hero.sub,
     h("div.progress", {}, hero.progress),
     h("div.vitals", {}, hero.health.node, hero.food.node, hero.air.node),
@@ -48,10 +49,17 @@ export function renderHero(s) {
   if (!hero) buildHero();
   const [label, ic] = STATE_LABEL[s.state] || [s.state, "dot"];
   const paused = s.paused;
-  hero.chip.classList.toggle("live", !paused && (s.state === "playing" || s.state === "writing"));
+  hero.chip.classList.toggle("live", !paused && (s.state === "playing" || s.state === "picking"));
   hero.chip.classList.toggle("paused", paused);
   hero.chipIcon.replaceChildren(icon(paused ? "pause" : ic));
   hero.chipText.textContent = paused ? "Paused" : label;
+  const learning = s.learning;
+  hero.learning.hidden = !learning;
+  // textContent, never innerHTML: the skill name comes from a model.
+  hero.learning.textContent = learning ? `Learning: ${learning.skill}` : "";
+  hero.learning.title = learning
+    ? `attempt ${(learning.attempt ?? 0) + 1}${learning.seed != null ? `, practice seed ${learning.seed}` : ""}`
+    : "";
   hero.tick.textContent = s.tick === null || s.tick === undefined ? "offline" : `tick ${num(s.tick)}`;
   hero.wake.textContent = s.connected === false ? "body disconnected" : s.wake ? `waking: ${s.wake}` : "";
 

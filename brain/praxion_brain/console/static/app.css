@@ -86,6 +86,8 @@ h2 { font: 700 15px var(--display); letter-spacing: .02em; text-transform: upper
 .chip.live { background: var(--accent); color: var(--accent-ink); }
 .chip.live .live-dot { background: var(--accent-ink); }
 .chip.paused { background: var(--warn); color: #fff; }
+.chip.learning { background: transparent; border: 1px dashed var(--line); color: var(--muted); font-weight: 500; }
+.chip.learning::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2s ease-out infinite; }
 .chip svg { width: 16px; height: 16px; }
 .mission { font: 800 clamp(34px, 5vw, 60px)/1.02 var(--display); letter-spacing: -.035em; margin: 0 0 8px; transition: opacity .35s; }
 .mission.swap { opacity: 0; }

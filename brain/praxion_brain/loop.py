@@ -4,7 +4,10 @@ A small state machine over one :class:`~praxion_brain.session.BodySession`:
 
 ```
 IDLE --wake--> PICKING --proposal--> ROUTING --play----------> PLAYING
-                                             \\--write--> WRITING --admit--> PLAYING
+                                       \\--write--> admission job (background)
+                                                       \\--> IDLE at once
+job admitted --> the next pick plays that goal
+job rejected/inconclusive --> the goal is recorded failed, with the usual gap
 PLAYING --settled/failed--> IDLE (next pick on the wake)
 ```
 
@@ -16,6 +19,20 @@ through :meth:`~praxion_brain.governor.Governor.call` with the deadline of its
 class, so no provider can hang the loop (section 3.7). A failing step is
 recorded and the loop reconnects or stops cleanly; it never dies on one bad
 frame.
+
+Admission takes minutes, so it runs as a background job
+(:class:`~praxion_brain.admission_job.AdmissionJob`): the loop records the goal
+as open, starts the job and returns to IDLE at once, so the body keeps playing.
+While the job runs, the pick excludes its goal (the briefing names it) and a
+proposal that would need a second write is deferred with the failure gap, not
+recorded as a failure. When the job ends, an admitted skill is the next pick; a
+rejection or an inconclusive run fails the goal with its admission status. A
+console stop while the job runs marks it, so its goal is recorded
+``interrupted``/``stopped_by_user`` when it ends and is never played, even if
+the admission succeeded. Closing the loop reaps a job that already finished,
+cancels one still running (killing its practice stack; nothing goes active) and
+records that goal interrupted; the final state is published so the console
+drops the learning badge.
 
 A failed goal is not retried at once: the pick waits
 :data:`FAILURE_GAP_TICKS` body ticks (or :data:`FAILURE_STREAK_GAP_TICKS`
@@ -41,7 +58,9 @@ from .admission import (
     admit,
     estimate as admission_estimate,
 )
+from .admission_job import AdmissionJob
 from .briefing import build as build_briefing
+from .cancel import CancelToken
 from .conditions import ConditionError, count_of_condition
 from .console.hub import Console
 from .briefing import heartbeat_change
@@ -85,7 +104,6 @@ class LoopState(str, Enum):
     IDLE = "idle"
     PICKING = "picking"
     ROUTING = "routing"
-    WRITING = "writing"
     PLAYING = "playing"
 
 
@@ -97,6 +115,9 @@ class WakeCause(str, Enum):
     HEARTBEAT = "heartbeat"
     RECONNECT = "reconnect"
     USER = "user"
+    WRITE_STARTED = "write_started"
+    WRITE_DEFERRED = "write_deferred"
+    SKILL_ADMITTED = "skill_admitted"
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +190,10 @@ class Loop:
         self._step_failed = False
         self._consecutive_failures = 0
         self._next_pick_tick = 0
+        #: The one admission job in flight; the loop starts no second one.
+        self._job: Optional[AdmissionJob] = None
+        #: An admitted skill whose goal waits for the next pick.
+        self._written: Optional[PendingGoal] = None
         self._console = console
         self._paused = False
         self._user_goals: list[GoalProposal] = []
@@ -206,9 +231,19 @@ class Loop:
         return self
 
     def close(self) -> None:
+        """Stop for good: reap a finished job, cancel a running one, publish.
+
+        A job that already finished is read here, so its real outcome reaches
+        the record and the evidence (an admitted skill stays active); only a
+        job still running is recorded ``interrupted``. The final publish clears
+        the console's learning badge, which would otherwise outlive the loop.
+        """
         self._stopped = True
+        self._reap_job()
+        self._abandon_job()
         self.session.close()
         self.evidence.write("loop_stopped", world_id=self.world_id, state=self.state.value)
+        self._publish(force=True)
 
     def stop(self) -> None:
         self._stopped = True
@@ -252,6 +287,7 @@ class Loop:
         ):
             self.session.try_reconnect()
 
+        self._reap_job()
         self._advance()
         if self.session.terminated:
             # A terminal bye can also arrive inside a snapshot refresh.
@@ -361,7 +397,10 @@ class Loop:
     def _recover(self, snapshot: Snapshot, cause: WakeCause) -> None:
         """A1/A8: adopt every live intent, then settle what is left open."""
         recovery = self.records.recover(
-            snapshot.stack, tick=snapshot.tick, cause=cause.value
+            snapshot.stack,
+            tick=snapshot.tick,
+            cause=cause.value,
+            keep=self._job_goal_ids(),
         )
         if recovery.adopted is not None:
             self._last_proposal = recovery.adopted.proposal
@@ -426,6 +465,12 @@ class Loop:
                 intent_id=open_goal.intent_id,
                 generation=event.get("generation"),
             )
+            if open_goal.stop_pending and open_goal.intent_id is not None:
+                try:
+                    self.session.port.pop(open_goal.intent_id)
+                    self.evidence.write("stop_sent_on_accept", intent_id=open_goal.intent_id)
+                except PortError as error:
+                    self.evidence.write("stop_failed", error=str(error))
             return
         if state in ("rejected", "expired"):
             if (
@@ -444,9 +489,23 @@ class Loop:
             )
             return
         if state == "settled":
+            outcome = event.get("outcome")
+            if outcome in ("cancelled", "popped"):
+                # The body confirmed the console's stop: a pop of a running
+                # intent settles `cancelled`, a pop of a done or suspended one
+                # settles `popped`. Only now is the goal recorded: a pop on its
+                # own is a request, not proof the skill stopped (§5.4).
+                self.records.finish(
+                    open_goal.record,
+                    status="interrupted",
+                    failure_kind="stopped_by_user",
+                    ticks=open_goal.ticks_since(self.session.tick),
+                    source="console",
+                )
+                return
             condition = event.get("condition")
             status, failure_kind = settled_status(
-                event.get("outcome"),
+                outcome,
                 condition,
                 open_goal.record.unverifiable,
                 event.get("failure_kind"),
@@ -496,8 +555,6 @@ class Loop:
             self._pick()
         elif self.state == LoopState.ROUTING:
             self._route()
-        elif self.state == LoopState.WRITING:
-            self._write()
 
     def _transition(self, state: LoopState, *, reason: str) -> None:
         if state == self.state:
@@ -527,27 +584,31 @@ class Loop:
         self._open_goal = None
         self._transition(LoopState.IDLE, reason=f"goal_{record.status}")
         if record.status == "failed":
-            self._consecutive_failures += 1
-            gap = (
-                FAILURE_STREAK_GAP_TICKS
-                if self._consecutive_failures >= FAILURE_STREAK
-                else FAILURE_GAP_TICKS
-            )
-            now = int(self.session.tick or 0)
-            self._next_pick_tick = now + gap
-            self.evidence.write(
-                "pick_gap",
-                ticks=gap,
-                consecutive_failures=self._consecutive_failures,
-                from_tick=now,
-                next_pick_tick=self._next_pick_tick,
-                failure_kind=record.failure_kind,
-            )
+            self._note_failure(record.failure_kind)
         else:
             self._consecutive_failures = 0
             self._next_pick_tick = 0
         self._set_wake(
             WakeCause.GOAL_SETTLED if record.status == "done" else WakeCause.GOAL_FAILED
+        )
+
+    def _note_failure(self, failure_kind: Optional[str]) -> None:
+        """One failed goal: count the streak and hold the pick for the gap."""
+        self._consecutive_failures += 1
+        gap = (
+            FAILURE_STREAK_GAP_TICKS
+            if self._consecutive_failures >= FAILURE_STREAK
+            else FAILURE_GAP_TICKS
+        )
+        now = int(self.session.tick or 0)
+        self._next_pick_tick = now + gap
+        self.evidence.write(
+            "pick_gap",
+            ticks=gap,
+            consecutive_failures=self._consecutive_failures,
+            from_tick=now,
+            next_pick_tick=self._next_pick_tick,
+            failure_kind=failure_kind,
         )
 
     def _gate(self, call_class: str, estimate: float) -> Optional[str]:
@@ -575,11 +636,14 @@ class Loop:
         inventory = self._inventory()
         if self._pick_user_goal(inventory):
             return
+        if self._pick_written_goal(inventory):
+            return
         if self.governor.code_only:
             self._pick_code_only("governor_code_only")
             return
 
         briefing = self._briefing()
+        excluded = False
         for _ in range(max(1, self.max_proposals)):
             denied = self._gate("propose", propose_estimate(self._invalid_proposals))
             if denied:
@@ -598,6 +662,16 @@ class Loop:
                 invalid_count=self._invalid_proposals,
             )
             if result.ok:
+                if self._excluded_by_job(proposal):
+                    # The skill being written is not ready: propose another goal
+                    # rather than routing into a deferred write.
+                    excluded = True
+                    self.evidence.write(
+                        "proposal_writing_excluded",
+                        proposal=proposal.model_dump(),
+                        writing=self._writing_skill(),
+                    )
+                    continue
                 self._pending = PendingGoal(
                     proposal=proposal,
                     validation=result,
@@ -616,7 +690,46 @@ class Loop:
                 invalid_count=self._invalid_proposals,
             )
 
-        self._pick_code_only("proposals_invalid")
+        self._pick_code_only("proposals_excluded" if excluded else "proposals_invalid")
+
+    def _pick_written_goal(self, inventory: dict[str, int]) -> bool:
+        """Play the goal whose skill the background admission just admitted."""
+        pending, self._written = self._written, None
+        if pending is None:
+            return False
+        # The written goal was never sent, so "same as last" does not apply: the
+        # last proposal is usually this very goal.
+        result = validate(pending.proposal, inventory, self.memory, None)
+        if result.ok:
+            pending.validation = result
+            pending.goal = goal_of(pending.proposal, result)
+            self._pending = pending
+            self._last_proposal = pending.proposal
+            self._invalid_proposals = 0
+            self._play()
+            return True
+
+        # The world moved while the skill was written; the goal is not worth a
+        # command now. Close the writing record without a failure.
+        record = pending.record
+        done = result.reason == "already_met"
+        if record is not None:
+            self.records.finish(
+                record,
+                status="done" if done else "interrupted",
+                condition_result="true" if done else None,
+                failure_kind=None if done else result.reason,
+                source="written",
+                wake=False,
+            )
+        self.evidence.write(
+            "written_goal_skipped",
+            goal_id=record.goal_id if record is not None else None,
+            condition=pending.proposal.condition,
+            reason=result.reason,
+            detail=result.detail,
+        )
+        return False
 
     def _pick_user_goal(self, inventory: dict[str, int]) -> bool:
         """The user's goals come before the proposer; an invalid one is dropped."""
@@ -685,6 +798,18 @@ class Loop:
             self._transition(LoopState.IDLE, reason="code_only_idle")
             return False
         proposal = fallback.goal
+        if self._excluded_by_job(proposal):
+            # The same goal is being written; a second command would preempt
+            # the skill the loop is about to admit.
+            self.evidence.write(
+                "code_only_writing",
+                reason=reason,
+                condition=proposal.condition,
+                skill=fallback.skill,
+                writing=self._writing_skill(),
+            )
+            self._transition(LoopState.IDLE, reason="code_only_writing")
+            return False
         # The same failure memory the proposal path validates against: two
         # failures block a goal for two hours, so code-only must idle rather
         # than send the same doomed goal again (autonomous run 2).
@@ -736,6 +861,7 @@ class Loop:
             self.catalog,
             self.governor.budget_snapshot(),
             now=self._wall_clock(),
+            writing=self._writing_skill(),
         )
 
     # -- ROUTING -------------------------------------------------------- #
@@ -814,13 +940,20 @@ class Loop:
             pending.forced_skill = skill
             self._play()
             return
-        self._transition(LoopState.WRITING, reason=f"route:{routed.kind}")
+        self._start_admission(pending)
 
-    # -- WRITING -------------------------------------------------------- #
-    def _write(self) -> None:
-        pending = self._pending
-        if pending is None:
-            self._transition(LoopState.IDLE, reason="write_without_goal")
+    # -- WRITING (background) -------------------------------------------- #
+    def _start_admission(self, pending: PendingGoal) -> None:
+        """Start the one admission job and hand the body straight back to IDLE.
+
+        The goal is recorded open (not failed) before the job starts, so the
+        history and the console show what is being learned; the job's result is
+        read in :meth:`_reap_job` on the loop thread. A second write while a job
+        runs is deferred: the skill is not ready and a second admission would
+        spend money twice for the same wait.
+        """
+        if self._job is not None:
+            self._defer_write(pending)
             return
 
         denied = self._gate("write", admission_estimate(self.writer_model))
@@ -829,84 +962,251 @@ class Loop:
                 self._play()
             return
 
-        try:
-            report = self.governor.call("admission", lambda: self._admit(pending.goal))
-        except CallTimeout as error:
-            self.governor.record_error()
-            self.evidence.write(
-                "write_timeout",
-                call=error.call_class,
-                seconds=error.seconds,
+        skill = pending.validation.skill_name or pending.goal.skill_name
+        record = self.records.new(
+            pending,
+            status="open",
+            skill=skill,
+            origin=None,
+        )
+        self.memory.append_goal(record)
+        job = AdmissionJob(
+            pending, record, skill=skill, wall_clock=self._wall_clock
+        )
+        self._job = job
+        self._pending = None
+        job.start(
+            lambda: self.governor.call(
+                "admission",
+                lambda: self._admit(
+                    pending.goal, progress=job.update, cancel=job.cancel
+                ),
+                cancel=job.cancel,
             )
-            self._write_failed("timeout", pending)
+        )
+        self.evidence.write(
+            "write_started",
+            goal_id=record.goal_id,
+            skill=skill,
+            condition=pending.proposal.condition,
+            writer_model=self.writer_model,
+        )
+        self._transition(LoopState.IDLE, reason="write_started")
+        self._set_wake(WakeCause.WRITE_STARTED)
+
+    def _defer_write(self, pending: PendingGoal) -> None:
+        """A write route while a job runs: back to IDLE with the gap, no failure."""
+        writing = self._writing_skill()
+        self._pending = None
+        self.evidence.write(
+            "write_deferred",
+            condition=pending.proposal.condition,
+            skill=pending.validation.skill_name,
+            writing=writing,
+        )
+        self._transition(LoopState.IDLE, reason="write_deferred")
+        now = int(self.session.tick or 0)
+        self._next_pick_tick = max(self._next_pick_tick, now + FAILURE_GAP_TICKS)
+        self._set_wake(WakeCause.WRITE_DEFERRED)
+
+    def _reap_job(self) -> None:
+        """Read a finished admission job; the one place its result is applied.
+
+        A job the console stopped while it ran still reports its result (an
+        admitted skill stays active) but its goal is closed interrupted and is
+        never played.
+        """
+        job = self._job
+        if job is None or not job.finished:
             return
-        except Exception as error:  # noqa: BLE001 - an admission crash is a goal failure
+        self._job = None
+        if job.abandoned:
+            return  # the shutdown path already recorded the goal
+        # The provider call itself counts for the breaker whether or not a
+        # stop arrived, so the accounting happens before the result branches.
+        if job.error is not None:
             self.governor.record_error()
+        else:
+            self.governor.record_success()
+        if job.stop_requested:
+            self._writing_stopped(job)
+            return
+        if job.error is not None:
+            error = job.error
+            if isinstance(error, CallTimeout):
+                self.evidence.write(
+                    "write_timeout",
+                    call=error.call_class,
+                    seconds=error.seconds,
+                    goal_id=job.record.goal_id,
+                    skill=job.record.skill,
+                )
+                self._writing_failed(job, "timeout", detail=str(error))
+                return
             self.evidence.write(
                 "admission_error",
                 error=f"{type(error).__name__}: {error}",
+                goal_id=job.record.goal_id,
+                skill=job.record.skill,
             )
-            self._write_failed("inconclusive_body", pending)
+            self._writing_failed(job, "inconclusive_body", detail=str(error))
             return
-        self.governor.record_success()
 
-        if report.status == "admitted":
-            self.catalog = self._catalog_loader()
-            pending.forced_skill = report.skill_name
-            pending.validation = pending.validation.model_copy(
-                update={"skill_name": report.skill_name}
-            )
-            pending.source = "written"
+        report = job.report
+        if report is None:
             self.evidence.write(
-                "admission_admitted",
-                goal_id=None,
-                skill=report.skill_name,
-                repairs=report.repairs_used,
+                "admission_error",
+                error="the admission job finished without a report",
+                goal_id=job.record.goal_id,
+                skill=job.record.skill,
             )
-            self._play()
+            self._writing_failed(job, "inconclusive_body")
             return
+        if report.status == "admitted":
+            self._writing_admitted(job, report)
+            return
+        self._writing_failed(job, report.status, detail=report.reason)
 
-        self._write_failed(report.status, pending, report=report)
+    def _writing_admitted(self, job: AdmissionJob, report: AdmissionReport) -> None:
+        """The skill is active: the next pick plays the goal that asked for it."""
+        pending = job.pending
+        self.catalog = self._catalog_loader()
+        pending.forced_skill = report.skill_name
+        pending.validation = pending.validation.model_copy(
+            update={"skill_name": report.skill_name}
+        )
+        pending.source = "written"
+        pending.record = job.record
+        self._written = pending
+        self.evidence.write(
+            "admission_admitted",
+            goal_id=job.record.goal_id,
+            skill=report.skill_name,
+            repairs=report.repairs_used,
+        )
+        if self.state == LoopState.IDLE:
+            self._set_wake(WakeCause.SKILL_ADMITTED)
 
-    def _admit(self, goal: Goal) -> AdmissionReport:
+    def _writing_failed(
+        self,
+        job: AdmissionJob,
+        failure_kind: str,
+        *,
+        detail: Optional[str] = None,
+    ) -> None:
+        """Rejected or inconclusive: close the writing record as a real failure.
+
+        The body may be playing another goal, so this never touches the
+        playing record or the state: it only feeds failure memory and the gap.
+        """
+        self.records.finish(
+            job.record,
+            status="failed",
+            failure_kind=str(failure_kind),
+            detail=detail,
+            source="admission",
+            wake=False,
+        )
+        self._note_failure(str(failure_kind))
+        if self.state == LoopState.IDLE:
+            self._set_wake(WakeCause.GOAL_FAILED)
+
+    def _writing_stopped(self, job: AdmissionJob) -> None:
+        """The console stopped while the job ran: report it, never play it.
+
+        The job ran to its own end (a practice series cannot be interrupted
+        safely mid-run), so its result reaches the evidence and an admitted
+        skill stays in ``active/``, where the body hot-loads it. Only the goal
+        is closed: ``interrupted``/``stopped_by_user``, no failure memory and
+        no play, because the user ended it.
+        """
+        report = job.report
+        if report is not None and report.status == "admitted":
+            # The file is on disk now; the catalog must know the skill even
+            # though this pick will not be the one that plays it.
+            self.catalog = self._catalog_loader()
+        self.records.finish(
+            job.record,
+            status="interrupted",
+            failure_kind="stopped_by_user",
+            source="console",
+            wake=False,
+        )
+        self.evidence.write(
+            "write_stopped",
+            goal_id=job.record.goal_id,
+            skill=job.record.skill,
+            admission_status=None if report is None else report.status,
+            error=None
+            if job.error is None
+            else f"{type(job.error).__name__}: {job.error}",
+        )
+
+    def _abandon_job(self) -> None:
+        """Stop with a job still running: cancel it, record the goal.
+
+        The thread is a daemon and is never joined: a slow practice run must not
+        hold up a shutdown. ``cancel`` kills the practice stack and stops the
+        worker at its next boundary, so its late result cannot copy a skill
+        active; ``_job`` is cleared and the record closed, so nothing reaps it.
+        """
+        job, self._job = self._job, None
+        if job is not None:
+            job.abandoned = True
+            job.cancel.set()
+            self.records.finish(
+                job.record,
+                status="interrupted",
+                failure_kind="abandoned",
+                source="shutdown",
+                wake=False,
+            )
+            self.evidence.write(
+                "write_abandoned",
+                goal_id=job.record.goal_id,
+                skill=job.record.skill,
+            )
+        written, self._written = self._written, None
+        if written is not None and written.record is not None:
+            self.records.finish(
+                written.record,
+                status="interrupted",
+                failure_kind="not_played",
+                source="shutdown",
+                wake=False,
+            )
+
+    def _admit(
+        self,
+        goal: Goal,
+        *,
+        progress: Optional[Callable[[dict[str, object]], None]] = None,
+        cancel: Optional[CancelToken] = None,
+    ) -> AdmissionReport:
         """Run admission with this loop's evidence, ledger, writer model and deadlines.
 
         The writer call carries the ``write`` deadline and the whole run the
         ``admission`` deadline (A4); tests override the writer, checker and
-        practice room through ``admission_options``.
+        practice room through ``admission_options``. ``progress`` feeds the
+        console's learning state from the job thread; ``cancel`` is the job's
+        token, so a timeout or a shutdown stops the run before it goes active.
         """
         options = dict(self._admission_options)
         options.setdefault("evidence", self.evidence)
         options.setdefault("ledger", self.ledger)
         options.setdefault("catalog", self.catalog)
         options.setdefault("writer_model", self.writer_model)
+        options.setdefault("on_progress", progress)
+        # The job's token is the admission's token: the timeout and a shutdown
+        # reach exactly the run that is being admitted.
+        options["cancel"] = cancel
         write_fn = options.get("write_fn") or write_skill
+        # The writer call is part of the same admission: a write deadline that
+        # expires stops it just like the admission deadline does.
         options["write_fn"] = lambda **kwargs: self.governor.call(
-            "write", lambda: write_fn(**kwargs)
+            "write", lambda: write_fn(**kwargs), cancel=cancel
         )
         return admit(goal, **options)
-
-    def _write_failed(
-        self,
-        failure_kind: str,
-        pending: PendingGoal,
-        *,
-        report: Optional[AdmissionReport] = None,
-    ) -> None:
-        skill = report.skill_name if report is not None else pending.validation.skill_name
-        record = self.records.new(
-            pending,
-            status="failed",
-            skill=skill,
-            origin="written" if skill else None,
-        )
-        self.records.finish(
-            record,
-            status="failed",
-            failure_kind=str(failure_kind),
-            detail=report.reason if report is not None else None,
-            source="admission",
-        )
 
     # -- PLAYING -------------------------------------------------------- #
     def _play(self) -> None:
@@ -917,6 +1217,7 @@ class Loop:
         skill = pending.forced_skill or pending.validation.skill_name
         if not skill:
             self.evidence.write("play_no_skill", condition=pending.proposal.condition)
+            self._drop_unplayed(pending, "no_skill")
             self._transition(LoopState.IDLE, reason="no_skill")
             return
         # Section 2.4: refresh the tick and generation from a snapshot right
@@ -925,6 +1226,7 @@ class Loop:
         self.session.refresh()
         if self.session.generation is None or self.session.tick is None:
             self.evidence.write("play_no_snapshot", condition=pending.proposal.condition)
+            self._drop_unplayed(pending, "no_snapshot")
             self._transition(LoopState.IDLE, reason="no_snapshot")
             return
 
@@ -932,17 +1234,31 @@ class Loop:
             command_id = self._send_goal(skill, pending.proposal.condition)
         except PortError as error:
             self.evidence.write("command_send_failed", error=str(error), skill=skill)
+            self._drop_unplayed(pending, "send_failed")
             self._transition(LoopState.IDLE, reason="send_failed")
             return
 
-        record = self.records.new(
-            pending,
-            status="open",
-            skill=skill,
-            origin=self._skill_origin(skill, pending),
-            command_id=command_id,
-        )
-        self.memory.append_goal(record)
+        if pending.record is not None:
+            # The background admission opened this record; the command continues
+            # it, so one goal is one line, not an open write plus a play.
+            record = pending.record.model_copy(
+                update={
+                    "status": "open",
+                    "command_id": command_id,
+                    "skill": skill,
+                    "skill_origin": self._skill_origin(skill, pending),
+                }
+            )
+            record = self.memory.append_goal(record)
+        else:
+            record = self.records.new(
+                pending,
+                status="open",
+                skill=skill,
+                origin=self._skill_origin(skill, pending),
+                command_id=command_id,
+            )
+            self.memory.append_goal(record)
         self._open_goal = OpenGoal(
             record=record,
             proposal=pending.proposal,
@@ -996,18 +1312,38 @@ class Loop:
     def _stop_goal(self) -> tuple[str, dict[str, Any]]:
         """Stop the goal being played, or cancel the one being prepared.
 
-        The body ignores a pop of a *running* intent (it may pop only a done or
-        suspended one), so the intent state is reported: ``pop_sent`` is a
-        request, not proof the skill stopped.
+        The body cancels a *running* intent when it is popped (stop and cancel
+        always work, architecture §5.4). The pop is a request: the record of the
+        running goal closes as interrupted only when the body's ``settled
+        outcome=cancelled`` receipt arrives (see :meth:`_on_receipt`), so the
+        console shows the stop as confirmed then. The intent state is reported
+        too, for evidence.
 
-        While no goal is open, a stop cancels the pick, route or write in
-        flight and drops the goals waiting behind it: it is never consumed with
-        no effect and never lets the cancelled pick send a command.
+        While no goal is open, a stop cancels the pick, route or admission in
+        flight and drops the goals waiting behind it. An admitted skill waiting
+        for the next pick is dropped too. A running admission job cannot be
+        stopped safely mid-practice, so it is *marked*: when it ends, its goal is
+        recorded ``interrupted``/``stopped_by_user`` and is never played, even
+        if the admission succeeded (the skill may still go active).
         """
+        written, self._written = self._written, None
+        written_condition = written.proposal.condition if written is not None else None
+        if written is not None and written.record is not None:
+            self.records.finish(
+                written.record,
+                status="interrupted",
+                failure_kind="stopped_by_user",
+                source="console",
+                wake=False,
+            )
+
         opened = self._open_goal
         if opened is not None:
             if opened.intent_id is None:
-                return "no_intent_yet", {"goal_id": opened.record.goal_id}
+                # Sent but not yet accepted: the body has no intent to pop. Keep
+                # the stop and pop on the accepted receipt, or it would be lost.
+                opened.stop_pending = True
+                return "stop_queued", {"goal_id": opened.record.goal_id}
             stack = (self.session.snapshot or {}).get("stack") or []
             entry = next((e for e in stack if e.get("intent_id") == opened.intent_id), None)
             extra = {
@@ -1015,27 +1351,28 @@ class Loop:
                 "intent_id": opened.intent_id,
                 "intent_state": entry.get("state") if entry else None,
             }
+            if written_condition is not None:
+                extra["written_cancelled"] = written_condition
             try:
                 self.session.port.pop(opened.intent_id)
             except PortError as error:
                 return f"pop_failed: {error}", extra
-            self.records.finish(
-                opened.record,
-                status="interrupted",
-                failure_kind="stopped_by_user",
-                ticks=opened.ticks_since(self.session.tick),
-                source="console",
-            )
             return "pop_sent", extra
 
         pending = self._pending
         if (
             pending is None
             and not self._user_goals
-            and self.state
-            not in (LoopState.PICKING, LoopState.ROUTING, LoopState.WRITING)
+            and self._job is None
+            and written_condition is None
+            and self.state not in (LoopState.PICKING, LoopState.ROUTING)
         ):
             return "no_goal", {}
+        job = self._job
+        if job is not None:
+            # The job cannot stop mid-practice: mark it so the reap closes its
+            # goal as the user's stop instead of playing it.
+            job.stop_requested = True
         self._pending = None
         self._wake = None
         self._user_goals.clear()
@@ -1043,6 +1380,13 @@ class Loop:
         extra = {}
         if pending is not None:
             extra["cancelled_condition"] = pending.proposal.condition
+            return "pick_cancelled", extra
+        if job is not None:
+            extra["writing"] = job.progress()["skill"]
+            extra["stop_requested"] = True
+            return "job_running", extra
+        if written_condition is not None:
+            extra["cancelled_condition"] = written_condition
         return "pick_cancelled", extra
 
     def _queue_user_goal(self, request: Mapping[str, Any]) -> str:
@@ -1058,17 +1402,31 @@ class Loop:
             self._set_wake(WakeCause.USER)
         return "queued"
 
-    def _publish(self) -> None:
-        """Hand the console a fresh read-only state (copy on update, no lock)."""
+    def _publish(self, *, force: bool = False) -> None:
+        """Hand the console a fresh read-only state (copy on update, no lock).
+
+        ``force`` skips the throttle: a shutdown must publish its final state,
+        or the console keeps showing the learning badge of a dead loop.
+        """
         if self._console is None:
             return
         now = time.monotonic()
-        if now - self._last_publish < PUBLISH_SECONDS:
+        if not force and now - self._last_publish < PUBLISH_SECONDS:
             return
         self._last_publish = now
         snapshot = self.session.snapshot or {}
         opened = self._open_goal
         proposal = self._last_proposal
+        learning = None
+        if self._job is not None:
+            progress = self._job.progress()
+            learning = {
+                "skill": progress["skill"],
+                "attempt": progress["attempt"],
+                "seed": progress["seed"],
+                "started_at": progress["started_at"],
+                "goal_id": self._job.record.goal_id,
+            }
         self._console.publish(
             {
                 "world_id": self.world_id,
@@ -1081,6 +1439,7 @@ class Loop:
                 "owner": snapshot.get("owner"),
                 "facts": snapshot.get("facts"),
                 "stack": snapshot.get("stack"),
+                "learning": learning,
                 "goal": None
                 if opened is None
                 else {
@@ -1147,6 +1506,46 @@ class Loop:
         facts = (self.session.snapshot or {}).get("facts") or {}
         inventory = facts.get("inventory") or {}
         return {str(name): int(amount) for name, amount in inventory.items()}
+
+    def _drop_unplayed(self, pending: PendingGoal, reason: str) -> None:
+        """Close the record a background admission opened for a goal never sent."""
+        record = pending.record
+        if record is None:
+            return
+        self.records.finish(
+            record,
+            status="interrupted",
+            failure_kind=reason,
+            source="play",
+            wake=False,
+        )
+
+    def _writing_skill(self) -> Optional[str]:
+        """The skill a background job is writing, or ``None``."""
+        if self._job is None:
+            return None
+        return self._job.progress()["skill"]
+
+    def _job_goal_ids(self) -> list[str]:
+        """The records the loop still owns; recovery must not close them."""
+        owned = []
+        if self._job is not None and self._job.record is not None:
+            owned.append(self._job.record.goal_id)
+        if self._written is not None and self._written.record is not None:
+            owned.append(self._written.record.goal_id)
+        return owned
+
+    def _excluded_by_job(self, proposal: GoalProposal) -> bool:
+        """Whether this goal is the one being written right now."""
+        job = self._job
+        if job is None or job.record is None:
+            return False
+        if normalize_condition(proposal.condition) == normalize_condition(
+            job.record.condition
+        ):
+            return True
+        writing = job.progress()["skill"]
+        return bool(writing) and goal_of(proposal).skill_name == writing
 
     def _skill_origin(self, skill: str, pending: PendingGoal) -> str:
         if pending.source == "written":

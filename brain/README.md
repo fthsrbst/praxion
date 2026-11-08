@@ -43,8 +43,12 @@ see the full prompt, response, tokens and cost), skills with their admission
 results, metrics, and a command bar (give a goal, pause/resume, stop the
 goal). `--console-port N` changes the port, `--console-port 0` turns it off.
 Your goals go before the proposer's next pick; pause stops new picks only.
-The body ignores a pop of a running intent, so "Stop goal" records the goal as
-interrupted but the skill may play on until the next command preempts it.
+"Stop goal" pops the running intent: the body cancels it and confirms with a
+`settled outcome=cancelled` receipt; only then does the goal record close as
+interrupted (`stopped_by_user`). A stop while a skill is being written marks the
+background admission: when it ends its goal is recorded interrupted
+(`stopped_by_user`) and is never played, though the skill may still be admitted
+and stay active.
 
 ## Files it writes
 
@@ -74,8 +78,10 @@ session's spend never trips it; the per-provider budget stays the absolute cap.
 `config.py` (paths, `.env`, harness on `sys.path`), `ledger.py` (cost and
 budget), `evidence.py` (JSONL log), `goal.py`, `skills.py` (catalog parsing and
 `check-skills`), `writer.py` (prompt plus `responses.parse`), `router.py`
-(TypeSafe System One), `practice.py` (one headless run), `admission.py`
-(write -> check -> practice -> active), `port.py` (body port v0 client and
+(TypeSafe System One), `practice.py` (one headless run, cancelled and killed
+with its live stack), `admission.py` (write -> check -> practice -> active),
+`admission_job.py` (one admission off the loop thread), `cancel.py` (its cancel
+token), `port.py` (body port v0 client and
 framing), `conditions.py` (inventory guard subset), `ladder.py` (the twelve
 rungs), `memory.py` (goals, skill uses, failure memory, drift), `briefing.py`
 (the capped briefing text), `curriculum.py` (proposal model and validation),

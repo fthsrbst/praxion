@@ -5,8 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+import pytest
+
+from praxion_brain.cancel import AdmissionCancelled, CancelToken
 from praxion_brain.goal import Goal
-from praxion_brain.practice import _failure_kind, classify_failure, practice
+from praxion_brain.practice import (
+    _failure_kind,
+    classify_failure,
+    practice,
+    stop_live_runs,
+)
 
 
 class FakeReferee:
@@ -30,6 +38,8 @@ class FakeRun:
         self.referee = FakeReferee(inventory)
         self._events = events
         self.run_dir = run_dir
+        self.stopped = False
+        self.stops = 0
 
     def wait_for_outcome(self, timeout: float) -> dict[str, Any]:
         if self._summary is None:
@@ -42,6 +52,12 @@ class FakeRun:
     def events(self) -> list[dict[str, Any]]:
         return list(self._events)
 
+    def stop(self) -> None:
+        """The real run kills its body, forwarder and server; the fake counts."""
+        if not self.stopped:
+            self.stopped = True
+            self.stops += 1
+
 
 class FakeSession:
     def __init__(self, run: FakeRun) -> None:
@@ -51,6 +67,7 @@ class FakeSession:
         return self._run
 
     def __exit__(self, *_exc: Any) -> None:
+        self._run.stop()
         return None
 
 
@@ -314,3 +331,83 @@ def test_classifier_max_ticks_inside_core_is_a_body_failure() -> None:
 
 def test_classifier_body_error_is_a_body_failure() -> None:
     assert classify_failure([], CANDIDATES, "body_error", "body_error") == "body"
+
+
+# --------------------------------------------------------------------------- #
+# Cancellation: a live run, and the runs a process exit leaves behind
+# --------------------------------------------------------------------------- #
+def _done_run(tmp_path: Path) -> FakeRun:
+    return FakeRun(
+        summary={"goal": {"outcome": "done"}, "ticks": 20},
+        inventory={"minecraft:furnace": 1},
+        events=[],
+        run_dir=tmp_path / "run",
+    )
+
+
+def test_a_cancel_kills_the_live_run_before_it_returns(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    cancel = CancelToken()
+    run = _done_run(tmp_path)
+    seen: list[bool] = []
+
+    def wait_for_outcome(timeout: float) -> dict[str, Any]:
+        cancel.set()  # the admission deadline expires while the body runs
+        seen.append(run.stopped)
+        return run.summary() or {}
+
+    run.wait_for_outcome = wait_for_outcome  # type: ignore[method-assign]
+    monkeypatch.setattr("praxion_brain.practice.start_body", fake_start_body(run=run))
+
+    with pytest.raises(AdmissionCancelled):
+        practice("get_furnace", GOAL, tmp_path, seed=12, cancel=cancel)
+
+    assert seen == [True], "the server, forwarder and body must be killed on cancel"
+    assert run.stops == 1, "the cancel stopped it once; the context exit repeats nothing"
+
+
+def test_stop_live_runs_kills_a_run_still_in_flight(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    # What the interpreter's exit runs: the registry must have the live run.
+    run = _done_run(tmp_path)
+    seen: list[bool] = []
+
+    def wait_for_outcome(timeout: float) -> dict[str, Any]:
+        stop_live_runs()
+        seen.append(run.stopped)
+        return run.summary() or {}
+
+    run.wait_for_outcome = wait_for_outcome  # type: ignore[method-assign]
+    monkeypatch.setattr("praxion_brain.practice.start_body", fake_start_body(run=run))
+
+    practice("get_furnace", GOAL, tmp_path, seed=13)
+
+    assert seen == [True]
+    assert run.stops == 1
+
+
+def test_a_finished_run_is_unregistered(monkeypatch: Any, tmp_path: Path) -> None:
+    run = _done_run(tmp_path)
+    monkeypatch.setattr("praxion_brain.practice.start_body", fake_start_body(run=run))
+
+    practice("get_furnace", GOAL, tmp_path, seed=14)
+    stop_live_runs()  # a later exit must not stop a finished run again
+
+    assert run.stops == 1
+
+
+def test_a_cancel_before_the_run_starts_no_server(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    cancel = CancelToken()
+    cancel.set()
+
+    def start(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a cancelled practice must not start a server")
+
+    monkeypatch.setattr("praxion_brain.practice.start_body", start)
+
+    with pytest.raises(AdmissionCancelled):
+        practice("get_furnace", GOAL, tmp_path, seed=15, cancel=cancel)

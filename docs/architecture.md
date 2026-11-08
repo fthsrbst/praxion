@@ -309,8 +309,9 @@ Stop causes and resume triggers [D]:
 | cost hard stop | `suspended` (LLM work only) | the user raises the limit |
 | body restart | every restored entry becomes `frozen_for_carry_on` | "carry on" |
 
-The body alone writes `done`; the brain may pop only `done` or `suspended` entries; stack depth
-is capped (number by measurement).
+The body alone writes `done`; a pop of a `done` or `suspended` entry removes it, and a pop of the
+`running` entry cancels it: its in-flight primitive is abandoned, the command settles `cancelled`
+and a suspended entry below it resumes. Stack depth is capped (number by measurement).
 
 ### 5.5 Planner contract
 

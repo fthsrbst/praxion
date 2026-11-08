@@ -194,3 +194,24 @@ def test_heartbeat_change_is_empty_when_nothing_relevant_moved() -> None:
     assert heartbeat_change(
         {"inventory": {"oak_log": 3}}, {"inventory": {}}, was_playing=False, is_playing=False
     ) == []
+
+
+def test_the_background_writing_line_names_the_skill() -> None:
+    text = build(
+        SNAPSHOT, LADDER, RECENT, CATALOG, LEDGER, now=1041.0, writing="get_furnace"
+    )
+    assert "## Background job  [admission]" in text
+    assert "skill being written: get_furnace" in text
+    # The line survives the cap: it is not one of the trimmable sections.
+    capped = build(
+        SNAPSHOT,
+        LADDER,
+        RECENT,
+        CATALOG,
+        LEDGER,
+        now=1041.0,
+        max_tokens=120,
+        writing="get_furnace",
+    )
+    assert "skill being written: get_furnace" in capped
+    assert estimate_tokens(capped) <= 120

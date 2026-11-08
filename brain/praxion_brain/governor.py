@@ -36,6 +36,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from pydantic import BaseModel
 
+from .cancel import CancelToken
 from .evidence import Evidence
 from .ledger import DEFAULT_BUDGETS, BudgetExceeded, Ledger
 
@@ -161,6 +162,9 @@ class Governor:
         self._open_until = 0.0
         self._probe_outstanding = False
         self._warned_hour: Optional[int] = None
+        # The loop and a background admission job share this state: the job
+        # thread reports its outcome while the loop gates new calls.
+        self._lock = threading.RLock()
 
     # -- budget --------------------------------------------------------- #
     def spent_total(self) -> float:
@@ -216,27 +220,29 @@ class Governor:
         return True
 
     def record_success(self) -> None:
-        self._failures = 0
-        self._breaker = "closed"
-        self._probe_outstanding = False
-        self._open_until = 0.0
+        with self._lock:
+            self._failures = 0
+            self._breaker = "closed"
+            self._probe_outstanding = False
+            self._open_until = 0.0
 
     def record_error(self) -> None:
-        now = self._clock()
-        if self._breaker == "half_open":
-            self._failures = max(self._failures + 1, self.breaker_threshold)
-        else:
-            self._failures += 1
-        if self._failures >= self.breaker_threshold:
-            self._breaker = "open"
-            self._open_until = now + self.breaker_open_seconds
-            self._probe_outstanding = False
-            if self.evidence is not None:
-                self.evidence.write(
-                    "governor_breaker_open",
-                    failures=self._failures,
-                    open_until=self._open_until,
-                )
+        with self._lock:
+            now = self._clock()
+            if self._breaker == "half_open":
+                self._failures = max(self._failures + 1, self.breaker_threshold)
+            else:
+                self._failures += 1
+            if self._failures >= self.breaker_threshold:
+                self._breaker = "open"
+                self._open_until = now + self.breaker_open_seconds
+                self._probe_outstanding = False
+                if self.evidence is not None:
+                    self.evidence.write(
+                        "governor_breaker_open",
+                        failures=self._failures,
+                        open_until=self._open_until,
+                    )
 
     # -- rate limits and warning ---------------------------------------- #
     def _rate_allows(self, call_class: str, now: float) -> bool:
@@ -284,23 +290,24 @@ class Governor:
         """May one paid call of ``call_class`` run now?"""
         if call_class not in CALL_TIMEOUTS:
             raise ValueError(f"unknown call class {call_class!r}")
-        now = self._clock()
-        self._maybe_warn()
+        with self._lock:
+            now = self._clock()
+            self._maybe_warn()
 
-        if self.hard_stop_reached:
-            return GovernorDecision(allowed=False, reason="hard_stop")
-        if not self._rate_allows(call_class, now):
-            return GovernorDecision(allowed=False, reason="rate_limit")
-        charged_to = provider or CALL_PROVIDERS[call_class]
-        try:
-            self.ledger.ensure(charged_to, float(estimate))
-        except BudgetExceeded:
-            return GovernorDecision(allowed=False, reason="budget")
-        if not self._breaker_allows(now):
-            return GovernorDecision(allowed=False, reason="breaker_open")
+            if self.hard_stop_reached:
+                return GovernorDecision(allowed=False, reason="hard_stop")
+            if not self._rate_allows(call_class, now):
+                return GovernorDecision(allowed=False, reason="rate_limit")
+            charged_to = provider or CALL_PROVIDERS[call_class]
+            try:
+                self.ledger.ensure(charged_to, float(estimate))
+            except BudgetExceeded:
+                return GovernorDecision(allowed=False, reason="budget")
+            if not self._breaker_allows(now):
+                return GovernorDecision(allowed=False, reason="breaker_open")
 
-        self._calls[call_class].append(now)
-        return GovernorDecision(allowed=True)
+            self._calls[call_class].append(now)
+            return GovernorDecision(allowed=True)
 
     def timeout(self, call_class: str) -> float:
         try:
@@ -308,13 +315,23 @@ class Governor:
         except KeyError as error:
             raise ValueError(f"unknown call class {call_class!r}") from error
 
-    def call(self, call_class: str, fn: Callable[[], Any]) -> Any:
+    def call(
+        self,
+        call_class: str,
+        fn: Callable[[], Any],
+        *,
+        cancel: CancelToken | None = None,
+    ) -> Any:
         """Run one blocking provider call with its class deadline (A4).
 
         The call runs on a daemon worker thread and the caller waits at most
         :meth:`timeout` seconds. On expiry it raises :class:`CallTimeout` and
         the worker is abandoned, so no provider can hang the loop; the step
         records a typed ``timeout`` failure and the breaker counts it.
+
+        ``cancel`` marks the work the abandoned worker belongs to: a timed-out
+        admission sets its token so the worker stops at its next boundary and
+        never copies its late result (a skill the record says failed).
         """
         seconds = self.timeout(call_class)
         box: dict[str, Any] = {}
@@ -331,6 +348,8 @@ class Governor:
         worker = threading.Thread(target=run, name=f"call-{call_class}", daemon=True)
         worker.start()
         if not finished.wait(seconds):
+            if cancel is not None:
+                cancel.set()
             raise CallTimeout(call_class, seconds)
         if "error" in box:
             raise box["error"]
@@ -339,7 +358,8 @@ class Governor:
     @property
     def code_only(self) -> bool:
         """No LLM work while the hard stop is reached or the breaker is open."""
-        return self.hard_stop_reached or self._breaker == "open"
+        with self._lock:
+            return self.hard_stop_reached or self._breaker == "open"
 
     def budget_snapshot(self) -> dict[str, float]:
         """The numbers the briefing prints for its Budget section."""

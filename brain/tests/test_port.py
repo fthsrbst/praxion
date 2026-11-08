@@ -420,7 +420,7 @@ def test_pop_removes_a_done_intent(client: PortClient, body: FakeBody) -> None:
     assert body.stack == []
 
 
-def test_pop_of_a_running_intent_is_ignored(client: PortClient, body: FakeBody) -> None:
+def test_pop_of_a_running_intent_cancels_it(client: PortClient, body: FakeBody) -> None:
     wait_snapshot(client)
     command_id = client.send_command("get_furnace")
     receipts_until(client, command_id, "accepted")
@@ -430,8 +430,13 @@ def test_pop_of_a_running_intent_is_ignored(client: PortClient, body: FakeBody) 
     client.ping()
     wait_for(client, lambda message: isinstance(message, Pong), what="pong after pop")
 
+    # Stop and cancel always work: the running intent leaves the stack, and the
+    # body confirms the cancel with a `settled outcome=cancelled` receipt.
     assert body.pops == [intent_id]
-    assert [entry.intent_id for entry in body.stack] == [intent_id]
+    assert body.stack == []
+    body.settle(command_id, outcome="cancelled")
+    settled = receipts_until(client, command_id, "settled")[-1]
+    assert (settled["intent_id"], settled["outcome"]) == (intent_id, "cancelled")
 
 
 def test_snapshot_passes_owner_stack_and_stale_ticks(

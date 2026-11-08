@@ -55,6 +55,8 @@ class PendingGoal:
     forced_skill: Optional[str] = None
     #: ``"user"`` for a goal the console gave; ``None`` otherwise.
     origin: Optional[str] = None
+    #: The record a background admission opened; the play reuses it.
+    record: Optional[GoalRecord] = None
 
 
 @dataclass
@@ -68,6 +70,8 @@ class OpenGoal:
     intent_id: Optional[int] = None
     sent_tick: int = 0
     retried: bool = False
+    #: The user pressed Stop before the body accepted the command: pop it on accept.
+    stop_pending: bool = False
 
     def ticks_since(self, tick: Optional[int]) -> Optional[int]:
         """Body ticks since the command was sent; ``None`` without a snapshot."""
@@ -211,15 +215,21 @@ class GoalRecords:
             self._on_finished(stored)
         return stored
 
-    def settle_open(self, records: list[GoalRecord]) -> None:
+    def settle_open(
+        self, records: list[GoalRecord], *, keep: Sequence[str] = ()
+    ) -> None:
         """A1: close records the body will never settle, by their own condition.
 
         With an empty stack no receipt is coming: a goal whose condition already
         holds in the snapshot is ``done``; any other is ``interrupted``, which is
-        not a failure and does not block the goal.
+        not a failure and does not block the goal. ``keep`` names goals a
+        background job still owns, so a reconnect cannot close them underneath
+        the running job.
         """
         inventory = self._inventory()
-        for record in records:
+        kept = set(keep)
+        closing = [record for record in records if record.goal_id not in kept]
+        for record in closing:
             try:
                 value = evaluate(record.condition, inventory)
             except ConditionError:
@@ -232,22 +242,29 @@ class GoalRecords:
                 source="recovery",
                 wake=False,
             )
-        if records:
+        if closing:
             self.evidence.write(
                 "loop_settled_open",
-                goals=[record.goal_id for record in records],
+                goals=[record.goal_id for record in closing],
             )
 
     # -- recovery ------------------------------------------------------- #
     def open_records(self) -> list[GoalRecord]:
-        """Every record that still waits for a receipt."""
-        return [
-            record
-            for record in self.memory.goals()
-            if record.status == "open" and record.command_id
-        ]
+        """Every record still open: a command in flight or a background write.
 
-    def recover(self, stack: Sequence[Intent], *, tick: int, cause: str) -> Recovery:
+        A record a background admission opened has no ``command_id``; it is
+        closed as interrupted on recovery when no job survived the restart.
+        """
+        return [record for record in self.memory.goals() if record.status == "open"]
+
+    def recover(
+        self,
+        stack: Sequence[Intent],
+        *,
+        tick: int,
+        cause: str,
+        keep: Sequence[str] = (),
+    ) -> Recovery:
         """A1/A8: adopt every live intent, then settle what is left open."""
         active = {
             entry.intent_id: entry
@@ -259,6 +276,8 @@ class GoalRecords:
         adopted: Optional[GoalRecord] = None
         entry: Optional[Intent] = None
         for record in reversed(open_records):
+            if not record.command_id:
+                continue  # a background write has no intent to adopt
             match = active.get(record.intent_id) if record.intent_id is not None else None
             if match is None and record.skill:
                 # The command that started an intent may have been accepted
@@ -297,7 +316,7 @@ class GoalRecords:
             )
             return Recovery(adopted=opened)
 
-        self.settle_open(open_records)
+        self.settle_open(open_records, keep=keep)
         return Recovery(unmatched=list(active.values()))
 
     # -- goal ids ------------------------------------------------------- #

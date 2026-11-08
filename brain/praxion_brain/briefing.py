@@ -318,10 +318,21 @@ def build(
     *,
     now: Optional[float] = None,
     max_tokens: int = BRIEFING_MAX_TOKENS,
+    writing: Optional[str] = None,
 ) -> str:
-    """Render the briefing text, trimming it to ``max_tokens`` when possible."""
+    """Render the briefing text, trimming it to ``max_tokens`` when possible.
+
+    ``writing`` names the skill a background admission job is writing. The line
+    keeps the proposer off that goal: it cannot be played until the job ends,
+    and a second write would be deferred anyway.
+    """
     moment = time.time() if now is None else float(now)
     now_lines = _now_section(snapshot)
+    writing_lines = (
+        ["## Background job  [admission]", f"skill being written: {writing}"]
+        if writing
+        else []
+    )
     ladder_lines = _ladder_section(ladder)
     records = list(memory)
     recent_items = [_goal_line(record, moment) for record in records]
@@ -334,6 +345,7 @@ def build(
 
     def render() -> str:
         lines = list(now_lines)
+        lines.extend(writing_lines)
         lines.extend(ladder_lines)
         lines.append(recent_header)
         # An empty list means every goal line was trimmed, not that the world

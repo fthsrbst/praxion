@@ -15,6 +15,7 @@ from typing import Callable, Literal, Sequence
 from pydantic import BaseModel, Field
 
 from . import config
+from .cancel import AdmissionCancelled, CancelToken
 from .evidence import Evidence
 from .goal import Goal
 from .ledger import Ledger, estimate_cost
@@ -31,6 +32,8 @@ from .writer import FailureContext, SkillDraft, write
 WriteFn = Callable[..., SkillDraft]
 CheckFn = Callable[[Path], CheckReport]
 PracticeFn = Callable[..., PracticeResult]
+#: One progress step of a running admission (attempt, model, practice seed).
+ProgressFn = Callable[[dict[str, object]], None]
 
 #: Seeds used when a body failure makes a practice seed unusable.
 SPARE_SEEDS = (505, 606, 707)
@@ -124,6 +127,33 @@ def estimate(writer_model: str, *, attempt: int = 0) -> float:
     )
 
 
+def _progress(on_progress: ProgressFn | None, **fields: object) -> None:
+    """Tell the caller where this admission is; a no-op without a callback."""
+    if on_progress is not None:
+        on_progress(fields)
+
+
+def _check_cancel(
+    cancel: CancelToken | None,
+    evidence: Evidence,
+    goal: Goal,
+    stage: str,
+    attempt: int,
+) -> None:
+    """Stop a cancelled admission before more work or before it goes active."""
+    if cancel is None or not cancel.is_set():
+        return
+    evidence.write(
+        "admission_cancelled",
+        skill=goal.skill_name,
+        stage=stage,
+        attempt=attempt,
+    )
+    raise AdmissionCancelled(
+        f"the admission of {goal.skill_name} was cancelled at {stage}"
+    )
+
+
 def _record_body_failure(path: Path, result: PracticeResult) -> None:
     """Append one body failure for the orchestrator to triage."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,8 +197,15 @@ def admit(
     active_dir: Path | None = None,
     escalation_model: str | None = "gpt-6.1-terra",
     effort: str = "low",
+    on_progress: ProgressFn | None = None,
+    cancel: CancelToken | None = None,
 ) -> AdmissionReport:
-    """Run the admission loop. Returns a report that is also written as JSON."""
+    """Run the admission loop. Returns a report that is also written as JSON.
+
+    ``cancel`` is the job's cancel token: the timeout and a shutdown set it, and
+    a set token stops this admission at the next boundary. A cancelled run never
+    copies its skill to the active directory.
+    """
     write_fn = write_fn if write_fn is not None else write
     check_fn = check_fn if check_fn is not None else check
     practice_fn = practice_fn if practice_fn is not None else practice
@@ -201,6 +238,9 @@ def admit(
     required_passes = len(seeds)
 
     for attempt in range(max_repairs + 1):
+        # A cancel that arrived while the last attempt ran must not start a
+        # paid writer call, and a cancel before the first one is not a run.
+        _check_cancel(cancel, evidence, goal, "write", attempt)
         model = write_model(writer_model, attempt, escalation_model)
 
         attempt_dir = attempts_root / f"{stamp}-{attempt}"
@@ -231,6 +271,7 @@ def admit(
             candidate_path=str(candidate_path),
             rationale=draft.rationale,
         )
+        _progress(on_progress, attempt=attempt, model=model, seed=None)
 
         report = check_fn(attempt_dir)
         record.check = report
@@ -264,14 +305,25 @@ def admit(
 
         index = 0
         while index < len(seeds_to_run):
+            # Between practice runs is the safe point: the previous body stack
+            # is gone, so a cancel here kills nothing and starts no new server.
+            _check_cancel(cancel, evidence, goal, "practice", attempt)
             seed = seeds_to_run[index]
-            result = practice_fn(
-                skill=goal.skill_name,
-                goal=goal,
-                candidate_dir=attempt_dir,
-                seed=seed,
-                max_ticks=max_ticks,
-            )
+            _progress(on_progress, attempt=attempt, seed=seed)
+            try:
+                result = practice_fn(
+                    skill=goal.skill_name,
+                    goal=goal,
+                    candidate_dir=attempt_dir,
+                    seed=seed,
+                    max_ticks=max_ticks,
+                    cancel=cancel,
+                )
+            except AdmissionCancelled:
+                # The practice room noticed the cancel first and killed its own
+                # stack; record where the admission stopped, then end it.
+                _check_cancel(cancel, evidence, goal, "practice", attempt)
+                raise
             record.practices.append(result)
             evidence.write(
                 "admission_practice",
@@ -339,6 +391,9 @@ def admit(
             break
 
         attempts.append(record)
+        # The last boundary of a cancelled job: never go active. The report of
+        # a timed-out or stopped admission may not claim a skill the body sees.
+        _check_cancel(cancel, evidence, goal, "active", attempt)
         admitted = True
         active_dir.mkdir(parents=True, exist_ok=True)
         target = active_dir / filename
@@ -378,8 +433,11 @@ __all__ = [
     "WRITE_ESCALATE_AFTER",
     "WRITE_INPUT_ESTIMATE",
     "WRITE_OUTPUT_ESTIMATE",
+    "AdmissionCancelled",
     "AdmissionReport",
     "AttemptRecord",
+    "CancelToken",
+    "ProgressFn",
     "admit",
     "estimate",
     "write_model",

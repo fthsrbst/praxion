@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -85,36 +86,39 @@ class Ledger:
         self.path = Path(path) if path is not None else config.ledger_path()
         self._cache_key: Optional[tuple[int, int]] = None
         self._cache: list[Dict[str, Any]] = []
+        # The loop and a background admission job record costs at once.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
     def entries(self) -> list[Dict[str, Any]]:
-        try:
-            stat = self.path.stat()
-        except FileNotFoundError:
-            self._cache_key, self._cache = None, []
-            return []
-        key = (stat.st_mtime_ns, stat.st_size)
-        if key == self._cache_key:
-            return list(self._cache)
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            self._cache_key, self._cache = None, []
-            return []
-        entries = []
-        for number, line in enumerate(text.splitlines(), start=1):
-            line = line.strip()
-            if not line:
-                continue
+        with self._lock:
             try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"corrupt ledger line {number} in {self.path}: {error}") from error
-            if not isinstance(entry, dict):
-                raise ValueError(f"corrupt ledger line {number} in {self.path}: not an object")
-            entries.append(entry)
-        self._cache_key, self._cache = key, entries
-        return list(entries)
+                stat = self.path.stat()
+            except FileNotFoundError:
+                self._cache_key, self._cache = None, []
+                return []
+            key = (stat.st_mtime_ns, stat.st_size)
+            if key == self._cache_key:
+                return list(self._cache)
+            try:
+                text = self.path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                self._cache_key, self._cache = None, []
+                return []
+            entries = []
+            for number, line in enumerate(text.splitlines(), start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"corrupt ledger line {number} in {self.path}: {error}") from error
+                if not isinstance(entry, dict):
+                    raise ValueError(f"corrupt ledger line {number} in {self.path}: not an object")
+                entries.append(entry)
+            self._cache_key, self._cache = key, entries
+            return list(entries)
 
     def record(
         self,
@@ -136,9 +140,10 @@ class Ledger:
             "purpose": purpose,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        self._cache_key = None
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._cache_key = None
         return entry
 
     def spent(self, provider: str) -> float:

@@ -6,6 +6,17 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-08, OpenCode (DeepSeek V4.1 Flash): a pop cancels a running goal
+- The body's `pop` now cancels the running intent instead of ignoring it: the in-flight primitive is abandoned,
+  the command settles `settled outcome=cancelled`, the stack entry is `done` and a suspended goal underneath
+  resumes through the same settle path (`close_goal` in `driver.rs`). No wire change; the pop already carried
+  the intent id, so the golden frames did not move.
+- The brain closes the stopped goal only on that receipt (`_on_receipt` maps `cancelled`/`popped` to
+  `interrupted`/`stopped_by_user`), so the console's "Stop goal" is confirmed by `goal_finished`, not optimistically.
+- Observation: `_stop_goal` no longer moves the loop to IDLE while the stop is unconfirmed, so a body that ignored
+  the pop would hold PLAYING until the goal's `budget_ticks` settle. Every command carries a budget, so this is
+  bounded; a stop watchdog is only worth it if a port consumer ever sends a command without a budget.
+
 ## 2026-11-08, Claude Opus 5.5: autonomous run 4: the loop closes
 - Fresh seed 404, never played before, built from commit 480ed5a (console + hot load), watched by the user live and in
   the web console. Seven rungs with no help: wood, crafting table, wooden pickaxe, cobblestone, stone pickaxe, stone

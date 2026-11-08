@@ -51,9 +51,10 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   removed as tautological. The same fixture is needed for tests of the walk-back cap (`EXPLORE_MAX_WALK_BACKS`),
   the empty walk-back/frontier plan skips, the look-around ending when a target is found mid-turn, and
   `open_to_sky` against a real heightmap (GLM review `logs/review/r1108/r-explore-fixes.answer.txt` Q6).
-- NEXT (body): the console's "Stop goal" cannot stop a running skill: the body pops only done or suspended intents
-  (`body/crates/body/src/driver.rs` pop path), a pop of a running one is ignored. Architecture §5.4: stop and cancel
-  always work. Add a cancel that settles the running intent `cancelled` (abandon its primitive) and a receipt.
+- NEXT (body): finding ores. Run 4: the self-written `get_coal` (explore(coal_ore) -> mine) failed admission
+  `inconclusive_body` on 3 seeds: explore searches the surface only (open-to-sky rule), while ores show on cliff faces,
+  in caves and underground. Needs a core `find_ore` behaviour: look at exposed stone faces in view, else staircase down
+  (`dig_down` to the ore's usual depth) and branch-mine with safety rules. Gates coal and iron (ladder rungs 8-10).
 - NEXT (loop): admission blocks the body for 30+ minutes (autonomous run 3, `get_coal`: the body stood still while
   practice runs played on test servers). Session 8 says a safe fallback goal runs after 3-5 s. Make admission a
   background job; the loop keeps playing known-skill goals (never the goal being written); on admission the skill is

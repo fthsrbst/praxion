@@ -3,16 +3,24 @@
 The brain starts the same server/forwarder/body stack as the smoke test, gives
 the body nothing, passes the attempt's candidate directory and reads the
 inventory from the referee. The run directory is kept as evidence.
+
+A live run is registered in this module: a cancelled admission kills it through
+the token's callback, and :func:`stop_live_runs` kills every live run when the
+interpreter exits, so a shutdown never leaves a server, forwarder or body behind.
 """
 
 from __future__ import annotations
 
+import atexit
+import threading
+from functools import partial
 from pathlib import Path
 from typing import Any, Collection, Literal, Sequence
 
 from pydantic import BaseModel, Field
 
 from . import config  # noqa: F401  (adds harness/ to sys.path in one place)
+from .cancel import AdmissionCancelled, CancelToken
 from .goal import Goal
 from .skills import parse_skill_text
 from praxion_harness.body import start_body
@@ -26,6 +34,42 @@ DIGEST_EVENTS = 30
 LOOP_RULES = 10
 
 FailureClass = Literal["skill", "body"]
+
+#: The practice runs alive right now, by ``id(run)``. A cancelled admission or
+#: the interpreter exiting stops them, so no server, forwarder or body outlives
+#: the brain (the harness only cleans up after itself when it gets the chance).
+_LIVE_LOCK = threading.Lock()
+_LIVE: dict[int, Any] = {}
+
+
+def _stop_run(run: Any) -> None:
+    """Stop one run's body, forwarder and server; never raise (cancel/atexit)."""
+    try:
+        run.stop()
+    except Exception:  # noqa: BLE001 - a cleanup must not break the canceller
+        pass
+
+
+def _register(run: Any) -> None:
+    with _LIVE_LOCK:
+        _LIVE[id(run)] = run
+
+
+def _unregister(run: Any) -> None:
+    with _LIVE_LOCK:
+        _LIVE.pop(id(run), None)
+
+
+def stop_live_runs() -> None:
+    """Stop every practice run still alive; the ``atexit`` handler too."""
+    with _LIVE_LOCK:
+        runs = list(_LIVE.values())
+        _LIVE.clear()
+    for run in runs:
+        _stop_run(run)
+
+
+atexit.register(stop_live_runs)
 
 
 class PracticeResult(BaseModel):
@@ -197,8 +241,16 @@ def practice(
     seed: int,
     max_ticks: int = 12_000,
     candidate_skills: Sequence[str] | None = None,
+    cancel: CancelToken | None = None,
 ) -> PracticeResult:
-    """Start one headless run for ``seed`` and judge it by the inventory."""
+    """Start one headless run for ``seed`` and judge it by the inventory.
+
+    ``cancel`` is the admission's token: when it is set while this run is live,
+    its server, forwarder and body are killed and the run stops being a verdict;
+    a token already set starts no server at all.
+    """
+    if cancel is not None and cancel.is_set():
+        raise AdmissionCancelled(f"practice run for seed {seed} was cancelled first")
     timeout = max_ticks / 20 * 1.6 + 120
     skills = (
         tuple(candidate_skills)
@@ -206,7 +258,7 @@ def practice(
         else _candidate_skill_names(candidate_dir, skill)
     )
     try:
-        return _run(skill, goal, candidate_dir, seed, max_ticks, timeout, skills)
+        return _run(skill, goal, candidate_dir, seed, max_ticks, timeout, skills, cancel)
     except (RuntimeError, TimeoutError) as error:
         # The stack did not start or the body died without a summary: a typed
         # practice failure the writer can see, not a crash of the admission.
@@ -229,6 +281,7 @@ def _run(
     max_ticks: int,
     timeout: float,
     candidate_skills: Collection[str],
+    cancel: CancelToken | None,
 ) -> PracticeResult:
     with start_body(
         seed,
@@ -238,15 +291,34 @@ def _run(
         keep=True,
         extra_args=["--candidates", str(candidate_dir)],
     ) as run:
-        timed_out = False
+        # A shutdown that reaches the interpreter must not leave this stack
+        # behind, and a cancel must kill it while it still runs.
+        _register(run)
+        stop = partial(_stop_run, run)
+        if cancel is not None:
+            # `add` runs at once when the token was set while the stack was
+            # starting, so a cancel cannot slip between the check and this line.
+            cancel.add(stop)
         try:
-            summary = run.wait_for_outcome(timeout=timeout)
-        except TimeoutError:
-            timed_out = True
-            summary = run.summary() or {}
-        inventory = run.referee.player_inventory()
-        events = run.events()
-        run_dir = run.run_dir
+            timed_out = False
+            try:
+                summary = run.wait_for_outcome(timeout=timeout)
+            except TimeoutError:
+                timed_out = True
+                summary = run.summary() or {}
+            if cancel is not None and cancel.is_set():
+                # The stack was just killed: its referee is gone and this run is
+                # not a verdict. `admit` records the stage and ends the run.
+                raise AdmissionCancelled(
+                    f"the practice run for seed {seed} was cancelled"
+                )
+            inventory = run.referee.player_inventory()
+            events = run.events()
+            run_dir = run.run_dir
+        finally:
+            if cancel is not None:
+                cancel.discard(stop)
+            _unregister(run)
 
     outcome = "timeout" if timed_out else str(summary.get("goal", {}).get("outcome", "unknown"))
     have = _count(inventory, goal.item)
@@ -284,4 +356,5 @@ __all__ = [
     "PracticeResult",
     "classify_failure",
     "practice",
+    "stop_live_runs",
 ]

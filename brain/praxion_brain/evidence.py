@@ -7,6 +7,7 @@ prompt text and the parsed output; API keys are never passed here.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,9 @@ class Evidence:
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.path = self.directory / "brain.jsonl"
+        # The loop and a background admission job write to this file at once;
+        # one lock keeps their lines whole.
+        self._lock = threading.Lock()
 
     def write(self, kind: str, **fields: Any) -> dict[str, Any]:
         """Append one event and return what was written."""
@@ -36,8 +40,9 @@ class Evidence:
         }
         self.directory.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry, ensure_ascii=False, default=_json_default)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
         return entry
 
 

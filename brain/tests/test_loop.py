@@ -35,6 +35,7 @@ from praxion_brain.proposer import (
     OUTPUT_ESTIMATE,
     estimate as propose_estimate,
 )
+from praxion_brain.records import GoalRecords
 from praxion_brain.router import Route
 from praxion_brain.skills import (
     CandidateReport,
@@ -255,7 +256,9 @@ def furnace_check_fn(directory) -> CheckReport:
     )
 
 
-def passing_practice(*, skill, goal, candidate_dir, seed, max_ticks) -> PracticeResult:
+def passing_practice(
+    *, skill, goal, candidate_dir, seed, max_ticks, cancel=None
+) -> PracticeResult:
     return PracticeResult(
         passed=True,
         outcome="done",
@@ -351,7 +354,7 @@ def test_full_happy_cycle_then_next_pick(tmp_path) -> None:
 def test_write_route_runs_admission_then_plays(tmp_path) -> None:
     practice_calls: list[int] = []
 
-    def practice_fn(*, skill, goal, candidate_dir, seed, max_ticks):
+    def practice_fn(*, skill, goal, candidate_dir, seed, max_ticks, cancel=None):
         practice_calls.append(seed)
         return passing_practice(
             skill=skill, goal=goal, candidate_dir=candidate_dir, seed=seed, max_ticks=max_ticks
@@ -1032,7 +1035,12 @@ def test_admission_receives_the_writer_model(tmp_path, monkeypatch) -> None:
         )
         try:
             loop.start()
-            pump(loop, lambda: bool(seen), what="admission call")
+            pump(
+                loop,
+                lambda: bool(seen)
+                and any(record.status == "failed" for record in loop.memory.goals()),
+                what="admission result",
+            )
 
             assert seen["writer_model"] == "gpt-6.1-sol"
             assert seen["goal"] == Goal(
@@ -1157,6 +1165,500 @@ def test_a_count_goal_passes_its_count_to_a_skill_with_a_parameter() -> None:
     assert loop._goal_args("get_wood", "count(#logs) >= 5") == ["5"]
     assert loop._goal_args("get_wood", "has(oak_log)") == []
     assert loop._goal_args("get_crafting_table", "count(crafting_table) >= 2") == []
+
+
+# --------------------------------------------------------------------------- #
+# Background admission: the body keeps playing while a skill is written
+# --------------------------------------------------------------------------- #
+def gated_practice(started: threading.Event, release: threading.Event):
+    """A practice run that blocks at the first seed until the test releases it."""
+
+    def practice_fn(*, skill, goal, candidate_dir, seed, max_ticks, cancel=None):
+        if seed == 101:
+            started.set()
+            assert release.wait(5.0), "the test never released the practice"
+        return passing_practice(
+            skill=skill,
+            goal=goal,
+            candidate_dir=candidate_dir,
+            seed=seed,
+            max_ticks=max_ticks,
+        )
+
+    return practice_fn
+
+
+def test_a_write_route_starts_a_job_and_the_loop_keeps_playing(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+    briefings: list[str] = []
+    proposals = [
+        proposal("has(furnace)", "get a furnace", "furnace"),
+        proposal("has(coal)", "get coal", "coal"),
+    ]
+
+    def propose_fn(briefing, *args, **kwargs):
+        briefings.append(briefing)
+        return proposals.pop(0)
+
+    def route_fn(goal, *args, **kwargs):
+        if goal.item == "furnace":
+            return Route(kind="write")
+        return Route(kind="play", skill="get_coal")
+
+    with FakeBody(skills={"get_coal", "get_furnace"}, facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=propose_fn,
+            route_fn=route_fn,
+            skills=catalog("get_coal"),
+            admission_options=admission_options(
+                tmp_path,
+                write_fn=furnace_write_fn,
+                check_fn=furnace_check_fn,
+                practice_fn=gated_practice(started, release),
+            ),
+            catalog_loader=lambda: catalog("get_coal", "get_furnace"),
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            assert started.wait(4.0), "the admission job never started"
+            pump(loop, lambda: len(body.commands) >= 1, what="command while the job runs")
+
+            # The loop returned to IDLE at once and played another goal.
+            assert body.commands[0].skill == "get_coal"
+            assert loop._job is not None and not loop._job.finished
+            assert loop._written is None
+            kinds = evidence_kinds(loop)
+            assert "write_started" in kinds
+            assert kinds.index("write_started") < kinds.index("command_sent")
+            assert all(
+                entry["to_state"] != "writing"
+                for entry in evidence_entries(loop, "loop_transition")
+            )
+            assert any("skill being written: get_furnace" in text for text in briefings)
+
+            # The goal is recorded open (not failed) while the job runs.
+            writing = [
+                record
+                for record in loop.memory.goals()
+                if record.condition == "has(furnace)"
+            ]
+            assert len(writing) == 1
+            assert writing[0].status == "open"
+            assert writing[0].command_id is None
+            assert writing[0].skill == "get_furnace"
+
+            release.set()
+            pump(loop, lambda: loop._job is None, what="job reaped")
+            pump(loop, lambda: loop._written is not None, what="written goal preferred")
+
+            first = body.commands[0]
+            wait_accepted(body, first.id)
+            body.settle(first.id, outcome="done", condition="true")
+            pump(loop, lambda: len(body.commands) >= 2, what="written goal played")
+            assert body.commands[1].skill == "get_furnace"
+
+            played = next(
+                record
+                for record in loop.memory.goals()
+                if record.condition == "has(furnace)"
+            )
+            assert played.skill_origin == "written"
+            assert played.command_id == body.commands[1].id
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_a_second_write_while_a_job_runs_is_deferred(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+    proposals = [
+        proposal("has(furnace)", "get a furnace", "furnace"),
+        proposal("has(coal)", "get coal", "coal"),
+        proposal("has(copper)", "get copper", "copper"),
+    ]
+
+    def propose_fn(*args, **kwargs):
+        return proposals.pop(0) if proposals else proposal(
+            "has(copper)", "get copper", "copper"
+        )
+
+    with FakeBody(skills=set(), facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=propose_fn,
+            route_fn=lambda *args, **kwargs: Route(kind="write"),
+            skills=catalog(),
+            admission_options=admission_options(
+                tmp_path,
+                write_fn=furnace_write_fn,
+                check_fn=furnace_check_fn,
+                practice_fn=gated_practice(started, release),
+            ),
+            catalog_loader=lambda: catalog(),
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            assert started.wait(4.0), "the admission job never started"
+            job = loop._job
+            pump(
+                loop,
+                lambda: bool(evidence_entries(loop, "write_deferred")),
+                what="deferred second write",
+            )
+
+            assert loop._job is job, "a second admission job was started"
+            assert loop._pending is None
+            assert not job.finished
+            assert len(evidence_entries(loop, "write_started")) == 1
+            # A deferral is not a failure: no record, no failure memory, no gap
+            # counted as a streak, only the usual pick gap.
+            assert loop._consecutive_failures == 0
+            assert [record.status for record in loop.memory.goals()] == ["open"]
+            assert "goal_finished" not in evidence_kinds(loop)
+            assert not evidence_entries(loop, "pick_gap")
+            assert loop._next_pick_tick > int(loop.session.tick or 0)
+
+            deferred = evidence_entries(loop, "write_deferred")[0]
+            assert deferred["condition"] == "has(coal)"
+            assert deferred["writing"] == "get_furnace"
+
+            # Once the gap passes the loop proposes again, and defers again.
+            set_tick(loop, body, loop._next_pick_tick)
+            pump(
+                loop,
+                lambda: len(evidence_entries(loop, "write_deferred")) >= 2,
+                what="second deferred write",
+            )
+            assert loop._job is job
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_an_admitted_job_makes_the_next_pick_the_written_goal(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    with FakeBody(skills={"get_furnace"}, facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *args, **kwargs: proposal(
+                "has(furnace)", "get a furnace", "furnace"
+            ),
+            route_fn=lambda *args, **kwargs: Route(kind="write"),
+            skills=catalog(),
+            admission_options=admission_options(
+                tmp_path,
+                write_fn=furnace_write_fn,
+                check_fn=furnace_check_fn,
+                practice_fn=gated_practice(started, release),
+            ),
+            catalog_loader=lambda: catalog("get_furnace"),
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            assert started.wait(4.0), "the admission job never started"
+            release.set()
+            pump(loop, lambda: len(body.commands) >= 1, what="written goal command")
+
+            assert body.commands[0].skill == "get_furnace"
+            assert loop._job is None
+            assert loop._written is None
+            record = next(
+                record
+                for record in loop.memory.goals()
+                if record.condition == "has(furnace)"
+            )
+            assert record.command_id == body.commands[0].id
+            assert record.skill_origin == "written"
+            assert "admission_admitted" in evidence_kinds(loop)
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_a_rejected_job_records_the_goal_failed(tmp_path) -> None:
+    def rejecting_check(directory):
+        return CheckReport(ok=False, candidates=[])
+
+    with FakeBody(skills=set(), facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *args, **kwargs: proposal(
+                "has(furnace)", "get a furnace", "furnace"
+            ),
+            route_fn=lambda *args, **kwargs: Route(kind="write"),
+            skills=catalog(),
+            admission_options=admission_options(
+                tmp_path,
+                write_fn=furnace_write_fn,
+                check_fn=rejecting_check,
+            ),
+            catalog_loader=lambda: catalog(),
+        )
+        try:
+            loop.start()
+            pump(
+                loop,
+                lambda: any(
+                    record.status == "failed" for record in loop.memory.goals()
+                ),
+                what="failed writing goal",
+            )
+
+            record = loop.memory.goals()[0]
+            assert record.status == "failed"
+            assert record.failure_kind == "rejected"
+            assert loop._job is None
+            assert loop._written is None
+            assert loop._consecutive_failures == 1
+            gap = evidence_entries(loop, "pick_gap")[-1]
+            assert gap["ticks"] == FAILURE_GAP_TICKS
+            assert loop.memory.failures()["has(furnace)"].attempts == 1
+            assert body.commands == []
+        finally:
+            loop.close()
+
+
+def test_shutdown_with_a_job_running_abandons_it_and_records_interrupted(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    with FakeBody(skills=set(), facts={"inventory": {}}) as body:
+        loop = write_loop(
+            body,
+            tmp_path,
+            admission_overrides={
+                "write_fn": furnace_write_fn,
+                "check_fn": furnace_check_fn,
+                "practice_fn": gated_practice(started, release),
+            },
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            assert started.wait(4.0), "the admission job never started"
+            job = loop._job
+            loop.close()
+
+            assert job.abandoned is True
+            # The shutdown closes the token: the worker's practice stack dies
+            # and its late result can never copy the skill active.
+            assert job.cancel.is_set()
+            assert loop._job is None
+            record = loop.memory.goals()[0]
+            assert record.status == "interrupted"
+            assert record.failure_kind == "abandoned"
+            assert "write_abandoned" in evidence_kinds(loop)
+
+            # The abandoned thread finishes without recording anything.
+            release.set()
+            assert job.wait(5.0), "the abandoned job thread never finished"
+            records = loop.memory.goals()
+            assert [record.status for record in records] == ["interrupted"]
+            assert loop.memory.failures() == {}
+            assert not (tmp_path / "active" / "get_furnace.skill").exists()
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_a_timed_out_admission_cancels_the_worker_and_never_copies(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def blocking_practice(*, skill, goal, candidate_dir, seed, max_ticks, cancel=None):
+        if seed == 101:
+            started.set()
+            assert release.wait(5.0), "the test never released the practice"
+        return passing_practice(
+            skill=skill,
+            goal=goal,
+            candidate_dir=candidate_dir,
+            seed=seed,
+            max_ticks=max_ticks,
+        )
+
+    with FakeBody(skills=set(), facts={"inventory": {}}) as body:
+        loop = write_loop(
+            body,
+            tmp_path,
+            governor_kwargs={"call_timeouts": {"admission": 0.15, "write": 5.0}},
+            admission_overrides={
+                "write_fn": furnace_write_fn,
+                "check_fn": furnace_check_fn,
+                "practice_fn": blocking_practice,
+            },
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            job = loop._job
+            assert started.wait(4.0), "the admission job never started"
+            pump(
+                loop,
+                lambda: any(
+                    record.failure_kind == "timeout" for record in loop.memory.goals()
+                ),
+                what="admission timeout",
+            )
+
+            # The deadline sets the job's token; the freed worker stops at its
+            # next boundary instead of admitting a skill the record calls failed.
+            assert job.cancel.is_set()
+            release.set()
+            pump(
+                loop,
+                lambda: bool(evidence_entries(loop, "admission_cancelled")),
+                what="cancelled worker",
+            )
+            assert not (tmp_path / "active" / "get_furnace.skill").exists()
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_close_reaps_a_finished_job_and_records_its_real_outcome(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def gated_write(**kwargs):
+        started.set()
+        assert release.wait(5.0), "the test never released the writer"
+        return furnace_write_fn(**kwargs)
+
+    def rejecting_check(directory):
+        return CheckReport(ok=False, candidates=[])
+
+    with FakeBody(skills=set(), facts={"inventory": {}}) as body:
+        loop = write_loop(
+            body,
+            tmp_path,
+            admission_overrides={"write_fn": gated_write, "check_fn": rejecting_check},
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            job = loop._job
+            assert started.wait(4.0), "the admission job never started"
+            release.set()
+            assert job.wait(5.0), "the job never finished"
+            assert loop._job is job, "no step ran between the job's end and close"
+
+            loop.close()
+
+            assert job.abandoned is False
+            record = loop.memory.goals()[0]
+            assert (record.status, record.failure_kind) == ("failed", "rejected")
+            assert "write_abandoned" not in evidence_kinds(loop)
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_close_keeps_an_admitted_skill_and_closes_the_unplayed_goal(tmp_path) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    with FakeBody(skills={"get_furnace"}, facts={"inventory": {}}) as body:
+        loop = write_loop(
+            body,
+            tmp_path,
+            admission_overrides={
+                "write_fn": furnace_write_fn,
+                "check_fn": furnace_check_fn,
+                "practice_fn": gated_practice(started, release),
+            },
+            catalog_loader=lambda: catalog("get_furnace"),
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: loop._job is not None, what="admission job")
+            assert started.wait(4.0), "the admission job never started"
+            job = loop._job
+            release.set()
+            assert job.wait(5.0), "the job never finished"
+            assert loop._job is job, "no step ran between the job's end and close"
+
+            loop.close()
+
+            assert job.abandoned is False
+            # The real result is in the evidence and the file stays active; only
+            # the goal, which the shutdown never sent, is interrupted.
+            assert (tmp_path / "active" / "get_furnace.skill").is_file()
+            assert "admission_admitted" in evidence_kinds(loop)
+            assert "write_abandoned" not in evidence_kinds(loop)
+            record = loop.memory.goals()[0]
+            assert (record.status, record.failure_kind) == ("interrupted", "not_played")
+            assert loop.memory.failures() == {}
+        finally:
+            release.set()
+            loop.close()
+
+
+def test_a_writing_record_left_by_a_previous_run_is_interrupted(tmp_path) -> None:
+    # A crash mid-admission leaves an open record with no command; the next
+    # start has no job, so recovery closes it instead of leaving a dead goal.
+    clock = Clock()
+    memory = Memory("w", root=tmp_path / "worlds", clock=clock)
+    memory.append_goal(
+        GoalRecord(
+            goal_id="g-0001",
+            text="get a furnace",
+            condition="has(furnace)",
+            status="open",
+            skill="get_furnace",
+            t_start=clock.now,
+        )
+    )
+
+    with FakeBody(skills=set(), facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *args, **kwargs: proposal("has(", "broken"),
+            route_fn=lambda *args, **kwargs: Route(kind="play"),
+            skills=catalog(),
+            memory=memory,
+            clock=clock,
+        )
+        try:
+            loop.start()
+            pump(
+                loop,
+                lambda: memory.goals()[0].status == "interrupted",
+                what="stale writing record closed",
+            )
+            assert memory.failures() == {}
+        finally:
+            loop.close()
+
+
+def test_recovery_keeps_the_record_a_background_job_owns(tmp_path) -> None:
+    clock = Clock()
+    memory = Memory("w", root=tmp_path / "worlds", clock=clock)
+    for goal_id, condition in (("g-0001", "has(furnace)"), ("g-0002", "has(coal)")):
+        memory.append_goal(
+            GoalRecord(
+                goal_id=goal_id,
+                text="goal",
+                condition=condition,
+                status="open",
+                skill="get_furnace",
+                t_start=clock.now,
+            )
+        )
+    records = GoalRecords(
+        memory, Evidence(tmp_path / "evidence"), inventory=lambda: {}
+    )
+    recovery = records.recover([], tick=0, cause="reconnect", keep=["g-0001"])
+
+    assert recovery.adopted is None
+    statuses = {record.goal_id: record.status for record in memory.goals()}
+    assert statuses == {"g-0001": "open", "g-0002": "interrupted"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1352,3 +1854,40 @@ def test_an_expired_goal_block_wakes_an_idle_loop() -> None:
     loop._check_heartbeat(facts, is_playing=False, tick=3, heartbeat_pending=False)
     assert len(woken) == 1
     assert ("heartbeat_change", {"reasons": ["block_expired"], "tick": 3}) in loop.evidence.lines
+
+
+def test_a_stop_before_the_body_accepts_is_sent_on_accept() -> None:
+    """A stop pressed between sending a command and its accepted receipt is
+    kept and popped when the receipt arrives (cancel review finding 1)."""
+    from types import SimpleNamespace
+
+    from praxion_brain.curriculum import GoalProposal
+    from praxion_brain.loop import Loop
+    from praxion_brain.memory import GoalRecord
+    from praxion_brain.records import OpenGoal
+
+    pops: list[int] = []
+    lines: list[str] = []
+    record = GoalRecord(goal_id="g-0001", text="get coal", condition="has(coal)", status="open")
+    opened = OpenGoal(
+        record=record,
+        proposal=GoalProposal(text="get coal", condition="has(coal)", rationale=""),
+        skill="get_coal",
+        command_id="c-0001",
+    )
+
+    class Records:
+        def accepted(self, goal, intent_id):
+            goal.intent_id = intent_id
+
+    loop = Loop.__new__(Loop)
+    loop._written, loop._open_goal = None, opened
+    loop.records = Records()
+    loop.session = SimpleNamespace(port=SimpleNamespace(pop=pops.append), snapshot={})
+    loop.evidence = SimpleNamespace(write=lambda kind, **_: lines.append(kind))
+
+    result, _ = loop._stop_goal()
+    assert result == "stop_queued" and pops == []
+    loop._on_receipt({"command_id": "c-0001", "state": "accepted", "intent_id": 7})
+    assert pops == [7]
+    assert "stop_sent_on_accept" in lines

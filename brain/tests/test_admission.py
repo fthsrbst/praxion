@@ -9,10 +9,12 @@ from praxion_brain.admission import (
     WRITE_ESCALATE_AFTER,
     WRITE_INPUT_ESTIMATE,
     WRITE_OUTPUT_ESTIMATE,
+    AdmissionCancelled,
     admit,
     estimate,
     write_model,
 )
+from praxion_brain.cancel import CancelToken
 from praxion_brain.evidence import Evidence
 from praxion_brain.goal import Goal
 from praxion_brain.ledger import Ledger, estimate_cost
@@ -81,7 +83,7 @@ def _practice(fail=lambda attempt, seed: False):
     and "body" for a body failure."""
     calls: list[dict] = []
 
-    def run(*, skill, goal, candidate_dir, seed, max_ticks):
+    def run(*, skill, goal, candidate_dir, seed, max_ticks, cancel=None):
         attempt = int(Path(candidate_dir).name.rsplit("-", 1)[-1])
         calls.append(
             {
@@ -326,6 +328,90 @@ def test_mixed_body_and_skill_failures(tmp_path) -> None:
     lines = (tmp_path / "body_failures.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
 
+
+# --------------------------------------------------------------------------- #
+# Cancel: a timed-out or stopped admission never copies its skill active
+# --------------------------------------------------------------------------- #
+def _passing(seed: int) -> PracticeResult:
+    return PracticeResult(
+        passed=True,
+        outcome="done",
+        ticks=10,
+        run_dir=f"/runs/seed-{seed}",
+        digest="ok",
+        seed=seed,
+    )
+
+
+def _events(tmp_path, kind: str) -> list[dict]:
+    """Every evidence line of ``kind``, oldest first."""
+    path = tmp_path / "evidence" / "brain.jsonl"
+    return [
+        entry
+        for entry in (
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        )
+        if entry["kind"] == kind
+    ]
+
+
+def _cancelling_practice(cancel: CancelToken, *, seeds: tuple[int, ...]):
+    """A practice room that cancels the admission on one of ``seeds``."""
+    calls: list[int] = []
+
+    def run(*, skill, goal, candidate_dir, seed, max_ticks, cancel=None):
+        calls.append(seed)
+        if seed in seeds:
+            cancel.set()
+        return _passing(seed)
+
+    run.calls = calls  # type: ignore[attr-defined]
+    return run
+
+
+def test_a_cancel_between_practice_runs_never_copies_the_skill_active(tmp_path) -> None:
+    cancel = CancelToken()
+    practice = _cancelling_practice(cancel, seeds=(101,))
+
+    with pytest.raises(AdmissionCancelled):
+        _run(tmp_path, practice_fn=practice, cancel=cancel)
+
+    assert practice.calls == [101]  # stopped before the next seed's server
+    assert not (tmp_path / "active" / f"{SKILL}.skill").exists()
+    stopped = _events(tmp_path, "admission_cancelled")
+    assert [(entry["stage"], entry["attempt"]) for entry in stopped] == [("practice", 0)]
+
+
+def test_a_cancel_during_the_held_out_run_never_copies_the_skill_active(tmp_path) -> None:
+    cancel = CancelToken()
+    practice = _cancelling_practice(cancel, seeds=(404,))
+
+    with pytest.raises(AdmissionCancelled):
+        _run(tmp_path, practice_fn=practice, cancel=cancel)
+
+    assert practice.calls == [101, 202, 303, 404]  # every run passed, still no copy
+    assert not (tmp_path / "active" / f"{SKILL}.skill").exists()
+    # The last boundary is the copy: the cancel landed after the final run.
+    stopped = _events(tmp_path, "admission_cancelled")
+    assert [(entry["stage"], entry["attempt"]) for entry in stopped] == [("active", 0)]
+    # No report either: nothing may claim this attempt was admitted.
+    assert not list((tmp_path / "evidence").glob("admission-*.json"))
+    # The run got as far as writing the candidate: only the active copy is the
+    # line this test guards.
+    assert (tmp_path / "candidates" / f"{SKILL}.skill").is_file()
+
+
+def test_a_cancel_before_the_first_attempt_spends_nothing(tmp_path) -> None:
+    cancel = CancelToken()
+    cancel.set()
+    writer = WriterSpy()
+
+    with pytest.raises(AdmissionCancelled):
+        _run(tmp_path, write_fn=writer, cancel=cancel)
+
+    assert writer.calls == []
+    assert not (tmp_path / "active" / f"{SKILL}.skill").exists()
+
 def test_the_writer_model_escalates_after_two_attempts() -> None:
     assert write_model("gpt-6-luna", 0) == "gpt-6-luna"
     assert write_model("gpt-6-luna", 1) == "gpt-6-luna"
@@ -342,3 +428,20 @@ def test_the_writer_estimate_uses_the_model_the_attempt_really_uses() -> None:
     assert estimate("gpt-6-luna", attempt=2) == pytest.approx(
         estimate_cost("gpt-6.1-terra", WRITE_INPUT_ESTIMATE, WRITE_OUTPUT_ESTIMATE)
     )
+
+
+def test_a_practice_run_that_sees_the_cancel_first_records_where_it_stopped(
+    tmp_path,
+) -> None:
+    cancel = CancelToken()
+
+    def killed(*, skill, goal, candidate_dir, seed, max_ticks, cancel):
+        cancel.set()
+        raise AdmissionCancelled("the practice stack was killed")
+
+    with pytest.raises(AdmissionCancelled):
+        _run(tmp_path, practice_fn=killed, cancel=cancel)
+
+    assert not (tmp_path / "active" / f"{SKILL}.skill").exists()
+    stopped = _events(tmp_path, "admission_cancelled")
+    assert [(entry["stage"], entry["attempt"]) for entry in stopped] == [("practice", 0)]

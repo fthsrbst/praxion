@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from praxion_brain.cancel import CancelToken
 from praxion_brain.evidence import Evidence
 from praxion_brain.governor import (
     BREAKER_OPEN_SECONDS,
@@ -223,6 +224,19 @@ def test_call_expires_with_a_typed_timeout(tmp_path) -> None:
     assert time.monotonic() - started < 0.9
     assert caught.value.call_class == "route"
     assert caught.value.seconds == 0.05
+
+
+def test_a_timed_out_call_sets_the_cancel_token_it_was_given(tmp_path) -> None:
+    # The abandoned worker of an admission must stop and never go active.
+    governor, _ledger, _evidence = _governor(tmp_path, call_timeouts={"admission": 0.05})
+    token = CancelToken()
+
+    def stuck() -> None:
+        time.sleep(1.0)
+
+    with pytest.raises(CallTimeout):
+        governor.call("admission", stuck, cancel=token)
+    assert token.is_set()
 
 
 def test_code_only_goal_is_the_first_unmet_rung_with_a_skill() -> None:

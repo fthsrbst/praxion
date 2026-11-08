@@ -5,6 +5,14 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-11-08
 
+- **A brain `pop` of the running intent cancels it (Claude).** Stop and cancel always work (architecture §5.4):
+  the body abandons the in-flight primitive, settles the command with a `settled outcome="cancelled"` receipt,
+  marks the stack entry `done` and gives a suspended goal underneath the body back through the same settle
+  path; the summary lists the goal as `cancelled`. A pop of a `done` or `suspended` entry keeps removing it
+  (`outcome="popped"`). The brain records a stopped goal as `interrupted` / `stopped_by_user` only when that
+  receipt arrives, so the console shows the stop once the body has confirmed it. Reason: the web console's
+  "Stop goal" could not stop a skill that owned the body, because a running pop was ignored.
+  Rules out: a fourth wire message (the pop already carries the intent id); keeping a running pop a no-op.
 - **One "workable" rule for `near`, explore and `mine` (Claude).** A block that would let water or lava in
   when broken does not count for `near(block, r)`, explore's target search or `mine`'s target choice; blocks
   that are used rather than mined (crafting table, furnace, chest, smoker, blast furnace, barrel) always count.

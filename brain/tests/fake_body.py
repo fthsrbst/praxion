@@ -14,7 +14,8 @@ seq gap, ``dropped`` sends an overflow notice followed by a snapshot,
 ``disconnect`` drops the current connection (the server keeps listening),
 ``settle`` finishes a command, ``set_intent_state`` moves an intent to
 ``done``/``suspended`` and ``stop_reading`` pauses the reader so a brain send
-can stall.
+can stall. A ``pop`` of the running intent cancels it, as the Rust body does;
+the test drives the confirmation with ``settle(..., outcome="cancelled")``.
 """
 
 from __future__ import annotations
@@ -445,7 +446,9 @@ class FakeBody:
         if isinstance(message, Pop):
             with self._state:
                 self.pops.append(message.intent_id)
-                # Spec: the brain may pop only a done or suspended intent.
+                # The body releases the entry: `done` or `suspended` just
+                # leaves; `running` is cancelled and settles `cancelled` on the
+                # body's next tick, which a test scripts with `settle`.
                 entry = next(
                     (
                         item
@@ -454,17 +457,18 @@ class FakeBody:
                     ),
                     None,
                 )
-                if entry is not None and entry.state in ("done", "suspended"):
+                if entry is not None:
                     self.stack = [
                         item
                         for item in self.stack
                         if item.intent_id != message.intent_id
                     ]
-                    self._command_intents = {
-                        command_id: intent_id
-                        for command_id, intent_id in self._command_intents.items()
-                        if intent_id != message.intent_id
-                    }
+                    if entry.state != "running":
+                        self._command_intents = {
+                            command_id: intent_id
+                            for command_id, intent_id in self._command_intents.items()
+                            if intent_id != message.intent_id
+                        }
             return
         if isinstance(message, ClientHello):
             raise ProtocolError("unexpected hello after the handshake")
