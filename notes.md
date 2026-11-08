@@ -6,6 +6,16 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-08, Claude Opus 5.5: first live `learn get_furnace`
+- The whole slice ran end to end: Jev routed "have a furnace" to write (every known skill ~0.02), the writer
+  produced four candidates (2x `gpt-6-luna`, 2x escalated `gpt-6.1-terra`), all passed `check-skills`, and the
+  third (terra) made a furnace on seed 101 in 5140 ticks. Total cost $0.009 (OpenAI) + $0.00006 (Jev).
+- Admission still rejected it: every practice failure was a body failure (`explore(stone) not_found`,
+  `mine(stone) no_block`), which the writer cannot fix (architecture §6.2). Admission now separates body from
+  skill failures (spare seeds, `local/brain/body_failures.jsonl`).
+- Body gap exposed: in flat terrain stone is under the dirt and the body has no way down. A person digs a
+  staircase. Next body capability. Report: `local/brain/admission-get_furnace-20261108T094429474802Z.json`.
+
 ## 2026-11-08, Claude Opus 5.5: lively gaze, far sight, explore
 - C3 lively gaze (1026235), C4 far cue (6a9a1da, 799a476) and explore seek-while-walking plus a
   look-around turn (ca9bf47) landed. Live run 2: 18/18 receipts, pitch now varies (123 distinct values).

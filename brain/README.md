@@ -48,5 +48,8 @@ budget), `evidence.py` (JSONL log), `goal.py`, `skills.py` (catalog parsing and
 `check-skills`), `writer.py` (prompt plus `responses.parse`), `router.py`
 (TypeSafe System One), `practice.py` (one headless run), `admission.py`
 (write -> check -> practice -> active), `port.py` (body port v0 client and
-framing) and `cli.py`. `tests/fake_body.py` is the scriptable in-process body
-used by the port tests.
+framing), `conditions.py` (inventory guard subset), `ladder.py` (the twelve
+rungs), `memory.py` (goals, skill uses, failure memory, drift), `briefing.py`
+(the capped briefing text), `curriculum.py` (proposal model and validation) and
+`cli.py`. `tests/fake_body.py` is the scriptable in-process body used by the
+port tests.

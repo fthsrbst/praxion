@@ -68,6 +68,8 @@ class CheckSpy:
 
 
 def _practice(fail=lambda attempt, seed: False):
+    """``fail`` returns False/None to pass, True/"skill" for a skill failure
+    and "body" for a body failure."""
     calls: list[dict] = []
 
     def run(*, skill, goal, candidate_dir, seed, max_ticks):
@@ -82,17 +84,33 @@ def _practice(fail=lambda attempt, seed: False):
                 "attempt": attempt,
             }
         )
-        passed = not fail(attempt, seed)
+        decision = fail(attempt, seed)
+        if decision == "body":
+            failure_class = "body"
+            outcome = "failed(no_block)"
+            failure_kind = "no_block"
+        elif decision:
+            failure_class = "skill"
+            outcome = "failed(no_rule)"
+            failure_kind = "no_rule"
+        else:
+            failure_class = None
+            outcome = "done"
+            failure_kind = None
+        passed = failure_class is None
         return PracticeResult(
             passed=passed,
-            outcome="done" if passed else "failed(no_rule)",
+            outcome=outcome,
             ticks=100,
             receipts={"mine": 1} if passed else {},
             deaths=0,
             run_dir=f"/runs/seed-{seed}",
-            digest="failure kind: none" if passed else "failure kind: no_rule\nrule_selected get_furnace rule=3",
+            digest="failure kind: none"
+            if passed
+            else f"failure kind: {failure_kind}\nrule_selected get_furnace rule=3",
             seed=seed,
-            failure_kind=None if passed else "no_rule",
+            failure_kind=failure_kind,
+            failure_class=failure_class,
         )
 
     run.calls = calls  # type: ignore[attr-defined]
@@ -113,6 +131,7 @@ def _run(tmp_path, **kwargs):
         attempts_root=tmp_path / "attempts",
         candidates_root=tmp_path / "candidates",
         active_dir=tmp_path / "active",
+        body_failures_path=tmp_path / "body_failures.jsonl",
         max_ticks=50,
     )
     defaults.update(kwargs)
@@ -164,6 +183,7 @@ def test_practice_failure_goes_back_to_the_writer_then_passes(tmp_path) -> None:
     assert len(report.attempts) == 2
     assert report.repairs_used == 1
     assert len(report.attempts[0].practices) == 1  # stopped at the first failure
+    assert report.attempts[0].practices[0].failure_class == "skill"
     assert writer.calls[1]["failure"].kind == "no_rule"
     assert "rule_selected get_furnace rule=3" in writer.calls[1]["failure"].digest
     assert [call["seed"] for call in practice.calls] == [101, 101, 202, 303, 404]
@@ -215,3 +235,84 @@ def test_no_escalation_for_a_model_that_is_not_luna(tmp_path) -> None:
         max_repairs=2,
     )
     assert [call["model"] for call in writer.calls] == ["gpt-6.1-terra"] * 3
+
+
+def test_body_failure_uses_a_spare_seed_without_a_repair(tmp_path) -> None:
+    writer = WriterSpy()
+    practice = _practice(
+        fail=lambda attempt, seed: "body" if attempt == 0 and seed == 101 else False
+    )
+    report = _run(tmp_path, write_fn=writer, practice_fn=practice)
+
+    assert report.status == "admitted"
+    assert report.repairs_used == 0
+    assert len(writer.calls) == 1
+    assert [call["seed"] for call in practice.calls] == [101, 505, 202, 303, 404]
+    assert report.body_failures == 1
+    assert report.attempts[0].practices[0].failure_class == "body"
+
+    lines = (tmp_path / "body_failures.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["seed"] == 101
+    assert entry["run_dir"] == "/runs/seed-101"
+    assert entry["failure_kind"] == "no_block"
+    assert "failure kind: no_block" in entry["digest"]
+
+
+def test_three_body_failures_end_inconclusive_body(tmp_path) -> None:
+    writer = WriterSpy()
+    practice = _practice(fail=lambda attempt, seed: "body" if attempt == 0 else False)
+    report = _run(tmp_path, write_fn=writer, practice_fn=practice)
+
+    assert report.status == "inconclusive_body"
+    assert report.body_failures == 3
+    assert report.repairs_used == 0
+    assert len(writer.calls) == 1
+    assert [call["seed"] for call in practice.calls] == [101, 505, 606]
+    assert not (tmp_path / "active" / f"{SKILL}.skill").exists()
+    saved = json.loads(Path(report.report_path).read_text(encoding="utf-8"))
+    assert saved["status"] == "inconclusive_body"
+    assert saved["body_failures"] == 3
+
+
+def test_body_failure_on_held_out_stays_inconclusive(tmp_path) -> None:
+    writer = WriterSpy()
+    practice = _practice(
+        fail=lambda attempt, seed: "body" if attempt == 0 and seed == 404 else False
+    )
+    report = _run(tmp_path, write_fn=writer, practice_fn=practice)
+
+    assert report.status == "inconclusive_body"
+    assert report.body_failures == 1
+    assert not (tmp_path / "active" / f"{SKILL}.skill").exists()
+
+
+def test_mixed_body_and_skill_failures(tmp_path) -> None:
+    writer = WriterSpy()
+
+    def fail(attempt, seed):
+        if attempt == 0 and seed == 101:
+            return "body"
+        if attempt == 0 and seed == 202:
+            return "skill"
+        return False
+
+    practice = _practice(fail=fail)
+    report = _run(tmp_path, write_fn=writer, practice_fn=practice)
+
+    assert report.status == "admitted"
+    assert report.repairs_used == 1
+    assert report.body_failures == 1
+    assert [call["seed"] for call in practice.calls] == [
+        101,
+        505,
+        202,
+        101,
+        202,
+        303,
+        404,
+    ]
+    assert writer.calls[1]["failure"].kind == "no_rule"
+    lines = (tmp_path / "body_failures.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1

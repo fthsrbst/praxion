@@ -6,6 +6,7 @@ callables, so the flow is unit-tested without a model, a Jev key or a server.
 
 from __future__ import annotations
 
+import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,11 @@ WriteFn = Callable[..., SkillDraft]
 CheckFn = Callable[[Path], CheckReport]
 PracticeFn = Callable[..., PracticeResult]
 
+#: Seeds used when a body failure makes a practice seed unusable.
+SPARE_SEEDS = (505, 606, 707)
+#: Body failures an admission tolerates before it stops without a verdict.
+BODY_FAILURE_LIMIT = 3
+
 
 class AttemptRecord(BaseModel):
     attempt: int
@@ -45,11 +51,12 @@ class AttemptRecord(BaseModel):
 
 class AdmissionReport(BaseModel):
     goal: Goal
-    status: Literal["admitted", "rejected"]
+    status: Literal["admitted", "rejected", "inconclusive_body"]
     skill_name: str
     active_path: str | None = None
     attempts: list[AttemptRecord] = Field(default_factory=list)
     repairs_used: int = 0
+    body_failures: int = 0
     reason: str | None = None
     report_path: str | None = None
 
@@ -86,6 +93,19 @@ def _practice_failure(result: PracticeResult) -> tuple[str, str]:
     return kind, result.digest
 
 
+def _record_body_failure(path: Path, result: PracticeResult) -> None:
+    """Append one body failure for the orchestrator to triage."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "seed": result.seed,
+        "run_dir": result.run_dir,
+        "failure_kind": result.failure_kind,
+        "digest": result.digest,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
 def _write_report(report: AdmissionReport, evidence: Evidence) -> AdmissionReport:
     evidence.directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -103,6 +123,8 @@ def admit(
     max_repairs: int = 3,
     *,
     max_ticks: int = 12_000,
+    spare_seeds: Sequence[int] = SPARE_SEEDS,
+    body_failures_path: Path | None = None,
     write_fn: WriteFn | None = None,
     check_fn: CheckFn | None = None,
     practice_fn: PracticeFn | None = None,
@@ -127,6 +149,11 @@ def admit(
         Path(candidates_root) if candidates_root is not None else config.candidates_dir()
     )
     active_dir = Path(active_dir) if active_dir is not None else config.active_skills_dir()
+    body_failures_path = (
+        Path(body_failures_path)
+        if body_failures_path is not None
+        else config.local_brain_dir() / "body_failures.jsonl"
+    )
     attempts_root.mkdir(parents=True, exist_ok=True)
     candidates_root.mkdir(parents=True, exist_ok=True)
 
@@ -136,7 +163,11 @@ def admit(
     attempts: list[AttemptRecord] = []
     active_path: str | None = None
     admitted = False
+    inconclusive = False
     reason: str | None = None
+    body_failures = 0
+    spares = list(spare_seeds)
+    required_passes = len(seeds)
 
     for attempt in range(max_repairs + 1):
         model = writer_model
@@ -198,7 +229,13 @@ def admit(
             continue
 
         failed: PracticeResult | None = None
-        for seed in (*seeds, held_out):
+        passed_seeds: list[int] = []
+        held_out_passed = False
+        seeds_to_run = [*seeds, held_out]
+
+        index = 0
+        while index < len(seeds_to_run):
+            seed = seeds_to_run[index]
             result = practice_fn(
                 skill=goal.skill_name,
                 goal=goal,
@@ -213,12 +250,42 @@ def admit(
                 seed=seed,
                 passed=result.passed,
                 outcome=result.outcome,
+                failure_class=result.failure_class,
                 run_dir=result.run_dir,
                 digest=result.digest,
             )
-            if not result.passed:
+            if result.passed:
+                passed_seeds.append(seed)
+                if seed == held_out:
+                    held_out_passed = True
+                index += 1
+                continue
+
+            if result.failure_class != "body":
                 failed = result
                 break
+
+            body_failures += 1
+            _record_body_failure(body_failures_path, result)
+            evidence.write(
+                "admission_body_failure",
+                attempt=attempt,
+                seed=seed,
+                failure_kind=result.failure_kind,
+                run_dir=result.run_dir,
+            )
+            if body_failures >= BODY_FAILURE_LIMIT or not spares:
+                inconclusive = True
+                reason = (
+                    f"inconclusive_body after {len(attempts) + 1} attempt(s): "
+                    f"{body_failures} body failure(s)"
+                )
+                break
+            seeds_to_run[index] = spares.pop(0)
+
+        if inconclusive:
+            attempts.append(record)
+            break
 
         if failed is not None:
             kind, digest = _practice_failure(failed)
@@ -232,6 +299,16 @@ def admit(
             )
             continue
 
+        training_passes = sum(1 for seed in passed_seeds if seed != held_out)
+        if not (held_out_passed and training_passes >= required_passes):
+            attempts.append(record)
+            inconclusive = True
+            reason = (
+                f"inconclusive_body after {len(attempts)} attempt(s): "
+                f"{body_failures} body failure(s), no held-out pass"
+            )
+            break
+
         attempts.append(record)
         admitted = True
         active_dir.mkdir(parents=True, exist_ok=True)
@@ -240,16 +317,25 @@ def admit(
         active_path = str(target)
         break
 
-    if not admitted:
+    if not admitted and not inconclusive:
         reason = f"rejected after {len(attempts)} attempt(s)"
+
+    status: Literal["admitted", "rejected", "inconclusive_body"]
+    if admitted:
+        status = "admitted"
+    elif inconclusive:
+        status = "inconclusive_body"
+    else:
+        status = "rejected"
 
     report = AdmissionReport(
         goal=goal,
-        status="admitted" if admitted else "rejected",
+        status=status,
         skill_name=goal.skill_name,
         active_path=active_path,
         attempts=attempts,
         repairs_used=max(0, len(attempts) - 1),
+        body_failures=body_failures,
         reason=reason,
     )
     report = _write_report(report, evidence)
@@ -257,4 +343,10 @@ def admit(
     return report
 
 
-__all__ = ["AdmissionReport", "AttemptRecord", "admit"]
+__all__ = [
+    "BODY_FAILURE_LIMIT",
+    "SPARE_SEEDS",
+    "AdmissionReport",
+    "AttemptRecord",
+    "admit",
+]
