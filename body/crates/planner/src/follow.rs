@@ -14,9 +14,6 @@
 
 use praxion_headless::{ControlFrame, Held};
 use praxion_world::{BlockPos, Vec3};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Normal};
 
 use crate::Step;
 use crate::look::{Personality, aim, wrap_degrees};
@@ -44,18 +41,6 @@ const SPRINT_RELEASE_TICKS: u64 = 12;
 /// How far ahead, in blocks along the route, a hazard still changes the gate
 /// and refuses sprint.
 const HAZARD_WINDOW: f64 = 4.0;
-/// A glance needs more route than this left, in blocks.
-const GLANCE_MIN_REMAINING: f64 = 4.0;
-/// Ticks per second of the body, for the glance durations.
-const TICKS_PER_SECOND: f32 = 20.0;
-
-/// A walking glance: a short look off the carrot and back (research §4.6).
-#[derive(Clone, Copy, Debug)]
-struct Glance {
-    end_tick: u64,
-    yaw_offset: f32,
-    pitch_offset: f32,
-}
 
 /// What the route ahead asks of the follower this tick.
 #[derive(Clone, Copy, Debug, Default)]
@@ -92,12 +77,6 @@ pub struct Follower {
     forward_since: Option<u64>,
     /// Sprint is released until this tick after a replan.
     sprint_release_until: Option<u64>,
-    /// The glance in progress, if any.
-    glance: Option<Glance>,
-    /// The tick the next glance may start on a safe stretch.
-    next_glance: Option<u64>,
-    /// The seeded stream for glance timing, direction and duration.
-    glance_rng: StdRng,
 }
 
 /// What the follower reports for the caller's progress check.
@@ -122,11 +101,6 @@ impl Follower {
         style: Personality,
     ) -> Self {
         let route = Route::from_steps(&steps, world, state);
-        let glance_seed = style.seed ^ route.points().first().map_or(0, |point| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&point.pos, &mut hasher);
-            std::hash::Hasher::finish(&hasher)
-        });
         Self {
             steps,
             route,
@@ -141,9 +115,6 @@ impl Follower {
             yaw_request: None,
             forward_since: None,
             sprint_release_until: None,
-            glance: None,
-            next_glance: None,
-            glance_rng: StdRng::seed_from_u64(glance_seed),
         }
     }
 
@@ -219,7 +190,6 @@ impl Follower {
             (bearing, yaw)
         };
         let pitch = self.walking_pitch(position, target);
-        let look_yaw = yaw;
 
         let step = &self.steps[point.step];
 
@@ -333,44 +303,9 @@ impl Follower {
             self.stalled = true;
         }
 
-        // A glance is allowed only on a long, open, flat, hazard-free stretch.
-        // The gate above already used the carrot bearing, never the glance.
-        let remaining = self.route.remaining(position);
-        let safe = walk
-            && point.open
-            && !hazards.tight
-            && !hazards.no_sprint
-            && remaining > GLANCE_MIN_REMAINING
-            && frame.held.forward;
-        if !safe {
-            self.glance = None;
-            self.next_glance = None;
-        } else if self.glance.is_some_and(|glance| tick >= glance.end_tick) {
-            self.glance = None;
-            self.yaw_request = Some(bearing);
-            let next = tick.saturating_add(self.glance_interval());
-            self.next_glance = Some(next);
-        } else if self.glance.is_none() {
-            if self.next_glance.is_none() {
-                let next = tick.saturating_add(self.glance_interval());
-                self.next_glance = Some(next);
-            }
-            if tick >= self.next_glance.unwrap_or(u64::MAX) {
-                let glance = self.start_glance(tick);
-                self.glance = Some(glance);
-                self.next_glance = None;
-            }
-        }
-        frame.look = match self.glance {
-            Some(glance) => praxion_headless::Look::Aim {
-                yaw: bearing + glance.yaw_offset,
-                pitch: pitch + glance.pitch_offset,
-            },
-            None => praxion_headless::Look::Aim {
-                yaw: look_yaw,
-                pitch,
-            },
-        };
+        // The look is always the carrot: a walking glance would bend the
+        // walking direction in Minecraft, so it is out of v0 (research §5).
+        frame.look = praxion_headless::Look::Aim { yaw, pitch };
         frame
     }
 
@@ -445,30 +380,6 @@ impl Follower {
         let ahead = horizontal_distance(position, target).max(1.0);
         let slope = (-0.5 * (dy / ahead).atan()).to_degrees() as f32;
         (self.style.walk_pitch + slope.clamp(-10.0, 10.0)).clamp(-90.0, 90.0)
-    }
-
-    /// A uniform glance interval: `U(3, 8) s`.
-    fn glance_interval(&mut self) -> u64 {
-        (TICKS_PER_SECOND * self.glance_rng.gen_range(3.0..8.0))
-            .round()
-            .max(1.0) as u64
-    }
-
-    /// Start a glance: `+-U(12, 30)` deg of yaw, `N(0, 6)` deg of pitch, for
-    /// `U(0.4, 0.9) s`.
-    fn start_glance(&mut self, tick: u64) -> Glance {
-        let sign = if self.glance_rng.gen_bool(0.5) { 1.0 } else { -1.0 };
-        let yaw_offset = sign * self.glance_rng.gen_range(12.0..30.0);
-        let pitch_offset = Normal::new(0.0, 6.0)
-            .expect("the glance normal is a valid distribution")
-            .sample(&mut self.glance_rng);
-        let seconds = self.glance_rng.gen_range(0.4..0.9);
-        let ticks = (TICKS_PER_SECOND * seconds).round().max(1.0) as u64;
-        Glance {
-            end_tick: tick.saturating_add(ticks),
-            yaw_offset,
-            pitch_offset,
-        }
     }
 
     fn advance_if_reached(&mut self, position: Vec3) {
@@ -953,7 +864,9 @@ mod tests {
     }
 
     #[test]
-    fn a_glance_happens_on_a_long_open_flat_route() {
+    fn a_straight_route_never_looks_off_its_carrot() {
+        // No walking glance: on a straight open run the yaw request stays the
+        // carrot bearing, so the body never veers off the planned route.
         let mut world = TestWorld::flat(63, 64);
         let mut body = body_at(0.5, 64.0, 0.5);
         settle(&mut body);
@@ -964,94 +877,25 @@ mod tests {
             &PlanningState::default(),
             Personality::default(),
         );
-        let mut glanced = false;
-        let mut forward_during_glance = true;
+        let mut first_yaw = None;
         for tick in 0..400u64 {
             let frame = follower.step(tick, body.generation(), &body);
-            if follower.glance.is_some() {
-                glanced = true;
-                forward_during_glance &= frame.held.forward;
-            }
-            frame.apply(&mut body, tick).unwrap();
-            body.step(&frame.held, &GroundWorld);
             if follower.is_done() {
                 break;
             }
-        }
-        assert!(glanced, "no glance in 400 ticks on an open route");
-        assert!(
-            forward_during_glance,
-            "the gate must keep using the carrot bearing during a glance"
-        );
-    }
-
-    #[test]
-    fn no_glance_while_a_descend_is_within_the_hazard_window() {
-        let mut world = TestWorld::flat(63, 16);
-        let mut path = vec![
-            step(
-                BlockPos::new(0, 64, 0),
-                BlockPos::new(1, 64, 0),
-                MoveKind::Walk,
-            ),
-            step(
-                BlockPos::new(1, 64, 0),
-                BlockPos::new(2, 63, 0),
-                MoveKind::Descend { drop: 1 },
-            ),
-        ];
-        for x in 2..10 {
-            path.push(step(
-                BlockPos::new(x, 63, 0),
-                BlockPos::new(x + 1, 63, 0),
-                MoveKind::Walk,
-            ));
-        }
-        let body = body_at(0.5, 64.0, 0.5);
-        let mut follower = Follower::new(
-            path,
-            &mut world,
-            &PlanningState::default(),
-            Personality::default(),
-        );
-        for tick in 0..400u64 {
-            let frame = follower.step(tick, body.generation(), &body);
-            assert!(
-                follower.glance.is_none(),
-                "glance near a drop at tick {tick}: {:?}",
-                frame.look
-            );
-        }
-    }
-
-    #[test]
-    fn glance_noise_is_deterministic_from_the_style_seed() {
-        let run = || {
-            let mut world = TestWorld::flat(63, 16);
-            let mut body = body_at(0.5, 64.0, 0.5);
-            settle(&mut body);
-            body.set_look(azalea_entity::LookDirection::new(-90.0, 8.0));
-            let mut follower = Follower::new(
-                walk_steps(12),
-                &mut world,
-                &PlanningState::default(),
-                Personality {
-                    seed: 5,
-                    ..Personality::default()
-                },
-            );
-            let mut output = Vec::new();
-            for tick in 0..300u64 {
-                let frame = follower.step(tick, body.generation(), &body);
-                output.push(frame.look);
-                frame.apply(&mut body, tick).unwrap();
-                body.step(&frame.held, &GroundWorld);
-                if follower.is_done() {
-                    break;
+            match frame.look {
+                Look::Aim { yaw, .. } => {
+                    let expected = *first_yaw.get_or_insert(yaw);
+                    assert!(
+                        (yaw - expected).abs() < 1e-4,
+                        "the look left the straight carrot at tick {tick}: {yaw} vs {expected}"
+                    );
                 }
+                other => panic!("the follower must always aim, got {other:?}"),
             }
-            output
-        };
-        assert_eq!(run(), run());
+            frame.apply(&mut body, tick).unwrap();
+            body.step(&frame.held, &GroundWorld);
+        }
+        assert!(first_yaw.is_some(), "the follower never produced a look");
     }
 }

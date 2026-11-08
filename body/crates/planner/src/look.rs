@@ -28,8 +28,9 @@ const DRIFT_SIGMA: f32 = 2.0;
 const DRIFT_MAX_DEG: f32 = 6.0;
 /// The drift's integration step, in seconds (one tick).
 const DRIFT_DT: f32 = 0.05;
-/// The factor the drift offsets decay by outside `Walking`.
-const DRIFT_DECAY: f32 = 0.9;
+/// The pitch error a walking drift must exceed before it starts a gesture
+/// (research §4.5).
+const PITCH_DEADBAND_DEG: f32 = 1.5;
 /// A gesture's travel may miss by up to 6 % (half of this).
 const LANDING_BIAS: f32 = 0.12;
 /// A request that moves by more than this restarts the running gesture.
@@ -58,8 +59,6 @@ pub struct Personality {
     pub sprint_delay_ticks: u32,
     /// The walking pitch, in degrees down (Minecraft's positive pitch).
     pub walk_pitch: f32,
-    /// The seed of the follower's glance noise (research §4.6).
-    pub seed: u64,
 }
 
 impl Personality {
@@ -76,14 +75,12 @@ impl Personality {
                 (20.0_f32 * rng.gen_range(0.1_f32..0.8)).round() as u32
             },
             walk_pitch: 0.0,
-            seed: 0,
         };
         // Drawn after the older traits so their values never change (§4.6).
         let gauss: f32 = Normal::new(0.0, 1.0)
             .expect("the unit normal is a valid distribution")
             .sample(rng);
         personality.walk_pitch = (6.0 + 5.0 * gauss).clamp(-5.0, 16.0);
-        personality.seed = rng.r#gen();
         personality
     }
 
@@ -91,15 +88,14 @@ impl Personality {
     pub fn describe(&self) -> String {
         format!(
             "gaze turn_time={:.3} step={:.2} look_ahead={:.2} deadband={:.1} \
-             sprints={} sprint_delay={} walk_pitch={:.1} seed={}",
+             sprints={} sprint_delay={} walk_pitch={:.1}",
             self.turn_time,
             self.step_deg,
             self.look_ahead,
             self.deadband_deg,
             self.sprints,
             self.sprint_delay_ticks,
-            self.walk_pitch,
-            self.seed
+            self.walk_pitch
         )
     }
 }
@@ -115,7 +111,6 @@ impl Default for Personality {
             sprints: true,
             sprint_delay_ticks: 0,
             walk_pitch: 8.0,
-            seed: 0,
         }
     }
 }
@@ -241,8 +236,8 @@ pub enum Cue {
     Urgent,
 }
 
-/// What the body is doing, from the driver's frame: a walking gaze drifts and
-/// glances, an idle one looks around, and a still one (a menu) does neither.
+/// What the body is doing, from the driver's frame: a walking gaze drifts its
+/// pitch, an idle one looks around, and a still one (a menu) does neither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GazeMode {
     Walking,
@@ -276,8 +271,7 @@ pub struct Gaze {
     delay_until: u64,
     /// A correction waits until this tick, after a gesture that landed off.
     correction_at: Option<u64>,
-    /// The walking drift offsets, in degrees (research §4.6).
-    drift_yaw: f32,
+    /// The walking pitch drift, in degrees (research §4.6).
     drift_pitch: f32,
     /// The next idle-gaze gesture, after the no-request pause.
     idle_next: Option<u64>,
@@ -307,7 +301,6 @@ impl Gaze {
             none_ticks: 0,
             delay_until: 0,
             correction_at: None,
-            drift_yaw: 0.0,
             drift_pitch: 0.0,
             idle_next: None,
             initialized: false,
@@ -328,10 +321,10 @@ impl Gaze {
         mode: GazeMode,
     ) -> Look {
         self.resync(body_look);
-        self.absorb(request, cue, tick);
+        self.absorb(request, cue, tick, mode);
         self.update_drift(mode);
         self.maybe_idle(tick, mode, request);
-        self.maybe_start(tick);
+        self.maybe_start(tick, mode);
 
         let mut ended = false;
         if let Some(gesture) = &self.gesture {
@@ -352,16 +345,12 @@ impl Gaze {
             }
         }
 
-        if self.gesture.is_none()
-            && !ended
-            && self.drift_yaw == 0.0
-            && self.drift_pitch == 0.0
-        {
+        if self.gesture.is_none() && !ended {
             return Look::None;
         }
         let look = self.quantise(self.gesture.is_some() || ended);
         if ended {
-            self.schedule_correction(tick);
+            self.schedule_correction(tick, mode);
         }
         look
     }
@@ -373,20 +362,19 @@ impl Gaze {
             .sample(&mut self.rng)
     }
 
-    /// Walk one tick of the Ornstein-Uhlenbeck drift (research §4.6). The
-    /// offsets are output only: they never move the request or the gesture.
+    /// Walk one tick of the Ornstein-Uhlenbeck pitch drift (research §4.6).
+    /// The offset only shifts the walking pitch goal; it is never added to the
+    /// output. Outside `Walking` it is zero at once, so a primitive's aim is
+    /// reached exactly.
     fn update_drift(&mut self, mode: GazeMode) {
         if mode == GazeMode::Walking {
-            let (noise_yaw, noise_pitch) = (self.gauss(), self.gauss());
+            let noise = self.gauss();
             let decay = 1.0 - DRIFT_DT / DRIFT_TAU;
             let kick = DRIFT_SIGMA * DRIFT_DT.sqrt();
-            self.drift_yaw =
-                (self.drift_yaw * decay + kick * noise_yaw).clamp(-DRIFT_MAX_DEG, DRIFT_MAX_DEG);
-            self.drift_pitch = (self.drift_pitch * decay + kick * noise_pitch)
-                .clamp(-DRIFT_MAX_DEG, DRIFT_MAX_DEG);
+            self.drift_pitch =
+                (self.drift_pitch * decay + kick * noise).clamp(-DRIFT_MAX_DEG, DRIFT_MAX_DEG);
         } else {
-            self.drift_yaw *= DRIFT_DECAY;
-            self.drift_pitch *= DRIFT_DECAY;
+            self.drift_pitch = 0.0;
         }
     }
 
@@ -466,7 +454,6 @@ impl Gaze {
         self.ideal_pitch = pitch;
         self.base_yaw = yaw;
         self.base_pitch = pitch;
-        self.drift_yaw = 0.0;
         self.drift_pitch = 0.0;
         self.velocity_yaw = 0.0;
         self.velocity_pitch = 0.0;
@@ -479,7 +466,7 @@ impl Gaze {
         }
     }
 
-    fn absorb(&mut self, request: Look, cue: Cue, tick: u64) {
+    fn absorb(&mut self, request: Look, cue: Cue, tick: u64, mode: GazeMode) {
         let Look::Aim { yaw, pitch } = request else {
             self.last_request = None;
             self.none_ticks = self.none_ticks.saturating_add(1);
@@ -508,7 +495,18 @@ impl Gaze {
         self.none_ticks = 0;
         if self.gesture.is_some() && moved && tick >= self.delay_until {
             // Keep position and velocity continuous across the new target.
-            self.begin_gesture(tick);
+            let pitch_goal = request_pitch + self.drift_goal(mode);
+            self.begin_gesture_to(tick, request_yaw, pitch_goal);
+        }
+    }
+
+    /// The pitch offset the walking drift adds to the goal. Outside `Walking`
+    /// it is zero, so the request itself is the goal.
+    fn drift_goal(&self, mode: GazeMode) -> f32 {
+        if mode == GazeMode::Walking {
+            self.drift_pitch
+        } else {
+            0.0
         }
     }
 
@@ -520,7 +518,7 @@ impl Gaze {
         (TICKS_PER_SECOND * seconds).round().max(3.0) as u64
     }
 
-    fn maybe_start(&mut self, tick: u64) {
+    fn maybe_start(&mut self, tick: u64, mode: GazeMode) {
         if self.gesture.is_some() || tick < self.delay_until {
             return;
         }
@@ -530,31 +528,42 @@ impl Gaze {
         let Some((request_yaw, request_pitch)) = self.last_request else {
             return;
         };
-        // Compare against the drift-free camera: the walking drift is an output
-        // offset and must never start a gesture.
+        // While walking the drift moves the pitch goal, but only through a
+        // gesture once it leaves the 1.5 deg deadband (research §4.5). Outside
+        // `Walking` the goal is the request itself.
+        let pitch_goal = request_pitch + self.drift_goal(mode);
+        let pitch_deadband = if mode == GazeMode::Walking {
+            PITCH_DEADBAND_DEG
+        } else {
+            self.personality.step_deg
+        };
         let off = wrap_degrees(request_yaw - self.base_yaw).abs() > self.personality.step_deg
-            || (request_pitch - self.base_pitch).abs() > self.personality.step_deg;
+            || (pitch_goal - self.base_pitch).abs() > pitch_deadband;
         if off {
-            self.begin_gesture(tick);
+            self.begin_gesture_to(tick, request_yaw, pitch_goal);
         }
     }
 
     /// Start a quintic from the current ideal position and velocity toward the
-    /// current target, with the per-axis landing bias.
+    /// stored target, with the per-axis landing bias.
     fn begin_gesture(&mut self, tick: u64) {
+        let (target_yaw, target_pitch) = (self.target_yaw, self.target_pitch);
+        self.begin_gesture_to(tick, target_yaw, target_pitch);
+    }
+
+    /// Start a quintic toward an explicit goal, with the per-axis landing bias.
+    fn begin_gesture_to(&mut self, tick: u64, target_yaw: f32, target_pitch: f32) {
         let x0_yaw = self.ideal_yaw;
         let x0_pitch = self.ideal_pitch;
         let v0_yaw = self.velocity_yaw;
         let v0_pitch = self.velocity_pitch;
-        let x1_yaw = self.target_yaw
-            + (self.rng.gen_range(0.0..1.0) - 0.5) * LANDING_BIAS * (self.target_yaw - x0_yaw);
-        let x1_pitch = self.target_pitch
-            + (self.rng.gen_range(0.0..1.0) - 0.5) * LANDING_BIAS * (self.target_pitch - x0_pitch);
-        let distance = ((self.target_yaw - x0_yaw).powi(2)
-            + (self.target_pitch - x0_pitch).powi(2))
-        .sqrt();
-        let seconds = ((0.08 + 0.30 * (distance / 90.0).sqrt()) * self.personality.turn_time)
-            .max(0.10);
+        let x1_yaw = target_yaw
+            + (self.rng.gen_range(0.0..1.0) - 0.5) * LANDING_BIAS * (target_yaw - x0_yaw);
+        let x1_pitch = target_pitch
+            + (self.rng.gen_range(0.0..1.0) - 0.5) * LANDING_BIAS * (target_pitch - x0_pitch);
+        let distance = ((target_yaw - x0_yaw).powi(2) + (target_pitch - x0_pitch).powi(2)).sqrt();
+        let seconds =
+            ((0.08 + 0.30 * (distance / 90.0).sqrt()) * self.personality.turn_time).max(0.10);
         let duration_ticks = (seconds * TICKS_PER_SECOND).max(2.0);
         self.gesture = Some(Gesture::new(
             tick,
@@ -566,13 +575,19 @@ impl Gaze {
         self.correction_at = None;
     }
 
-    fn schedule_correction(&mut self, tick: u64) {
+    fn schedule_correction(&mut self, tick: u64, mode: GazeMode) {
         let Some((request_yaw, request_pitch)) = self.last_request else {
             self.correction_at = None;
             return;
         };
+        let pitch_goal = request_pitch + self.drift_goal(mode);
+        let pitch_deadband = if mode == GazeMode::Walking {
+            PITCH_DEADBAND_DEG
+        } else {
+            self.personality.step_deg
+        };
         let off = wrap_degrees(request_yaw - self.base_yaw).abs() > self.personality.step_deg
-            || (request_pitch - self.base_pitch).abs() > self.personality.step_deg;
+            || (pitch_goal - self.base_pitch).abs() > pitch_deadband;
         self.correction_at = if off {
             Some(tick.saturating_add(CORRECTION_PAUSE_TICKS + 1))
         } else {
@@ -589,10 +604,8 @@ impl Gaze {
             self.base_yaw += ((self.ideal_yaw - self.base_yaw) / step).round() * step;
             self.base_pitch += ((self.ideal_pitch - self.base_pitch) / step).round() * step;
         }
-        let target_yaw = self.ideal_yaw + self.drift_yaw;
-        let target_pitch = self.ideal_pitch + self.drift_pitch;
-        let dyaw = ((target_yaw - self.emitted_yaw) / step).round() * step;
-        let dpitch = ((target_pitch - self.emitted_pitch) / step).round() * step;
+        let dyaw = ((self.ideal_yaw - self.emitted_yaw) / step).round() * step;
+        let dpitch = ((self.ideal_pitch - self.emitted_pitch) / step).round() * step;
         self.emitted_yaw += dyaw;
         self.emitted_pitch += dpitch;
         if dyaw == 0.0 && dpitch == 0.0 {
@@ -987,37 +1000,124 @@ mod tests {
     }
 
     #[test]
-    fn walking_drift_varies_on_the_grid_within_six_degrees() {
+    fn walking_pitch_drift_moves_only_through_gestures() {
         let mut rig = Rig::new(9);
-        let request = Look::Aim {
-            yaw: 30.,
-            pitch: 5.,
-        };
-        for _ in 0..80 {
+        let request = Look::Aim { yaw: 0., pitch: 5. };
+        // Let the first pitch gesture settle.
+        for _ in 0..100 {
             rig.step_mode(request, GazeMode::Walking);
         }
-        let mut distinct = std::collections::HashSet::new();
-        let mut moving = 0;
+        let mut gestures = 0;
+        let mut was_active = false;
+        let mut last_pitch_only = false;
         for _ in 0..1000 {
             let look = rig.step_mode(request, GazeMode::Walking);
+            let active = rig.gaze.gesture.is_some();
+            // A gesture that ended this tick was running when the delta was
+            // sampled, so it still counts as inside one.
+            let during = was_active || active;
+            if active && !was_active {
+                gestures += 1;
+            }
+            was_active = active;
             if let Look::Delta { dyaw, dpitch } = look {
-                moving += 1;
                 let n_yaw = dyaw / STEP;
                 let n_pitch = dpitch / STEP;
                 assert!((n_yaw - n_yaw.round()).abs() < 1e-3, "dyaw {dyaw}");
                 assert!((n_pitch - n_pitch.round()).abs() < 1e-3, "dpitch {dpitch}");
-                distinct.insert((n_yaw.round() as i32, n_pitch.round() as i32));
+                let pitch_only = n_yaw == 0.0 && (1.0..=2.0).contains(&n_pitch.abs());
+                if pitch_only {
+                    assert!(
+                        during,
+                        "a pitch-only micro-delta outside a gesture: {look:?}"
+                    );
+                    assert!(!last_pitch_only, "two consecutive pitch-only micro-deltas");
+                }
+                last_pitch_only = pitch_only;
+            } else {
+                last_pitch_only = false;
             }
-            let off_yaw = wrap_degrees(rig.yaw - 30.).abs();
             let off_pitch = (rig.pitch - 5.).abs();
-            assert!(off_yaw <= 6.0 + STEP + 1e-3, "yaw off by {off_yaw}");
-            assert!(off_pitch <= 6.0 + STEP + 1e-3, "pitch off by {off_pitch}");
+            assert!(
+                off_pitch <= DRIFT_MAX_DEG + 1.0 + 1e-3,
+                "pitch off by {off_pitch}"
+            );
         }
-        assert!(moving > 500, "drift should move most ticks, got {moving}");
         assert!(
-            distinct.len() > 20,
-            "drift should vary, got {} distinct deltas",
-            distinct.len()
+            gestures >= 5,
+            "the drift stopped moving the pitch: {gestures}"
+        );
+    }
+
+    #[test]
+    fn walking_never_changes_the_emitted_yaw() {
+        let mut rig = Rig::new(9);
+        let request = Look::Aim { yaw: 0., pitch: 5. };
+        for _ in 0..1000 {
+            rig.step_mode(request, GazeMode::Walking);
+            assert_eq!(rig.yaw, 0.0, "the walking drift must not touch yaw");
+        }
+    }
+
+    #[test]
+    fn leaving_walking_drops_the_drift_without_a_tail() {
+        let mut rig = Rig::new(9);
+        let request = Look::Aim { yaw: 0., pitch: 5. };
+        let mut drifted = false;
+        for _ in 0..2000 {
+            rig.step_mode(request, GazeMode::Walking);
+            if (rig.pitch - 5.).abs() > 2.0 {
+                drifted = true;
+                break;
+            }
+        }
+        assert!(drifted, "the walking pitch never left the request by 2 deg");
+
+        let mut reached = None;
+        for tick in 1..=20 {
+            rig.step_mode(request, GazeMode::Idle);
+            if wrap_degrees(rig.yaw).abs() <= 0.25 && (rig.pitch - 5.).abs() <= 0.25 {
+                reached = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            reached.is_some(),
+            "the request was not reached in 20 ticks (yaw {}, pitch {})",
+            rig.yaw,
+            rig.pitch
+        );
+    }
+
+    #[test]
+    fn idle_with_a_live_aim_never_starts_an_idle_gesture() {
+        let mut rig = Rig::new(11);
+        let request = Look::Aim {
+            yaw: 20.,
+            pitch: 5.,
+        };
+        for _ in 0..200 {
+            rig.step_mode(request, GazeMode::Idle);
+        }
+        assert!(rig.gaze.gesture.is_none(), "the aim should have settled");
+        assert!(rig.gaze.correction_at.is_none(), "no correction is pending");
+
+        // Keep the aim exactly on the settled look: any gesture now would be
+        // the idle gaze.
+        let settled = Look::Aim {
+            yaw: rig.yaw,
+            pitch: rig.pitch,
+        };
+        for _ in 0..2000 {
+            assert_eq!(
+                rig.step_mode(settled, GazeMode::Idle),
+                Look::None,
+                "a live aim must suppress the idle gaze"
+            );
+        }
+        assert!(
+            rig.gaze.idle_next.is_none(),
+            "no idle gesture may be scheduled"
         );
     }
 
