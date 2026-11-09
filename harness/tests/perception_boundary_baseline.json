@@ -1,0 +1,27 @@
+{
+  "body/crates/facts/src/lib.rs": {
+    "block_state": 1
+  },
+  "body/crates/primitives/src/craft.rs": {
+    "block_state": 1
+  },
+  "body/crates/primitives/src/dig_down.rs": {
+    "block_state": 3
+  },
+  "body/crates/primitives/src/explore.rs": {
+    "block_state": 1,
+    "surface_y": 1
+  },
+  "body/crates/primitives/src/frontier.rs": {
+    "block_state": 1
+  },
+  "body/crates/primitives/src/mine.rs": {
+    "block_state": 5
+  },
+  "body/crates/primitives/src/place.rs": {
+    "block_state": 2
+  },
+  "body/crates/primitives/src/small.rs": {
+    "entity": 1
+  }
+}
