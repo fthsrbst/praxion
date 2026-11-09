@@ -8,6 +8,11 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 All four approved by the user (macOS session), each the recommended option; designs from the code scout in
 `logs/mac1109/design-scout.json` (ignored).
 
+- **Chat: control words bare, tasks with a prefix (user).** From the operator, the single words `dur`, `iptal`, `durum`,
+  `devam` (and English `stop`, `cancel`, `status`, `resume`) always act. A task needs the configurable prefix, default
+  `p:` ("p: 8 taş getir"); other operator chat stays chat and never reaches the command mapper. Confirms session 9 for
+  tasks (`docs/sessions/09-commands.md`); the console task box needs no prefix. Reason: chatter must not become work or
+  spend model calls (talk review finding 1).
 - **Five next areas, all started in parallel (user, after watching runs 6 and 7).** The user found the bot still a
   narrow rung climber and asked for: a bot that talks and takes tasks, real survival, smarter play, a detailed web
   console, and building (Demo-3) now rather than later. Designs: `logs/mac1109/design/*.out.md` (drafts) and
