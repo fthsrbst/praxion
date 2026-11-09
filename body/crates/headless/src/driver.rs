@@ -37,6 +37,10 @@ pub trait Driver: Send {
         false
     }
 
+    /// The player died and was respawned (`Event::Died`): the driver must drop
+    /// whatever belonged to the old life. The default does nothing.
+    fn on_death(&mut self) {}
+
     /// A JSON summary for the owner's log, if the driver has one.
     fn summary_json(&self) -> Option<String> {
         None

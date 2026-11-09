@@ -33,6 +33,18 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Remaining: when the survival slice lands, exempt health/food goals (and sheltering) from the waiting rule.
 - Pointers: `brain/praxion_brain/needs.py`, `docs/decisions.md` 2026-11-09.
 
+### Starvation reflex still launches its own click eating (survival slice 2)
+- Source: review of survival slice 1, 2026-11-09 (`logs/mac1109/review-survival.answer.txt`, observation 3)
+- State: `eat_food` is the body's only eating path; a failed meal holds eating off for 200 ticks
+  (`MEAL_RETRY_TICKS`).
+- Remaining: the starvation reflex still launches its old one-click `ReflexAction::Eat`/`Motion::Eat`
+  on the reflex cooldown (~10-20 ticks) while the meal is held off, so "hungry and out of food"
+  interrupts a command repeatedly. Decide: silence the reflex while a meal is blocked (and let the
+  meal path be the only owner of eating), or delete `Motion::Eat` together with the removed
+  maintenance frame.
+- Pointers: `body/crates/arbiter/src/arbiter.rs` (`meal_blocked_until`), `body/crates/reflexes/src/reflex.rs`
+  (`ReflexKind::Starvation`), `body/crates/reflexes/src/motion.rs` (`Motion::Eat`).
+
 ### Simplification pass, then movement style (2026-11-07 plan)
 - Source: Claude Opus 5.5, 2026-11-07 (`docs/decisions.md` 2026-11-07)
 - State: A1-A4 done, A5 fixtures done (forwarder, receipts, perception, interpreter); movement style

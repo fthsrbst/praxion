@@ -79,6 +79,21 @@ impl Facts {
             params: vec![ValueType::EntityKind, ValueType::Int],
             ret: ValueType::Bool,
         });
+        // Own-state and clock facts (decision 2026-11-09 "Five next areas":
+        // survival skills need hunger and night). The answers live in
+        // `praxion_facts`; a skill writes them with parentheses, `food() <= 6`.
+        for (name, ret) in [
+            ("food", ValueType::Int),
+            ("health", ValueType::Int),
+            ("is_night", ValueType::Bool),
+            ("time_of_day", ValueType::Int),
+        ] {
+            facts.add(FactSig {
+                name,
+                params: vec![],
+                ret,
+            });
+        }
         facts
     }
 
@@ -858,6 +873,21 @@ mod tests {
             vec![ValueType::Block, ValueType::Int]
         );
         assert!(f.get("nope").is_none());
+    }
+
+    #[test]
+    fn own_state_and_clock_facts_are_declared() {
+        let f = Facts::standard();
+        for (name, ret) in [
+            ("food", ValueType::Int),
+            ("health", ValueType::Int),
+            ("time_of_day", ValueType::Int),
+            ("is_night", ValueType::Bool),
+        ] {
+            let sig = f.get(name).unwrap_or_else(|| panic!("{name} is declared"));
+            assert!(sig.params.is_empty(), "{name} takes no arguments");
+            assert_eq!(sig.ret, ret, "{name}");
+        }
     }
 
     #[test]

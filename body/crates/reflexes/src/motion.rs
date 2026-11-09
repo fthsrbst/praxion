@@ -60,6 +60,11 @@ pub enum Motion {
     Attack {
         target: i32,
         until: u64,
+        /// The hotbar index (0 to 8) of the best weapon, selected before the
+        /// first swing (decision 2026-11-09 "Five next areas": the weapon the
+        /// view found used to be dropped here, so a crafted sword stayed
+        /// unused). `None` when there is no weapon or it is not in the hotbar.
+        weapon: Option<u8>,
     },
     Eat {
         until: u64,
@@ -130,9 +135,10 @@ impl Motion {
             ReflexAction::SwimUp => {
                 Some(Self::surface_plan(body, tick, blocks).unwrap_or(Motion::SwimUp))
             }
-            ReflexAction::Attack { target, .. } => Some(Motion::Attack {
+            ReflexAction::Attack { target, weapon } => Some(Motion::Attack {
                 target,
                 until: tick + ATTACK_TICKS.min(u64::from(settings.max_reflex_ticks)),
+                weapon: weapon.and_then(hotbar_index),
             }),
             ReflexAction::Eat { .. } => Some(Motion::Eat {
                 until: tick + EAT_TICKS,
@@ -285,8 +291,9 @@ impl Motion {
                 frame.held.jump = true;
                 frame
             }
-            Motion::Attack { target, .. } => {
+            Motion::Attack { target, weapon, .. } => {
                 let mut frame = ControlFrame::new(tick, generation, Held::NONE);
+                frame.select_slot = *weapon;
                 if let Some(mob) = attack_target(view, *target) {
                     let target_point = mob.position + Vec3::new(0.0, 1.0, 0.0);
                     let (look, aligned) =
@@ -328,7 +335,7 @@ impl Motion {
             } => follower.is_done() || follower.is_stalled() || tick >= *deadline,
             Motion::Strafe { until, .. } => tick >= *until,
             Motion::SwimUp => !view.head_in_water,
-            Motion::Attack { target, until } => {
+            Motion::Attack { target, until, .. } => {
                 tick >= *until
                     || attack_target(view, *target).is_none_or(|mob| view.horizontal_to(mob) > 6.0)
             }
@@ -336,6 +343,12 @@ impl Motion {
             Motion::Wait { until } => tick >= *until || body.is_in_water(),
         }
     }
+}
+
+/// The hotbar index of an inventory slot (window 0 numbering: the hotbar is
+/// slots 36 to 44), or `None` for a slot the hotbar cannot select.
+fn hotbar_index(slot: u16) -> Option<u8> {
+    (36..=44).contains(&slot).then(|| (slot - 36) as u8)
 }
 
 /// The nearest air targets reachable through connected water, nearest by swim

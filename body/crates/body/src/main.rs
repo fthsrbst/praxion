@@ -447,6 +447,9 @@ fn run() -> Result<ExitCode, String> {
                     let mut shared = lock(&shared);
                     shared.deaths = shared.deaths.saturating_add(1);
                 }
+                // The driver forgets the old life (reflex state, a meal, the
+                // primitive in flight) and moves to a new generation.
+                lock(&handle).on_death();
                 eprintln!("died");
             }
             Some(Event::Disconnected(reason)) => {

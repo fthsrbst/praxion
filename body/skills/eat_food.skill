@@ -1,0 +1,20 @@
+# Eat the given food until the food bar is above a threshold. The arbiter
+# pushes this skill when hunger asks for a meal (decision 2026-11-09 "Five next
+# areas"): there is one eating path, the tested `eat` primitive, which selects
+# the item and holds the use button until the receipt sees one item leave the
+# inventory. The arbiter used to send a single use click, which cannot finish a
+# 32-tick meal and never selected the food.
+#
+# Why the rules are ordered this way: the goal check is on top so a meal ends
+# the moment the bar is high enough (one item may be enough, or three). The
+# action comes next, guarded by the count so a stack that ran out ends the meal
+# with its own failure kind instead of asking `eat` to fail. The last rule is
+# that failure; the arbiter then wakes the brain and waits before offering the
+# need again. `until` defaults to the arbiter's soft threshold: the bar must
+# rise above it, so the soft need does not restart one bite later.
+skill eat_food(item: item, until: int = 16)
+  doc "Eat the given food until the food bar is above the threshold."
+  rules:
+    food() > $until -> done
+    count($item) >= 1 -> eat($item)
+    true -> fail(no_item)

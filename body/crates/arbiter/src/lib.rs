@@ -19,7 +19,7 @@ mod tier;
 mod tests;
 
 pub use arbiter::{
-    Arbiter, ArbiterTick, CommandAccepted, CommandError, EAT_TICKS, FrameSource, Owner,
+    Arbiter, ArbiterTick, CommandAccepted, CommandError, FrameSource, Owner,
 };
 pub use tier::{
     Intent, IntentStack, IntentState, NeedKind, Needs, Pushed, StackFull, Tier, arg_to_string,
