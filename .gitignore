@@ -11,6 +11,7 @@ spikes/round0/blocks-truth*.txt
 spikes/.cargo/config.toml
 body/.cargo/config.toml
 spikes/round0/server/
+spikes/chat/run/
 spikes/**/*.prxcap
 spikes/**/*.prxcap.stats.jsonl
 spikes/round0/tools/
