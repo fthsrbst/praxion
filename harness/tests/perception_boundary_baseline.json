@@ -5,10 +5,6 @@
   "body/crates/primitives/src/dig_down.rs": {
     "block_state": 3
   },
-  "body/crates/primitives/src/explore.rs": {
-    "block_state": 1,
-    "surface_y": 1
-  },
   "body/crates/primitives/src/frontier.rs": {
     "block_state": 1
   },

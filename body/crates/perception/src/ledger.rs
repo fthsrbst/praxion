@@ -1,9 +1,11 @@
-//! The ledger of denied attempts.
+//! The ledger of denied attempts and ledgered privileged reads.
 //!
-//! A denied attempt is recorded at a bounded rate: the first occurrence per
+//! A ledger entry is recorded at a bounded rate: the first occurrence per
 //! (query kind, fact kind) per tick gets an entry, later ones only raise that
-//! entry's counter. The event log will consume this in step 6; for now the
-//! entries are readable in memory.
+//! entry's counter. It records access, not a fact: a query perception denied,
+//! and a privileged read perception served, both land here (architecture §5.1).
+//! The event log will consume this in step 6; for now the entries are readable
+//! in memory.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,6 +18,8 @@ pub enum QueryKind {
     Entity,
     EntitiesNear,
     EntityHealth,
+    /// A privileged column read (heightmap plus the blocks above it).
+    SkyColumn,
 }
 
 impl QueryKind {
@@ -26,6 +30,7 @@ impl QueryKind {
             QueryKind::Entity => "entity",
             QueryKind::EntitiesNear => "entities_near",
             QueryKind::EntityHealth => "entity_health",
+            QueryKind::SkyColumn => "sky_column",
         }
     }
 }
@@ -36,7 +41,8 @@ impl fmt::Display for QueryKind {
     }
 }
 
-/// What kind of fact the caller was denied.
+/// What kind of fact a ledger entry is about: one the caller was denied, or
+/// one a privileged query served.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum FactKind {
     BlockState,
@@ -44,6 +50,13 @@ pub enum FactKind {
     ResultLimit,
     EntityPosition,
     EntityHealth,
+    /// The raw contents of a column (surface plus the blocks above it).
+    ///
+    /// This one is not a denial: [`Perception::privileged_column`] serves it as
+    /// a privileged read, and every scan that reads a column ledgers it.
+    ///
+    /// [`Perception::privileged_column`]: crate::Perception::privileged_column
+    Column,
 }
 
 impl FactKind {
@@ -54,6 +67,7 @@ impl FactKind {
             FactKind::ResultLimit => "result_limit",
             FactKind::EntityPosition => "entity_position",
             FactKind::EntityHealth => "entity_health",
+            FactKind::Column => "column",
         }
     }
 }
@@ -64,8 +78,8 @@ impl fmt::Display for FactKind {
     }
 }
 
-/// One ledger line: when the current run of attempts started and how many
-/// attempts were counted.
+/// One ledger line: when the current run of ledgered reads started and how many
+/// were counted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LedgerEntry {
     first_tick: u64,
@@ -87,7 +101,8 @@ impl LedgerEntry {
     }
 }
 
-/// Bounded denied-attempt ledger, keyed by (query kind, fact kind).
+/// Bounded ledger of denied attempts and privileged reads, keyed by (query
+/// kind, fact kind).
 #[derive(Debug, Default)]
 pub struct Ledger {
     entries: BTreeMap<(QueryKind, FactKind), LedgerEntry>,

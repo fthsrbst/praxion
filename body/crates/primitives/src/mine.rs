@@ -1011,4 +1011,78 @@ mod tests {
             "the wet stone is nearer but cannot be worked"
         );
     }
+
+    #[test]
+    fn mining_stone_with_only_planks_fails_needs_tool() {
+        use crate::test_world::{feet, hold, set_block, world};
+        use azalea_registry::builtin::ItemKind;
+
+        let mut world = world();
+        let cell = BlockPos::new(0, 64, 2);
+        set_block(&mut world, cell, BlockState::from(BlockKind::Stone));
+        hold(&mut world, ItemKind::OakPlanks);
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        perception.begin_tick(&world);
+        let body = Body::new(feet());
+        let mut mine = state_machine_mine(cell, None);
+
+        let mut ctx = Ctx {
+            tick: 0,
+            body: &body,
+            world: &world,
+            perception: &mut perception,
+            style: praxion_planner::Personality::default(),
+        };
+        let (_, pending, outcome) = mine.tick(&mut ctx, false);
+        assert_eq!(
+            outcome,
+            Some(Outcome::Failed("needs_tool".into())),
+            "stone mined with planks breaks and drops nothing"
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn a_dig_already_under_way_never_swaps_the_tool() {
+        use crate::test_world::{feet, give, hold, set_block, world};
+        use azalea_registry::builtin::ItemKind;
+        use praxion_headless::held_item;
+        use crate::common::{ToolChoice, choose_tool};
+
+        let mut world = world();
+        let cell = BlockPos::new(0, 64, 2);
+        set_block(&mut world, cell, BlockState::from(BlockKind::Stone));
+        hold(&mut world, ItemKind::OakPlanks);
+        // A pickaxe sits in the main inventory: a fresh target would swap to it.
+        give(&mut world, 20, ItemKind::WoodenPickaxe, 1);
+        assert_eq!(
+            choose_tool(
+                BlockState::from(BlockKind::Stone),
+                world.inventory(),
+                &held_item(&world),
+            ),
+            ToolChoice::Select("wooden_pickaxe".into())
+        );
+
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        perception.begin_tick(&world);
+        let body = Body::new(feet());
+        let mut mine = state_machine_mine(cell, None);
+        let mut ctx = Ctx {
+            tick: 0,
+            body: &body,
+            world: &world,
+            perception: &mut perception,
+            style: praxion_planner::Personality::default(),
+        };
+        // The runner already registered this target: the dig is under way.
+        let (frame, pending, outcome) = mine.tick(&mut ctx, true);
+        assert!(
+            frame.menu.is_none(),
+            "a dig under way never swaps the tool"
+        );
+        assert!(frame.select_slot.is_none(), "no hotbar key either");
+        assert!(pending.is_none(), "the registered target needs no new receipt");
+        assert!(outcome.is_none());
+    }
 }
