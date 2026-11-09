@@ -167,3 +167,12 @@ def test_the_proposal_estimate_uses_the_model_the_call_will_use() -> None:
         estimate_cost("gpt-6.1-terra", INPUT_ESTIMATE, OUTPUT_ESTIMATE)
     )
     assert dear > cheap
+
+
+def test_the_rules_no_longer_ask_for_stock_and_name_the_needs_section() -> None:
+    from praxion_brain.proposer import PROPOSAL_RULES
+
+    assert "stocks what the next rungs need" not in PROPOSAL_RULES
+    assert "more cobblestone" not in PROPOSAL_RULES
+    assert "## Needs" in PROPOSAL_RULES
+    assert "serve the next rung" in PROPOSAL_RULES

@@ -19,6 +19,13 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Survival exemption in the need gate (2026-11-09, smarter play slice 1)
+- Source: review `logs/mac1109/review-smarter.answer.txt` finding 10
+- State: while a covered rung waits for its skill, every proposal that serves no later rung is refused `not_needed`
+  (`brain/praxion_brain/needs.py`, the `waiting` rule), so a night/mob survival goal is refused too.
+- Remaining: when the survival slice lands, exempt health/food goals (and sheltering) from the waiting rule.
+- Pointers: `brain/praxion_brain/needs.py`, `docs/decisions.md` 2026-11-09.
+
 ### Simplification pass, then movement style (2026-11-07 plan)
 - Source: Claude Opus 5.5, 2026-11-07 (`docs/decisions.md` 2026-11-07)
 - State: A1-A4 done, A5 fixtures done (forwarder, receipts, perception, interpreter); movement style

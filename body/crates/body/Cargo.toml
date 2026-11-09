@@ -20,6 +20,7 @@ log = "0.4"
 praxion-arbiter = { path = "../arbiter" }
 praxion-eventlog = { path = "../eventlog" }
 praxion-facts = { path = "../facts" }
+praxion-gamedata = { path = "../gamedata" }
 praxion-headless = { path = "../headless" }
 praxion-interpreter = { path = "../interpreter" }
 praxion-manifest = { path = "../manifest" }

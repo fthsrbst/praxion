@@ -644,9 +644,11 @@ def evaluate(text: str, inventory: Mapping[str, Any]) -> Optional[bool]:
 def item_of_condition(text: str) -> Optional[str]:
     """The item named by a simple ``has(X)`` / ``count(X) OP n`` shape.
 
-    The name is normalized (``minecraft:furnace`` becomes ``furnace``).
-    Returns ``None`` for any other shape (compound conditions, tags, bare
-    names, unsupported arguments), which tells
+    The name is normalized (``minecraft:furnace`` becomes ``furnace``). A tag
+    comes back as the tag (``#logs``): the shape is simple, so the need gate and
+    the drift brake judge it like any other item, but it yields no skill name
+    (``get_#logs`` is no name). Returns ``None`` for any other shape (compound
+    conditions, bare names, unsupported arguments), which tells
     :mod:`praxion_brain.curriculum` to let the writer pick a skill name.
     """
     node = parse(text)
@@ -657,6 +659,38 @@ def item_of_condition(text: str) -> Optional[str]:
         item = _call_item(node.left, "count")
         return normalize_item(item) if item is not None else None
     return None
+
+
+def _collect_items(node: Node, found: list[str]) -> None:
+    if isinstance(node, Call):
+        if node.name in {"has", "count"}:
+            item = _call_item(node, node.name)
+            if item is not None and normalize_item(item) not in found:
+                found.append(normalize_item(item))
+        for argument in node.args:
+            _collect_items(argument, found)
+    elif isinstance(node, Compare):
+        _collect_items(node.left, found)
+        _collect_items(node.right, found)
+    elif isinstance(node, (And, Or)):
+        _collect_items(node.left, found)
+        _collect_items(node.right, found)
+    elif isinstance(node, Not):
+        _collect_items(node.child, found)
+
+
+def items_of_condition(text: str) -> list[str]:
+    """Every item a ``has(X)`` / ``count(X) OP n`` names in the condition.
+
+    A compound condition names no single item, but its parts do; the need gate
+    judges those parts so a stock goal cannot slip past the waiting rule or the
+    drift brake by gaining one ``and``. Order is textual, names are normalized
+    as in :func:`item_of_condition`, and tags stay tags (``#logs``). Malformed
+    text raises :class:`ConditionError` like :func:`parse`.
+    """
+    found: list[str] = []
+    _collect_items(parse(text), found)
+    return found
 
 
 def count_of_condition(text: str) -> int:
@@ -691,6 +725,7 @@ __all__ = [
     "evaluate",
     "is_verifiable",
     "item_of_condition",
+    "items_of_condition",
     "normalize_item",
     "parse",
 ]

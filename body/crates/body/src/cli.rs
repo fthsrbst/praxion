@@ -11,6 +11,8 @@
 //! praxion-body --forwarder ... --tee ... --run-dir runs/<id> --port 127.0.0.1:P
 //!
 //! praxion-body check-skills --candidates DIR [--skills body/skills]
+//!
+//! praxion-body export-gamedata [--out local/gamedata/26.3.json]
 //! ```
 //!
 //! `--forwarder` is the forwarder's game listener (the address a client would
@@ -20,6 +22,11 @@
 //! directory is watched: a new or changed file reloads the program before the
 //! next command is accepted, so a skill admitted after the body started is
 //! playable without a restart.
+//!
+//! `export-gamedata` writes the recipes, smelting recipes and item tags of the
+//! pinned jar as one JSON file for the brain (decision 2026-11-09 "Five next
+//! areas"); without `--out` it writes `local/gamedata/26.3.json` under the
+//! repository root.
 //!
 //! `--goal` is required unless `--port` is set: a port session takes its goals
 //! from the brain, and `--goal` (when given) is injected as command `cli` so
@@ -196,6 +203,31 @@ impl CheckArgs {
     }
 }
 
+/// Parsed arguments of the `export-gamedata` subcommand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportArgs {
+    /// Where to write the JSON; `None` is `local/gamedata/26.3.json` under the
+    /// repository root.
+    pub out: Option<PathBuf>,
+}
+
+impl ExportArgs {
+    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Self, String> {
+        let mut out = None;
+        let mut args = args.into_iter();
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--out" => {
+                    let text = args.next().ok_or("--out wants a value")?;
+                    out = Some(PathBuf::from(text));
+                }
+                other => return Err(format!("unknown argument {other:?}")),
+            }
+        }
+        Ok(Self { out })
+    }
+}
+
 /// Type a goal's arguments from the skill's declared parameters.
 pub fn resolve_goal_args(
     program: &Program,
@@ -330,6 +362,18 @@ mod tests {
             CheckArgs::parse(std::iter::empty()).unwrap_err(),
             "--candidates is required"
         );
+    }
+
+    #[test]
+    fn export_gamedata_arguments_parse() {
+        let args = ExportArgs::parse(["--out", "x/y.json"].map(str::to_owned)).unwrap();
+        assert_eq!(args.out, Some(PathBuf::from("x/y.json")));
+        assert_eq!(ExportArgs::parse(std::iter::empty()).unwrap().out, None);
+        assert_eq!(
+            ExportArgs::parse(["--out"].map(str::to_owned)).unwrap_err(),
+            "--out wants a value"
+        );
+        assert!(ExportArgs::parse(["--bogus"].map(str::to_owned)).is_err());
     }
 
     #[test]

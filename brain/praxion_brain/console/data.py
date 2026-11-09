@@ -266,6 +266,40 @@ def skills(console: Console) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+def _useful_goal_ticks(log: EvidenceLog, records: dict[str, Any]) -> dict[str, Any]:
+    """Two numbers to judge a run by (smarter play slice 1, design D4).
+
+    A goal is *useful* when it raised the ladder past every earlier goal's
+    ``rungs_met``; its ticks are the useful ticks. A *stock goal* is one that
+    finished ``done``, raised nothing and gathered a count (``count(X) >= n``):
+    run 6 played eighteen of them for 80 % wasted ticks. Both come from the
+    ``goal_finished`` evidence alone, so they need no plan view.
+    """
+    best: Optional[int] = None
+    useful = total = stock = 0
+    for entry in log.tail(kinds=["goal_finished"], limit=10_000):
+        met = entry.get("rungs_met")
+        ticks = int(entry.get("ticks") or 0)
+        total += ticks
+        raised = met is not None and (best is None or met > best)
+        if met is not None:
+            best = met if best is None else max(best, met)
+        if raised and entry.get("status") != "failed":
+            useful += ticks
+        elif entry.get("status") == "done":
+            record = records.get(entry.get("goal_id"))
+            if record is not None and record.condition.lstrip().startswith("count("):
+                stock += 1
+    return {
+        "useful_goal_ticks": {
+            "useful": useful,
+            "total": total,
+            "ratio": round(useful / total, 3) if total else None,
+        },
+        "stock_goals": stock,
+    }
+
+
 def metrics(console: Console, log: EvidenceLog) -> dict[str, Any]:
     hours: dict[int, dict[str, float]] = {}
     for item in console.ledger.entries():
@@ -302,9 +336,12 @@ def metrics(console: Console, log: EvidenceLog) -> dict[str, Any]:
                     "rungs": entry["rungs_met"],
                 }
             )
+    useful = _useful_goal_ticks(log, {r.goal_id: r for r in records})
     return {
         "cost_per_hour": cost_per_hour,
         "goals_by_skill": by_skill,
+        "useful_goal_ticks": useful["useful_goal_ticks"],
+        "stock_goals": useful["stock_goals"],
         "ticks": {
             "median": statistics.median(basis) if basis else None,
             "recent": [

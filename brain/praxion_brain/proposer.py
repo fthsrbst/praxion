@@ -39,9 +39,15 @@ You plan the next goal of Praxion, a Minecraft agent that plays through skills.
 - Never repeat a goal that the briefing marks as blocked.
 - Never propose the same condition as the newest recent goal: after a failure,
   play a different goal first and retry later.
-- When the briefing names a skill being written, its goal cannot be played
-  yet: propose a different goal that the known skills reach, preferably one
-  that stocks what the next rungs need (more cobblestone, logs, a spare tool).
+- Never propose gathering more of an item that the `## Needs` line shows as
+  covered. A goal must serve the next rung: its own item, or a direct input of
+  its recipe that the `## Needs` line shows as missing.
+- Do not use the item of either of the last two goals. If the same thing is
+  still needed, keep its count; change the plan, not the number.
+- When the briefing names a skill being written, its goal cannot be played yet.
+  If `## Needs` shows nothing missing, there is nothing useful to propose: the
+  code waits for the skill instead of calling you again. Otherwise propose the
+  missing input.
 - `condition` is guard text over inventory facts: `has(item)`,
   `count(item) >= n`, joined with `and`/`not` and parentheses. Use the item
   ids the skills and ladder use; for wood use the tags (`#logs`, `#planks`),

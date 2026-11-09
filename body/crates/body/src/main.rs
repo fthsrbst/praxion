@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use praxion_body::summary::{SessionSummary, Shared};
 use praxion_body::{
-    Args, BodyDriver, BodyOptions, CheckArgs, ProgramLoadError, SkillsWatch, Versions, find_root,
+    Args, BodyDriver, BodyOptions, CheckArgs, ExportArgs, ProgramLoadError, SkillsWatch, Versions, find_root,
     git_commit, load_skill_files, load_startup_program, read_skill_files, resolve_goal_args,
     settings_path, skills_dir, summary,
 };
@@ -27,14 +27,26 @@ fn main() -> ExitCode {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("check-skills") {
-        return match run_check_skills(args) {
-            Ok(code) => code,
-            Err(message) => {
-                eprintln!("praxion-body: {message}");
-                ExitCode::from(2)
-            }
-        };
+    match args.next().as_deref() {
+        Some("check-skills") => {
+            return match run_check_skills(args) {
+                Ok(code) => code,
+                Err(message) => {
+                    eprintln!("praxion-body: {message}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Some("export-gamedata") => {
+            return match run_export_gamedata(args) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(message) => {
+                    eprintln!("praxion-body: {message}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        _ => {}
     }
     match run() {
         Ok(code) => code,
@@ -101,6 +113,27 @@ fn run_check_skills<I: Iterator<Item = String>>(args: I) -> Result<ExitCode, Str
     } else {
         ExitCode::from(1)
     })
+}
+
+/// `export-gamedata`: no server and no network; writes the jar's recipes,
+/// smelting recipes and item tags as JSON and prints the path.
+fn run_export_gamedata<I: Iterator<Item = String>>(args: I) -> Result<(), String> {
+    let args = ExportArgs::parse(args)?;
+    let out = match args.out {
+        Some(out) => out,
+        None => {
+            let root =
+                find_root().ok_or("cannot find the repository root (versions/manifest.toml)")?;
+            root.join("local").join("gamedata").join("26.3.json")
+        }
+    };
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    std::fs::write(&out, praxion_gamedata::export_json())
+        .map_err(|error| format!("{}: {error}", out.display()))?;
+    println!("{}", out.display());
+    Ok(())
 }
 
 fn run() -> Result<ExitCode, String> {

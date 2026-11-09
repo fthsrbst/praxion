@@ -2137,6 +2137,7 @@ dependencies = [
  "praxion-arbiter",
  "praxion-eventlog",
  "praxion-facts",
+ "praxion-gamedata",
  "praxion-headless",
  "praxion-interpreter",
  "praxion-manifest",
@@ -2208,6 +2209,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "serde_json",
+ "sha2",
  "toml",
  "zip",
 ]

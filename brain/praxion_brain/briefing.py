@@ -319,8 +319,14 @@ def build(
     now: Optional[float] = None,
     max_tokens: int = BRIEFING_MAX_TOKENS,
     writing: Optional[str] = None,
+    needs: Optional[str] = None,
 ) -> str:
     """Render the briefing text, trimming it to ``max_tokens`` when possible.
+
+    ``needs`` is the one ``## Needs`` line of :func:`praxion_brain.needs.need_line`
+    (what the next rung costs and whether the inventory covers it). It is a
+    code fact, so the model never has to guess "enough" (decision 2026-11-09
+    "Five next areas", smarter play slice 1). Absent without the gamedata export.
 
     ``writing`` names the skill a background admission job is writing. The line
     keeps the proposer off that goal: it cannot be played until the job ends,
@@ -337,6 +343,7 @@ def build(
         else []
     )
     ladder_lines = _ladder_section(ladder)
+    needs_lines = ["## Needs  [recipes + inventory]", needs] if needs else []
     records = list(memory)
     recent_items = [_goal_line(record, moment) for record in records]
     recent_header = "## Recent goals  [goals.jsonl]"
@@ -356,6 +363,7 @@ def build(
         lines.extend(recent_items or ["(none)"])
         lines.append(skills_header)
         lines.extend(skills)
+        lines.extend(needs_lines)
         lines.append(_budget_line(ledger, values=budget_values))
         return "\n".join(lines)
 
