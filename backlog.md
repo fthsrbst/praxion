@@ -38,17 +38,11 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ### Voice: ElevenLabs speech out, push-to-talk commands in (user, 2026-11-09)
 - Source: user, 2026-11-09 (notes.md); for the demo/presentation.
-- State: not designed. Depends on the talk slice (narration + command path, branch `wip/talk2`).
+- State: not designed. The talk slice (narration + command path) is merged (2026-11-09). ElevenLabs CLI onboarding
+  done: `ELEVENLABS_API_KEY` is in `.env` (verified by `onboard check`), `.env.example` names it; no SDK installed.
 - Remaining: design session with the user (TTS/STT provider and cost, latency, hotkey per OS, local-only audio, keys),
   then build: narration lines spoken via ElevenLabs, bot questions to the user, hotkey-held speech -> transcript -> the
   same operator command path.
-
-### Survival exemption in the need gate (2026-11-09, smarter play slice 1)
-- Source: review `logs/mac1109/review-smarter.answer.txt` finding 10
-- State: while a covered rung waits for its skill, every proposal that serves no later rung is refused `not_needed`
-  (`brain/praxion_brain/needs.py`, the `waiting` rule), so a night/mob survival goal is refused too.
-- Remaining: when the survival slice lands, exempt health/food goals (and sheltering) from the waiting rule.
-- Pointers: `brain/praxion_brain/needs.py`, `docs/decisions.md` 2026-11-09.
 
 ### Starvation reflex still launches its own click eating (survival slice 2)
 - Source: review of survival slice 1, 2026-11-09 (`logs/mac1109/review-survival.answer.txt`, observation 3)
@@ -61,15 +55,6 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   maintenance frame.
 - Pointers: `body/crates/arbiter/src/arbiter.rs` (`meal_blocked_until`), `body/crates/reflexes/src/reflex.rs`
   (`ReflexKind::Starvation`), `body/crates/reflexes/src/motion.rs` (`Motion::Eat`).
-
-### Stale expected-primitive list in `test_skills` (mainline)
-- Source: console slice 1 worker, 2026-11-09
-- State: two tests fail on `wip/console` and on `main`:
-  `brain/tests/test_skills.py::test_primitive_and_fact_lists_come_from_the_core_skills` and
-  `::test_load_catalog_reads_the_real_core_skills`. `body/skills/get_iron_ingot.skill` uses `fail(...)`, so the catalog's
-  primitive list gains `fail` (and `smelt`); the expected lists never got them.
-- Remaining: add `fail` and `smelt` to both expected lists, or make `fail` non-primitive in `primitive_names` on purpose.
-- Pointers: `brain/tests/test_skills.py`, `brain/praxion_brain/skills.py`, `body/skills/get_iron_ingot.skill`.
 
 ### The learning chip never hides (pre-existing)
 - Source: console slice 1 review, 2026-11-09
