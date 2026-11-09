@@ -27,6 +27,14 @@ All four approved by the user (macOS session), each the recommended option; desi
   run 2 (seed 202) fired craft on `near` true and failed `needs_table`; same lesson as the wet-stone fix (the fact stays
   cheap, the primitive delivers what it promised). Rules out for now: a planner-based approach (upgrade only if live
   runs show tables behind walls), a reach check inside `near`.
+- **Station aims at a face it can see, and backs off when it sees none (user).** When the body is in reach and the
+  ray to the cell centre hits another block first (a roof of dirt or leaves over a placed table: the eye is about 1.1
+  above the table centre, so the centre ray enters the layer above), Station tries the centres of the cell's six faces
+  (slightly inset) and clicks the first one whose ray hits the cell, as a player clicks the face they see. Only when no
+  face is visible does it walk, away from or around the cell to about 2 blocks off, on the same 80-tick budget.
+  Reason: autonomous run 6 (seed 606) and an admission practice run (seed 404) failed `needs_table` right after
+  placing a table under a roof: Station walked into the adjacent table and never moved. Rules out for now: choosing a
+  standing cell with the planner.
 - **Explore may climb once per call for a view (user).** When the look-around found nothing and the nearest best-tier
   frontier is closer than about 32 blocks (terrain, not sight range, ends the known map), explore walks once to the
   highest reachable standable dry cell within 20 blocks horizontally and 3 to 12 blocks up, re-arms the look-around
