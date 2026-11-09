@@ -4,6 +4,7 @@ import http.client
 import json
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -313,6 +314,24 @@ def test_control_refuses_bad_requests(server, console, body) -> None:
     assert console.control.drain() == []
 
 
+def test_a_task_request_answers_503_until_the_talk_work_lands(server, console) -> None:
+    status, found = call(server, "POST", "/api/control", {"action": "task", "text": "dig down"})
+    assert status == 503
+    assert "not wired" in found["error"]
+    assert console.control.drain() == []
+
+    for body in ({"action": "task"}, {"action": "task", "text": "x" * 201}):
+        status, _ = call(server, "POST", "/api/control", body)
+        assert status == 400
+        assert console.control.drain() == []
+
+    console.task = lambda text: None
+    status, found = call(server, "POST", "/api/control", {"action": "task", "text": "dig down"})
+    assert status == 202
+    assert found == {"ok": True, "queued": "task"}
+    assert console.control.drain() == [{"action": "task", "text": "dig down"}]
+
+
 def test_foreign_host_and_origin_are_refused(server, console) -> None:
     assert call(server, "GET", "/api/state", headers={"Host": "evil.example"})[0] == 403
     status, _ = call(
@@ -348,6 +367,80 @@ def test_the_dock_asks_for_a_condition_with_valid_examples() -> None:
     for example in examples:
         canonical_text(example)  # every example the dock shows parses
     assert "has(furnace)" in examples and "count(cobblestone) >= 16" in examples
+
+
+def test_icons_have_an_intrinsic_size() -> None:
+    """An inline SVG with only a viewBox explodes or vanishes in an unsized
+    container (measured 1138x1138 and 0x0); the size must be in the markup too,
+    so a new container cannot repeat the bug class."""
+    from praxion_brain.console.server import STATIC_DIR
+
+    source = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    body = source[source.index("export function svg("):source.index("// Slightly wobbly")]
+    assert 'setAttribute("width"' in body
+    assert 'setAttribute("height"' in body
+    assert '"icon "' in body
+
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert re.search(r"\.card h2 > svg \{ width: 18px; height: 18px;", css)
+    assert re.search(r"\.pill > svg \{ width: 15px; height: 15px;", css)
+
+
+def test_the_inventory_card_renders_slots_with_lettered_tiles() -> None:
+    """The panel's contract, asserted where a defect has actually appeared.
+
+    These are source assertions, not render assertions: the console ships no
+    JS test runner. Each one below is pinned to a concrete way the panel was
+    wrong (review findings 1-3), so a regression cannot pass it the way the
+    previous "the string `selected_hotbar_slot` exists" check did. A rendered
+    check is the real gap and is in `backlog.md`.
+    """
+    from praxion_brain.console.server import STATIC_DIR
+
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="inventory"' in index
+    app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'from "./inventory.js"' in app
+    assert "renderInventory(s.facts, s.snapshot_at)" in app
+    panel = (STATIC_DIR / "inventory.js").read_text(encoding="utf-8")
+    # The layout is the body's 46-slot one, written once here and pinned in the
+    # Rust world test (critique finding 10).
+    assert "slotRange(9, 35)" in panel
+    assert "slotRange(36, 44)" in panel
+    assert "const ARMOUR = [5, 6, 7, 8];" in panel
+    assert "const OFFHAND = 45;" in panel
+    assert "itemGlyph" in panel
+    # The wire's `selected_hotbar_slot` is the hand index 0..=8 and the hotbar
+    # starts at container slot 36, so the outline needs the offset: comparing a
+    # container slot to the hand directly is never true (finding 1).
+    assert "HOTBAR[0] + selected" in panel
+    assert "slot === selectedSlot" in panel
+    assert "slot === selected)" not in panel
+    # The outline marks the hand, so an empty selected slot is outlined too.
+    assert 'div.slot.empty" + (selected ? ".selected" : "")' in panel
+    # A variadic node list turns a null child into the text "null": the legend
+    # rows are collected and pushed instead (finding 2).
+    assert "legend.replaceChildren(...rows)" in panel
+    assert ", null)" not in panel
+    # `display: grid` beats the UA's `[hidden] { display: none }`, so the mode
+    # is a root class and the panel never toggles the attribute (finding 3).
+    assert ".hidden =" not in panel
+    assert "{ hidden: true }" not in panel
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert (
+        ".inv-aggregate, .inventory.aggregate .inv-board, .inventory.aggregate .inv-side "
+        "{ display: none; }" in css
+    )
+    assert ".inventory.aggregate .inv-aggregate { display: grid; }" in css
+    # An old body sends totals but no slots: the aggregate list, not 36 empty
+    # tiles, and one shared staleness threshold dims the board.
+    assert "slots.length === 0 && types > 0" in panel
+    util = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    assert "export const STALE_SECONDS = 5" in util
+    assert "STALE_SECONDS" in panel  # imported, not a second literal
+    panels = (STATIC_DIR / "panels.js").read_text(encoding="utf-8")
+    assert "age > STALE_SECONDS" in panels
+    assert "age > 5" not in panels
 
 
 def test_a_candidate_source_outside_the_evidence_directory_is_not_read(
@@ -427,6 +520,28 @@ def test_stream_resumes_from_last_event_id(server, console) -> None:
     name, payload = next_event()
     assert (name, payload["i"], payload["n"]) == ("evidence", 2, 3)
     connection.close()
+
+
+def test_a_stream_connection_is_counted_as_a_watcher(server, console) -> None:
+    """The loop asks for a 1 Hz snapshot only while someone is watching."""
+    connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+    connection.request("GET", "/api/stream")
+    response = connection.getresponse()
+    assert response.status == 200
+    assert response.readline().decode().startswith("event: state")
+    assert _eventually(lambda: console.watchers == 1)
+    response.close()
+    connection.close()
+    assert _eventually(lambda: console.watchers == 0, seconds=5.0)
+
+
+def _eventually(condition, seconds: float = 3.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
 
 
 # --------------------------------------------------------------------------- #
@@ -803,6 +918,8 @@ def test_loop_publishes_a_state_the_console_can_read(tmp_path) -> None:
             assert state["route"]["skill"] == "get_coal"
             assert state["ladder"]["total"] == 12
             assert state["facts"]["inventory"] == {}
+            assert state["goal"]["rationale"] == "because"
+            assert state["snapshot_at"] is not None and state["snapshot_at"] > 0
             json.dumps(state)  # the server must be able to serialise it
         finally:
             loop.close()

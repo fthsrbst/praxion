@@ -45,6 +45,33 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Pointers: `body/crates/arbiter/src/arbiter.rs` (`meal_blocked_until`), `body/crates/reflexes/src/reflex.rs`
   (`ReflexKind::Starvation`), `body/crates/reflexes/src/motion.rs` (`Motion::Eat`).
 
+### Stale expected-primitive list in `test_skills` (mainline)
+- Source: console slice 1 worker, 2026-11-09
+- State: two tests fail on `wip/console` and on `main`:
+  `brain/tests/test_skills.py::test_primitive_and_fact_lists_come_from_the_core_skills` and
+  `::test_load_catalog_reads_the_real_core_skills`. `body/skills/get_iron_ingot.skill` uses `fail(...)`, so the catalog's
+  primitive list gains `fail` (and `smelt`); the expected lists never got them.
+- Remaining: add `fail` and `smelt` to both expected lists, or make `fail` non-primitive in `primitive_names` on purpose.
+- Pointers: `brain/tests/test_skills.py`, `brain/praxion_brain/skills.py`, `body/skills/get_iron_ingot.skill`.
+
+### The learning chip never hides (pre-existing)
+- Source: console slice 1 review, 2026-11-09
+- State: `panels.js:58` toggles the `hidden` attribute on `span.chip.learning`, but `.chip` sets `display: inline-flex`,
+  and an author display rule beats the UA's `[hidden] { display: none }`: the empty chip shows.
+- Remaining: the owner decides between a global `[hidden] { display: none !important }` (a visible change for every
+  widget that relies on the attribute) and a per-widget `display: none` rule.
+- Pointers: `brain/praxion_brain/console/static/app.css:86`, `panels.js:58`.
+
+### Rendered check for the console panels
+- Source: Claude (console slice 1 review), 2026-11-09
+- State: the inventory panel's tests are source greps. The review found three defects that only a browser showed (a
+  hotbar compare that could never match, a literal "null" legend row, `display: grid` defeating `hidden`); all passed.
+- Remaining: one rendered check (headless browser, or a DOM shim in node) that loads `renderInventory` with a fixture
+  snapshot and asserts the selected tile, the legend text and the mode visibility; run it from `pytest` and skip when no
+  browser is installed.
+- Pointers: `brain/tests/test_console.py`, `brain/praxion_brain/console/static/inventory.js`,
+  `logs/mac1109/review-console.answer.txt`.
+
 ### Simplification pass, then movement style (2026-11-07 plan)
 - Source: Claude Opus 5.5, 2026-11-07 (`docs/decisions.md` 2026-11-07)
 - State: A1-A4 done, A5 fixtures done (forwarder, receipts, perception, interpreter); movement style

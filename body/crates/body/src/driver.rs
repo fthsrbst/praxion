@@ -47,7 +47,7 @@ use praxion_perception::{Config as PerceptionConfig, Perception};
 use praxion_planner::{Block, Cue, Gaze, GazeMode, KnownBlocks};
 use praxion_port::{
     BrainMessage, Command as PortCommand, ConnectionState, Facts as PortFacts, PortServer,
-    Snapshot, StackEntry,
+    SlotFact, Snapshot, StackEntry,
 };
 use praxion_primitives::{Ctx, IntentSpec, PrimitiveEvent, Runner, fact_known};
 use praxion_receipts::{Engine, Intent, ReceiptId};
@@ -1900,6 +1900,15 @@ fn port_facts(world: &World) -> PortFacts {
         }
     }
     let pos = world.player_position().unwrap_or(Vec3::ZERO);
+    let slots = world
+        .inventory_slots()
+        .into_iter()
+        .map(|slot| SlotFact {
+            slot: slot.slot,
+            item: slot.item,
+            count: slot.count,
+        })
+        .collect();
     PortFacts {
         health: health.map_or(20.0, |health| health.health()),
         food: health.map_or(20, |health| health.food()),
@@ -1916,6 +1925,13 @@ fn port_facts(world: &World) -> PortFacts {
             pos.z.floor() as i32,
         ],
         inventory,
+        // The wire promises 0..=8; a value outside it is dropped rather than
+        // sent, because the brain's model rejects the whole snapshot over it.
+        selected_hotbar_slot: world
+            .selected_hotbar_slot()
+            .and_then(|slot| u8::try_from(slot).ok())
+            .filter(|slot| *slot <= 8),
+        slots,
     }
 }
 

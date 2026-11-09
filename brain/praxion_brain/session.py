@@ -42,9 +42,15 @@ class SessionListener(Protocol):
     def on_event(self, event: Mapping[str, Any]) -> None:
         """One body event, in arrival order, while the owner was blocked."""
 
-    def on_snapshot(self, snapshot: Snapshot, *, heartbeat_pending: bool) -> None:
-        """A snapshot arrived and is already cached; ``heartbeat_pending`` says
-        whether a heartbeat asked for it."""
+    def on_snapshot(
+        self, snapshot: Snapshot, *, cause: Optional[str] = None
+    ) -> None:
+        """A snapshot arrived and is already cached.
+
+        ``cause`` names who asked: ``heartbeat`` (the 60 s clock),
+        ``watch`` (a console viewer; display-only) or ``None`` when the body
+        sent it unprompted.
+        """
 
     def on_error(self, error: PortError) -> None:
         """A protocol error the owner must count as a step error (A6)."""
@@ -80,9 +86,13 @@ class BodySession:
         self._log = log
         self._reader = PortReader(port)
         self._snapshot: Optional[dict[str, Any]] = None
+        #: Wall-clock arrival of the last snapshot, for the console's age hint.
+        self._snapshot_at: Optional[float] = None
         #: ``start``/``reconnect`` until the next snapshot is taken as a recovery.
         self._recovering: Optional[str] = None
-        #: A heartbeat asked for a snapshot that has not arrived yet.
+        #: Who asked for the snapshot in flight: ``heartbeat`` or ``watch``.
+        self._snapshot_cause: Optional[str] = None
+        #: A snapshot was asked for and has not arrived yet.
         self._awaiting_snapshot = False
         self._next_reconnect = 0.0
         self._closed = False
@@ -105,8 +115,13 @@ class BodySession:
 
     @property
     def awaiting_snapshot(self) -> bool:
-        """A heartbeat asked for a snapshot that has not arrived yet."""
+        """A snapshot was asked for and has not arrived yet."""
         return self._awaiting_snapshot
+
+    @property
+    def snapshot_at(self) -> Optional[float]:
+        """Wall-clock seconds when the last snapshot arrived, or ``None``."""
+        return self._snapshot_at
 
     @property
     def terminated(self) -> bool:
@@ -156,6 +171,7 @@ class BodySession:
         self.port.close()
         self._next_reconnect = self._clock() + self.reconnect_delay
         self._awaiting_snapshot = False
+        self._snapshot_cause = None
         self.evidence.write("loop_disconnected", error=error, state=self._state())
 
     def try_reconnect(self) -> bool:
@@ -172,6 +188,7 @@ class BodySession:
         self._reader.start()
         self._recovering = RECOVERY_RECONNECT
         self._awaiting_snapshot = False
+        self._snapshot_cause = None
         self.evidence.write("loop_reconnect", port=self.port_number)
         return True
 
@@ -227,14 +244,21 @@ class BodySession:
                 return True
         return False
 
-    def request_snapshot(self) -> bool:
-        """Ask for a snapshot for the heartbeat; ``False`` when it could not leave."""
+    def request_snapshot(self, cause: str = "heartbeat") -> bool:
+        """Ask for a snapshot; ``False`` when it could not leave.
+
+        ``cause`` travels with the request so the owner can tell a heartbeat
+        (which feeds the wake diff) from a console watch (display only).
+        """
         if not self.connected:
             return False
         self._awaiting_snapshot = True
+        self._snapshot_cause = cause
         try:
             self.port.resync()
         except PortError as error:
+            self._awaiting_snapshot = False
+            self._snapshot_cause = None
             self.disconnect(str(error))
             return False
         return True
@@ -275,8 +299,10 @@ class BodySession:
 
     def _on_snapshot(self, snapshot: Snapshot) -> None:
         self._snapshot = snapshot.model_dump(mode="python")
-        pending, self._awaiting_snapshot = self._awaiting_snapshot, False
-        self._listener.on_snapshot(snapshot, heartbeat_pending=pending)
+        self._snapshot_at = time.time()
+        cause, self._snapshot_cause = self._snapshot_cause, None
+        self._awaiting_snapshot = False
+        self._listener.on_snapshot(snapshot, cause=cause)
 
     def _on_port_error(self, error: PortError) -> None:
         """A broken frame is a step error (A6); a closed socket is a disconnect."""

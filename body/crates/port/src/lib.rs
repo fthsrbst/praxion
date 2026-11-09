@@ -67,8 +67,8 @@ pub use server::{
     ConnectionState, DEFAULT_QUEUE_CAPACITY, PortConfig, PortServer, PortStats, PublishOutcome,
 };
 pub use wire::{
-    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, Snapshot,
-    StackEntry,
+    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, SlotFact,
+    Snapshot, StackEntry,
 };
 
 /// Whether one event-log line is forwarded to the brain (proposal §2.2).

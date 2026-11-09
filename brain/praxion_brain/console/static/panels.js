@@ -1,5 +1,5 @@
 // The bento cards: hero, spend, ladder, metrics and skills.
-import { h, icon, svg, el, money, num, sentence, sparkPath } from "./util.js";
+import { h, icon, svg, el, money, num, sentence, sparkPath, STALE_SECONDS } from "./util.js";
 
 const STATE_LABEL = {
   idle: ["Idle", "dot"], picking: ["Picking a goal", "brain"], routing: ["Routing", "route"],
@@ -22,19 +22,20 @@ function buildHero() {
     chipIcon: h("span"), chipText: h("span"), chip: h("span.chip"),
     learning: h("span.chip.learning", { hidden: true }),
     tick: h("span.chip", { title: "Body tick" }), wake: h("span.muted"),
-    mission: h("h1.mission"), sub: h("p.mission-sub"), progress: h("i"),
+    mission: h("h1.mission"), sub: h("p.mission-sub"), why: h("p.mission-why", { hidden: true }), progress: h("i"),
     health: bar("Health"), food: bar("Food"), air: bar("Air"),
-    pos: h("b"), dim: h("b"), inv: h("b"), skill: h("b"), time: h("b"),
+    pos: h("b"), dim: h("b"), inv: h("b"), skill: h("b"), time: h("b"), age: h("b"),
   };
   hero.chip.append(h("i.live-dot"), hero.chipIcon, hero.chipText);
   root.replaceChildren(
     h("div.eyebrow", {}, hero.chip, hero.learning, hero.tick, hero.wake),
-    hero.mission, hero.sub,
+    hero.mission, hero.sub, hero.why,
     h("div.progress", {}, hero.progress),
     h("div.vitals", {}, hero.health.node, hero.food.node, hero.air.node),
     h("div.facts", {},
       h("span", {}, "Position ", hero.pos), h("span", {}, "Dimension ", hero.dim),
-      h("span", {}, "Skill ", hero.skill), h("span", {}, "Inventory ", hero.inv), h("span", {}, "Time ", hero.time)),
+      h("span", {}, "Skill ", hero.skill), h("span", {}, "Inventory ", hero.inv), h("span", {}, "Time ", hero.time),
+      h("span", { title: "Age of the last body snapshot" }, "Facts ", hero.age)),
   );
 }
 
@@ -75,6 +76,9 @@ export function renderHero(s) {
       ? [h("code", { text: goal.condition }), ` via ${goal.skill}`, goal.origin === "user" ? " (your goal)" : "", `, ${num(goal.ticks)} ticks in`]
       : s.proposal ? ["Last: ", h("code", { text: s.proposal.condition })] : []),
   );
+  const why = goal && goal.rationale ? String(goal.rationale) : "";
+  hero.why.textContent = why;
+  hero.why.hidden = !why;
   hero.progress.style.width = goal && goal.ticks != null ? `${Math.min(100, (goal.ticks / 6000) * 100)}%` : "0";
 
   const f = s.facts || {};
@@ -86,6 +90,9 @@ export function renderHero(s) {
   hero.skill.textContent = goal ? goal.skill : "-";
   hero.inv.textContent = f.inventory ? `${Object.values(f.inventory).reduce((a, b) => a + b, 0)} items` : "-";
   hero.time.textContent = f.is_night === undefined || f.is_night === null ? "-" : f.is_night ? "night" : "day";
+  const age = typeof s.snapshot_at === "number" ? Math.max(0, Date.now() / 1000 - s.snapshot_at) : null;
+  hero.age.textContent = age === null ? "-" : `${Math.round(age)} s old`;
+  hero.age.classList.toggle("warn", age !== null && age > STALE_SECONDS);
 }
 
 // -- spend -------------------------------------------------------------- //

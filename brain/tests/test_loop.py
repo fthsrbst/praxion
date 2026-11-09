@@ -28,7 +28,7 @@ from praxion_brain.loop import (
 )
 from praxion_brain.memory import GoalRecord, Memory
 from praxion_brain.practice import PracticeResult
-from praxion_brain.port import Bye, PortClient, StackEntry
+from praxion_brain.port import Bye, PortClient, Snapshot, StackEntry
 from praxion_brain.proposer import (
     ESCALATE_AFTER,
     INPUT_ESTIMATE,
@@ -1903,6 +1903,127 @@ def test_an_expired_goal_block_wakes_an_idle_loop() -> None:
     loop._check_heartbeat(facts, is_playing=False, tick=3, heartbeat_pending=False)
     assert len(woken) == 1
     assert ("heartbeat_change", {"reasons": ["block_expired"], "tick": 3}) in loop.evidence.lines
+
+
+def test_a_watcher_asks_for_a_snapshot_every_second_without_heartbeat_evidence() -> None:
+    """The 1 Hz watch clock is separate from the 60 s heartbeat (critique 1-2)."""
+
+    class Console:
+        watchers = 1
+
+    class Session:
+        awaiting_snapshot = False
+        tick = 0
+
+        def __init__(self) -> None:
+            self.causes: list[str] = []
+
+        def request_snapshot(self, cause: str = "heartbeat") -> bool:
+            self.causes.append(cause)
+            return True
+
+    class Evidence:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def write(self, kind, **fields):
+            self.lines.append(kind)
+
+    loop = Loop.__new__(Loop)
+    loop.session, loop._console, loop.evidence = Session(), Console(), Evidence()
+    now = [0.0]
+    loop._clock = lambda: now[0]
+    loop._last_heartbeat = 0.0
+    loop._last_watch_snapshot = 0.0
+    loop.heartbeat_seconds = 60.0
+
+    loop._maybe_heartbeat()
+    assert loop.session.causes == [], "not a second of watching yet"
+
+    now[0] = 1.0
+    loop._maybe_heartbeat()
+    assert loop.session.causes == ["watch"]
+    assert loop.evidence.lines == [], "a watch snapshot writes no evidence"
+
+    now[0] = 1.5
+    loop._maybe_heartbeat()
+    assert loop.session.causes == ["watch"], "the watch clock throttles"
+
+    loop._console.watchers = 0
+    now[0] = 2.0
+    loop._maybe_heartbeat()
+    assert loop.session.causes == ["watch"], "no viewer, no watch snapshot"
+
+    now[0] = 60.0
+    loop._maybe_heartbeat()
+    assert loop.session.causes == ["watch", "heartbeat"]
+    assert loop.evidence.lines == ["heartbeat_requested"]
+
+
+def test_a_watch_snapshot_is_display_only() -> None:
+    """It never feeds the heartbeat diff, so it cannot write evidence or wake."""
+    loop = Loop.__new__(Loop)
+    calls = []
+    loop._check_heartbeat = lambda facts, **kwargs: calls.append(kwargs)
+
+    class Session:
+        snapshot = {"facts": {"inventory": {}}}
+
+        @staticmethod
+        def take_recovery():
+            return None
+
+    loop.session = Session()
+    snapshot = Snapshot(seq=0, tick=3, generation=0)
+
+    loop.on_snapshot(snapshot, cause="watch")
+    assert calls == []
+
+    loop.on_snapshot(snapshot, cause="heartbeat")
+    assert calls == [{"is_playing": False, "tick": 3, "heartbeat_pending": True}]
+
+    loop.on_snapshot(snapshot, cause=None)
+    assert calls[-1] == {"is_playing": False, "tick": 3, "heartbeat_pending": False}
+
+
+def test_the_session_tags_a_watch_snapshot_and_records_when_it_arrived() -> None:
+    from praxion_brain.session import BodySession
+
+    class Port:
+        connected = True
+
+        @staticmethod
+        def resync():
+            pass
+
+    class Listener:
+        def __init__(self) -> None:
+            self.causes: list[str | None] = []
+
+        def on_snapshot(self, snapshot, *, cause=None):
+            self.causes.append(cause)
+
+        def on_event(self, event):
+            pass
+
+        def on_error(self, error):
+            pass
+
+    class Evidence:
+        @staticmethod
+        def write(kind, **fields):
+            pass
+
+    listener = Listener()
+    session = BodySession(Port(), evidence=Evidence(), listener=listener, state=lambda: "idle")
+    assert session.snapshot_at is None
+
+    assert session.request_snapshot(cause="watch")
+    session._on_snapshot(Snapshot(seq=0, tick=0, generation=0))
+
+    assert listener.causes == ["watch"]
+    assert session.snapshot_at is not None and session.snapshot_at > 0
+    assert session.awaiting_snapshot is False
 
 
 def test_a_stop_before_the_body_accepts_is_sent_on_accept() -> None:

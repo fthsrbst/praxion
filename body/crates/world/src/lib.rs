@@ -129,6 +129,23 @@ impl Weather {
     }
 }
 
+/// One occupied slot of the player's own container, for the port snapshot.
+///
+/// The console's inventory panel shows slots, not only per-item totals, so the
+/// body exposes what it already stores (decision 2026-11-09 "Console": items
+/// show as lettered tiles shipped with the console). Slot numbers follow
+/// vanilla's `InventoryMenu`, the layout the player container size (46) fixes:
+/// 0 crafting result, 1-4 crafting grid, 5-8 armour, 9-35 storage, 36-44
+/// hotbar, 45 offhand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlotItem {
+    /// 0..=45, the player container's own layout.
+    pub slot: u8,
+    /// The item id without the `minecraft:` namespace, as the facts use it.
+    pub item: String,
+    pub count: u32,
+}
+
 /// Everything the decoder received for one followed connection.
 pub struct World {
     followed: Option<u32>,
@@ -274,6 +291,9 @@ impl World {
         self.player.experience()
     }
 
+    /// The hand as the last `SetHeldSlot` said, 0..=8 on the wire. A respawn
+    /// sets it to `Some(0)` before the server confirms anything, so an early
+    /// snapshot can outline the first tile; `None` means no held-slot fact yet.
     pub fn selected_hotbar_slot(&self) -> Option<u32> {
         self.player.selected_slot()
     }
@@ -300,6 +320,34 @@ impl World {
 
     pub fn inventory(&self) -> &[ItemStack] {
         self.player.inventory()
+    }
+
+    /// The occupied slots of the player's own container, ascending slot.
+    ///
+    /// Slot 0 is the crafting result preview, not an owned item, so it is
+    /// skipped exactly as the aggregate inventory skips it. Indices past the
+    /// end of the stored list are skipped too: the first packet may name a
+    /// single slot, so an early snapshot can have a short list. The cap at
+    /// `PLAYER_CONTAINER_SIZE` keeps a malformed content packet from putting a
+    /// slot number on the wire that the facts do not allow.
+    pub fn inventory_slots(&self) -> Vec<SlotItem> {
+        self.player
+            .inventory()
+            .iter()
+            .take(player::PLAYER_CONTAINER_SIZE)
+            .enumerate()
+            .skip(1)
+            .filter_map(|(index, stack)| {
+                let count = u32::try_from(stack.count()).ok().filter(|count| *count > 0)?;
+                let slot = u8::try_from(index).ok()?;
+                let kind = stack.kind().to_str();
+                Some(SlotItem {
+                    slot,
+                    item: kind.strip_prefix("minecraft:").unwrap_or(kind).to_owned(),
+                    count,
+                })
+            })
+            .collect()
     }
 
     pub fn carried_item(&self) -> &ItemStack {

@@ -117,6 +117,20 @@ class StackEntry(_Message):
     state: str
 
 
+class Slot(_Message):
+    """One occupied slot of the player's own container.
+
+    Slot numbers follow vanilla's ``InventoryMenu``: 0 result, 1-4 grid,
+    5-8 armour, 9-35 storage, 36-44 hotbar, 45 offhand. The list is additive,
+    so ``PORT_VERSION`` stays 0 (decision 2026-11-09 "Console"). Durability is
+    not on the wire until the owner decides the panel shows wear.
+    """
+
+    slot: int = Field(ge=0, le=45)
+    item: str
+    count: int = Field(ge=0, le=U32_MAX)
+
+
 class Facts(_Message):
     """The body facts the brain reads from a snapshot."""
 
@@ -130,6 +144,10 @@ class Facts(_Message):
     inventory: Dict[str, Annotated[int, Field(ge=0, le=U32_MAX)]] = Field(
         default_factory=dict
     )
+    #: The hand, 0..=8; ``None`` before the first held-slot fact.
+    selected_hotbar_slot: Optional[int] = Field(default=None, ge=0, le=8)
+    #: Occupied slots only, ascending; empty on a body that predates the field.
+    slots: list[Slot] = Field(default_factory=list)
 
 
 class Snapshot(_Message):
@@ -862,6 +880,7 @@ __all__ = [
     "ProtocolError",
     "ResyncRequest",
     "SILENCE_LIMIT_S",
+    "Slot",
     "Snapshot",
     "StackEntry",
     "VersionMismatch",
