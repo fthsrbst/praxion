@@ -195,6 +195,53 @@ fn inventory_follows_set_content_and_set_slot() {
 }
 
 #[test]
+fn inventory_slots_follow_the_player_container_layout() {
+    // One test pins the 46-slot layout the port and the console panel both
+    // treat as true (critique finding 10): 0 result, 1-4 grid, 5-8 armour,
+    // 9-35 storage, 36-44 hotbar, 45 offhand.
+    let mut world = active_world();
+    let mut items = vec![ItemStack::Empty; 47];
+    items[0] = ItemStack::new(ItemKind::CraftingTable, 1); // result preview, never owned
+    items[5] = ItemStack::new(ItemKind::IronHelmet, 1);
+    items[9] = ItemStack::new(ItemKind::OakLog, 12);
+    items[36] = ItemStack::new(ItemKind::StonePickaxe, 1);
+    items[45] = ItemStack::new(ItemKind::Torch, 8);
+    items[46] = ItemStack::new(ItemKind::Dirt, 1); // past the container: never sent
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerSetContent(ClientboundContainerSetContent {
+            container_id: 0,
+            state_id: 1,
+            items,
+            carried_item: ItemStack::Empty,
+        }),
+    );
+
+    let slots = world.inventory_slots();
+    assert_eq!(
+        slots.iter().map(|slot| slot.slot).collect::<Vec<_>>(),
+        vec![5, 9, 36, 45],
+        "slot 0 is the result preview and empty slots are skipped"
+    );
+    assert_eq!(slots[0].item, "iron_helmet");
+    assert_eq!(slots[1].item, "oak_log");
+    assert_eq!(slots[1].count, 12);
+    assert_eq!(slots[2].item, "stone_pickaxe");
+    assert_eq!(slots[3].item, "torch");
+
+    // The hand is a hotbar index 0..=8, straight from the server's packet; the
+    // respawn reset to 0 has its own test (critique finding 8).
+    assert_eq!(world.selected_hotbar_slot(), None, "no held-slot fact yet");
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetHeldSlot(azalea_protocol::packets::game::ClientboundSetHeldSlot {
+            slot: 2,
+        }),
+    );
+    assert_eq!(world.selected_hotbar_slot(), Some(2));
+}
+
+#[test]
 fn entities_are_added_moved_and_removed() {
     let mut world = active_world();
     let uuid = Uuid::from_u128(42);

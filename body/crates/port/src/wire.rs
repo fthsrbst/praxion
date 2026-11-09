@@ -52,6 +52,22 @@ pub struct StackEntry {
     pub state: String,
 }
 
+/// One occupied slot of the player's own container (decision 2026-11-09
+/// "Console": the panel shows the 36 storage/hotbar slots, armour and offhand).
+///
+/// Slot numbers follow vanilla's `InventoryMenu`: 0 result, 1-4 grid, 5-8
+/// armour, 9-35 storage, 36-44 hotbar, 45 offhand. The list is additive and
+/// skipped when empty, so `PORT_VERSION` stays 0: an old brain ignores it and a
+/// new brain on an old body gets an empty list. Durability is left off until
+/// the owner decides whether the panel shows wear (open question 5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotFact {
+    pub slot: u8,
+    /// The item id without the `minecraft:` namespace.
+    pub item: String,
+    pub count: u32,
+}
+
 /// The body facts a snapshot carries (proposal §2.2, §2.5).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Facts {
@@ -64,6 +80,12 @@ pub struct Facts {
     pub dimension: String,
     pub pos: [i32; 3],
     pub inventory: BTreeMap<String, u32>,
+    /// The hand, 0..=8; absent before the first held-slot fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_hotbar_slot: Option<u8>,
+    /// Occupied slots only, ascending; absent when the inventory is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<SlotFact>,
 }
 
 /// State on demand: connect, `resync_request` and every wake.

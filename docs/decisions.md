@@ -66,6 +66,15 @@ All four approved by the user (macOS session), each the recommended option; desi
   site outside the allowlist and a committed baseline that may only shrink. Architecture §4, §5.1 and §7 are updated to
   this rule. Rules out for now: removing `praxion-world` from the primitives, facts and reflexes crates (type-level
   enforcement).
+- **Console facts grow additively; `PORT_VERSION` stays 0 (Claude).** The inventory panel needs two facts the snapshot did
+  not carry: `slots` (occupied container slots only, ascending, 0-45) and `selected_hotbar_slot` (the hand, 0-8). Both
+  are optional and skipped when absent (`skip_serializing_if`), so a body that sends nothing new emits byte-identical
+  JSON; an old brain ignores the fields (`extra="ignore"`) and a new brain on an old body gets the defaults, so neither
+  side needs a version bump or a lockstep upgrade. The brain bounds-checks both (slot 46 or hand 9 is a
+  `ProtocolError`, tested), and the body never emits out of range: it drops an out-of-range hand instead of sending
+  it, because the brain rejects a whole snapshot over one bad field. Reason: a display field must not strand old
+  brains. Rules out: a second wire message for the panel, and durability on the wire until the owner decides the panel
+  shows wear.
 
 ## 2026-11-08
 

@@ -2,6 +2,7 @@
 import { getJSON, control, stream } from "./api.js";
 import { el } from "./util.js";
 import { renderHero, renderSpend, renderLadder, renderMetrics, renderSkills } from "./panels.js";
+import { renderInventory } from "./inventory.js";
 import { createFeed } from "./feed.js";
 import { openExchange, openSkill, openCandidate, closeDrawer } from "./inspector.js";
 
@@ -15,6 +16,7 @@ function onState(s) {
   renderHero(s);
   renderSpend(s);
   renderLadder(s);
+  renderInventory(s.facts, s.snapshot_at);
   const pause = el("pause-btn");
   pause.textContent = s.paused ? "Resume" : "Pause";
   el("stop-btn").disabled = !s.goal;

@@ -98,6 +98,10 @@ FAILURE_STREAK_GAP_TICKS = 600
 FAILURE_STREAK = 3
 #: The console state is republished at most this often (seconds).
 PUBLISH_SECONDS = 0.25
+#: While a console viewer is connected, ask the body for a snapshot this often
+#: (decision 2026-11-09 "Console": the page refreshes every second). These
+#: snapshots are display-only: they never feed the heartbeat diff.
+CONSOLE_SNAPSHOT_SECONDS = 1.0
 
 
 class LoopState(str, Enum):
@@ -182,6 +186,7 @@ class Loop:
         self._last_proposal: Optional[GoalProposal] = None
         self._invalid_proposals = 0
         self._last_heartbeat = self._clock()
+        self._last_watch_snapshot = self._clock()
         self._heartbeat_facts: Optional[dict[str, Any]] = None
         self._was_playing = False
         self._blocked_goals: set[str] = set()
@@ -223,6 +228,7 @@ class Loop:
         self._step_errors = 0
         self.session.start()
         self._last_heartbeat = self._clock()
+        self._last_watch_snapshot = self._clock()
         self.evidence.write(
             "loop_started",
             world_id=self.world_id,
@@ -339,19 +345,25 @@ class Loop:
         """An event that arrived while the loop was blocked in a snapshot refresh."""
         self._on_event(event)
 
-    def on_snapshot(self, snapshot: Snapshot, *, heartbeat_pending: bool) -> None:
-        """A snapshot arrived: diff the facts, then recover from a fresh connection."""
-        facts = (self.session.snapshot or {}).get("facts") or {}
-        playing = any(entry.state == "running" for entry in snapshot.stack)
-        self._check_heartbeat(
-            facts,
-            is_playing=playing,
-            tick=snapshot.tick,
-            heartbeat_pending=heartbeat_pending,
-        )
-        cause = self.session.take_recovery()
-        if cause is not None:
-            self._recover(snapshot, WakeCause(cause))
+    def on_snapshot(self, snapshot: Snapshot, *, cause: Optional[str] = None) -> None:
+        """A snapshot arrived: diff the facts, then recover from a fresh connection.
+
+        A console watch snapshot is display-only (critique findings 1-2): it
+        neither writes heartbeat evidence nor moves the wake baseline, so the
+        60 s heartbeat keeps exactly the semantics it was decided with (B8).
+        """
+        if cause != "watch":
+            facts = (self.session.snapshot or {}).get("facts") or {}
+            playing = any(entry.state == "running" for entry in snapshot.stack)
+            self._check_heartbeat(
+                facts,
+                is_playing=playing,
+                tick=snapshot.tick,
+                heartbeat_pending=cause == "heartbeat",
+            )
+        recovery = self.session.take_recovery()
+        if recovery is not None:
+            self._recover(snapshot, WakeCause(recovery))
 
     def on_error(self, error: PortError) -> None:
         """A protocol error is a step error (A6)."""
@@ -1441,6 +1453,7 @@ class Loop:
                 "generation": self.session.generation,
                 "owner": snapshot.get("owner"),
                 "facts": snapshot.get("facts"),
+                "snapshot_at": self.session.snapshot_at,
                 "stack": snapshot.get("stack"),
                 "learning": learning,
                 "goal": None
@@ -1451,6 +1464,7 @@ class Loop:
                     "condition": opened.record.condition,
                     "skill": opened.skill,
                     "origin": opened.record.origin,
+                    "rationale": opened.proposal.rationale,
                     "sent_tick": opened.sent_tick,
                     "ticks": opened.ticks_since(self.session.tick),
                 },
@@ -1495,15 +1509,41 @@ class Loop:
             return []
 
     def _maybe_heartbeat(self) -> None:
+        """Ask for a snapshot on the heartbeat clock, or for a watching console.
+
+        The two clocks are independent: the 60 s heartbeat keeps its evidence
+        and its wake diff, while a watch snapshot is display-only read-side
+        traffic with no evidence line (critique findings 1-2).
+
+        A resync is not free (critique finding 7): while a snapshot is owed the
+        body discards the events still queued for the brain and announces them
+        as ``dropped(n)`` (port ``server.rs`` ``service_events``), so at 1 Hz a
+        watch can cost one step's worth of events. They are announced, never
+        silent, and the snapshot that follows supersedes them, which is why the
+        display refresh accepts the trade. If the talk work ever needs receipt
+        latency below a second, skip the watch request while a command receipt
+        is pending.
+        """
         if self.session.awaiting_snapshot:
             return
         now = self._clock()
-        if now - self._last_heartbeat < self.heartbeat_seconds:
+        heartbeat_due = now - self._last_heartbeat >= self.heartbeat_seconds
+        watch_due = (
+            self._console is not None
+            and self._console.watchers > 0
+            and now - self._last_watch_snapshot >= CONSOLE_SNAPSHOT_SECONDS
+        )
+        if not (heartbeat_due or watch_due):
             return
-        self._last_heartbeat = now
-        if not self.session.request_snapshot():
+        if heartbeat_due:
+            self._last_heartbeat = now
+        if watch_due:
+            self._last_watch_snapshot = now
+        cause = "heartbeat" if heartbeat_due else "watch"
+        if not self.session.request_snapshot(cause=cause):
             return
-        self.evidence.write("heartbeat_requested", tick=self.session.tick)
+        if heartbeat_due:
+            self.evidence.write("heartbeat_requested", tick=self.session.tick)
 
     def _inventory(self) -> dict[str, int]:
         facts = (self.session.snapshot or {}).get("facts") or {}

@@ -13,8 +13,8 @@ use crate::forwards;
 use crate::frame::{FrameError, FrameReader, MAX_FRAME_SIZE, write_frame, write_payload};
 use crate::server::{ConnectionState, PortConfig, PortServer, PublishOutcome};
 use crate::wire::{
-    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, Snapshot,
-    StackEntry,
+    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, SlotFact,
+    Snapshot, StackEntry,
 };
 
 fn config() -> PortConfig {
@@ -61,6 +61,8 @@ fn snapshot(seq: u64) -> Snapshot {
             dimension: "overworld".to_owned(),
             pos: [12, 64, -30],
             inventory: [("oak_log".to_owned(), 3)].into_iter().collect(),
+            selected_hotbar_slot: None,
+            slots: Vec::new(),
         },
         stale_ticks: 0,
     }
@@ -263,6 +265,28 @@ fn the_wire_shapes_match_the_proposal() {
         serde_json::to_string(&BrainMessage::Ping).unwrap(),
         r#"{"t":"ping"}"#
     );
+}
+
+#[test]
+fn slots_are_optional_so_the_golden_frame_stays_put() {
+    // Additive fields without a PORT_VERSION bump: an old brain ignores them
+    // and an old body sends neither (decision 2026-11-09 "Console").
+    let mut facts = Facts::default();
+    assert_eq!(
+        serde_json::to_string(&facts).unwrap(),
+        r#"{"health":0.0,"food":0,"air":0,"is_night":false,"day_time":0,"dimension":"","pos":[0,0,0],"inventory":{}}"#
+    );
+
+    facts.selected_hotbar_slot = Some(2);
+    facts.slots = vec![SlotFact {
+        slot: 9,
+        item: "oak_log".to_owned(),
+        count: 12,
+    }];
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(json.contains(r#""selected_hotbar_slot":2"#));
+    assert!(json.contains(r#""slots":[{"slot":9,"item":"oak_log","count":12}]"#));
+    assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
 }
 
 #[test]
@@ -504,6 +528,10 @@ fn a_resync_request_is_answered_with_a_snapshot_then_deltas() {
     brain.receive();
 
     brain.send(&BrainMessage::ResyncRequest);
+    // Wait until the connection thread has seen the request. Otherwise the
+    // published snapshot can go out as a wake snapshot, cut at the last sent
+    // event, before the resync cut is known.
+    wait_for(|| server.needs_snapshot());
     // The stored snapshot (seq 5) is the cut; later events must follow it.
     server.publish_snapshot(snapshot(5));
     assert_eq!(

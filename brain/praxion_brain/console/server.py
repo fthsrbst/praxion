@@ -25,7 +25,7 @@ from .log import EvidenceLog
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8765
-ACTIONS = ("pause", "resume", "stop_goal", "new_goal")
+ACTIONS = ("pause", "resume", "stop_goal", "new_goal", "task")
 MAX_BODY_BYTES = 4096
 MAX_TEXT_CHARS = 200
 EVIDENCE_PAGE = 200
@@ -83,6 +83,13 @@ def check_control(body: Any) -> dict[str, Any]:
         except ConditionError as error:
             raise ValueError(f"the condition does not parse: {error}") from error
         request["text"], request["condition"] = text, condition
+    elif action == "task":
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("a task needs some text")
+        if len(text) > MAX_TEXT_CHARS:
+            raise ValueError(f"text is limited to {MAX_TEXT_CHARS} characters")
+        request["text"] = text
     return request
 
 
@@ -202,6 +209,14 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, str(error))
             return
+        if request["action"] == "task" and self.app.console.task is None:
+            # Never accept a request that would be silently dropped; the talk
+            # design owns free text -> verifiable goal (decision 2026-11-09).
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "free-text tasks are not wired yet; give a goal with a condition",
+            )
+            return
         self.app.console.control.put(request)
         self._json({"ok": True, "queued": request["action"]}, HTTPStatus.ACCEPTED)
 
@@ -264,6 +279,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         waited = STATE_EVERY_SECONDS
+        self.app.console.watch()
         try:
             while not self.app.stopping.is_set():
                 for entry in log.tail(
@@ -278,6 +294,10 @@ class _Handler(BaseHTTPRequestHandler):
                 waited += STREAM_POLL_SECONDS
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
+        finally:
+            # The loop asks the body for a fresh snapshot only while someone
+            # is watching (decision 2026-11-09 "Console": refresh every second).
+            self.app.console.unwatch()
 
     def _event(self, name: str, payload: Any, number: Optional[int] = None) -> None:
         lines = [f"event: {name}"]

@@ -2,6 +2,13 @@
 
 const SVG = "http://www.w3.org/2000/svg";
 
+/** A snapshot older than this reads as stale: the console clears it, so the
+ * one-second refresh has missed several ticks (decision 2026-11-09 "Console":
+ * a page refreshes the bot's state every second). One value for the hero's
+ * "facts N s old" and the inventory's dimming, so a cadence change moves both.
+ */
+export const STALE_SECONDS = 5;
+
 /** h("div.card", {onclick}, child, "text") builds an element. */
 export function h(tag, attrs, ...children) {
   const [name, ...classes] = tag.split(".");
@@ -20,13 +27,19 @@ export function h(tag, attrs, ...children) {
 export function svg(markup, className) {
   const wrap = document.createElementNS(SVG, "svg");
   wrap.setAttribute("viewBox", "0 0 24 24");
+  // An inline SVG with only a viewBox has no intrinsic size: in an unsized
+  // container it takes the whole flex line (measured 1138x1138) or collapses
+  // to 0x0. Every existing CSS rule overrides these attributes; an unsized
+  // insertion point now renders 18 px instead.
+  wrap.setAttribute("width", "18");
+  wrap.setAttribute("height", "18");
   wrap.setAttribute("fill", "none");
   wrap.setAttribute("stroke", "currentColor");
   wrap.setAttribute("stroke-width", "1.7");
   wrap.setAttribute("stroke-linecap", "round");
   wrap.setAttribute("stroke-linejoin", "round");
   wrap.setAttribute("aria-hidden", "true");
-  if (className) wrap.setAttribute("class", className);
+  wrap.setAttribute("class", className ? "icon " + className : "icon");
   wrap.innerHTML = markup;
   return wrap;
 }
@@ -95,4 +108,21 @@ export function sparkPath(values, w, h, pad = 4) {
 
 export function el(id) {
   return document.getElementById(id);
+}
+
+/** A lettered tile for an item id: `oak_log` -> `{text: "OL", hue: 23}`.
+ *
+ * Tiles are monograms shipped with the console, never Mojang textures
+ * (decision 2026-11-09 "Console": items show as lettered tiles). The hue is a
+ * stable arbitrary tint that only makes neighbouring tiles distinguishable; it
+ * does not encode the item's material.
+ */
+export function itemGlyph(id) {
+  const name = String(id || "").replace(/^minecraft:/, "");
+  const words = name.split(/[_ ]+/).filter(Boolean);
+  const text = (words.length > 1 ? words[0][0] + words[words.length - 1][0]
+    : (words[0] || "?").slice(0, 2)).toUpperCase();
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return { text, hue: hash % 360 };
 }

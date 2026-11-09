@@ -9,7 +9,7 @@ the server puts requests, the loop drains them once per step.
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..evidence import Evidence
 from ..ledger import Ledger
@@ -53,6 +53,12 @@ class Console:
         self.core_dir = core_dir
         self.active_dir = active_dir
         self.control = ControlQueue()
+        #: Where a free-text task goes once the talk work lands; ``None`` means
+        #: the server answers 503 instead of dropping the request silently
+        #: (decision 2026-11-09 "Console").
+        self.task: Optional[Callable[[str], None]] = None
+        self._watchers = 0
+        self._watch_lock = threading.Lock()
         self._state: dict[str, Any] = {"world_id": world_id, "state": "starting"}
 
     def publish(self, state: dict[str, Any]) -> None:
@@ -61,6 +67,24 @@ class Console:
     @property
     def state(self) -> dict[str, Any]:
         return self._state
+
+    def watch(self) -> int:
+        """One more viewer is reading the stream; returns the live count."""
+        with self._watch_lock:
+            self._watchers += 1
+            return self._watchers
+
+    def unwatch(self) -> int:
+        """One viewer left; returns the live count (never below zero)."""
+        with self._watch_lock:
+            self._watchers = max(0, self._watchers - 1)
+            return self._watchers
+
+    @property
+    def watchers(self) -> int:
+        """How many streams are open; the loop asks for snapshots while > 0."""
+        with self._watch_lock:
+            return self._watchers
 
 
 __all__ = ["Console", "ControlQueue"]

@@ -28,6 +28,7 @@ from praxion_brain.port import (
     Pong,
     ProtocolError,
     ResyncRequest,
+    Slot,
     Snapshot,
     StackEntry,
     VersionMismatch,
@@ -349,8 +350,15 @@ def test_poll_default_returns_a_frame_already_sent(
 ) -> None:
     wait_snapshot(client)
     body.emit_event("note", text="ready")
-
-    message = client.poll()  # the default timeout is zero, but it must pump
+    # The write is synchronous, but macOS loopback can keep the bytes in
+    # transit for a moment, and a zero-timeout select is then honestly empty.
+    # Retry the zero-timeout poll until they land rather than sleeping a fixed
+    # time: a sleep would hide a pump that stopped pumping (review finding 5).
+    deadline = time.monotonic() + 2.0
+    message = None
+    while message is None:
+        assert time.monotonic() < deadline, "the note never reached the client"
+        message = client.poll()  # the default timeout is zero, but it must pump
 
     assert isinstance(message, EventMessage)
     assert message.event["text"] == "ready"
@@ -459,6 +467,58 @@ def test_snapshot_passes_owner_stack_and_stale_ticks(
     assert [(entry.intent_id, entry.state) for entry in client.stack] == [
         (intent_id, "running")
     ]
+
+
+def test_snapshot_slots_are_additive_and_bounded() -> None:
+    """Slots are optional (PORT_VERSION stays 0) and follow the 46-slot layout."""
+    plain = parse_body_message(
+        {"t": "snapshot", "seq": 0, "tick": 0, "generation": 0, "facts": {}}
+    )
+    assert plain.facts.slots == []
+    assert plain.facts.selected_hotbar_slot is None
+
+    found = parse_body_message(
+        {
+            "t": "snapshot",
+            "seq": 0,
+            "tick": 0,
+            "generation": 0,
+            "facts": {
+                "inventory": {"oak_log": 12},
+                "selected_hotbar_slot": 2,
+                "slots": [
+                    {"slot": 9, "item": "oak_log", "count": 12},
+                    {"slot": 38, "item": "stone_pickaxe", "count": 1},
+                ],
+            },
+        }
+    )
+    assert found.facts.selected_hotbar_slot == 2
+    assert found.facts.slots == [
+        Slot(slot=9, item="oak_log", count=12),
+        Slot(slot=38, item="stone_pickaxe", count=1),
+    ]
+
+    with pytest.raises(ProtocolError):
+        parse_body_message(
+            {
+                "t": "snapshot",
+                "seq": 0,
+                "tick": 0,
+                "generation": 0,
+                "facts": {"slots": [{"slot": 46, "item": "stone", "count": 1}]},
+            }
+        )
+    with pytest.raises(ProtocolError):
+        parse_body_message(
+            {
+                "t": "snapshot",
+                "seq": 0,
+                "tick": 0,
+                "generation": 0,
+                "facts": {"selected_hotbar_slot": 9},
+            }
+        )
 
 
 def test_silence_helpers(client: PortClient) -> None:
