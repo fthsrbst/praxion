@@ -11,6 +11,14 @@ By default this is a survival run (decision 2026-11-09 "Five next areas"): the
 day cycle runs, mobs spawn, and the clock starts in the morning, so a long run
 meets dusk and a night. ``--peaceful`` restores the old frozen, mob-free
 daytime for debugging; the smoke tests keep their own frozen fixtures.
+
+The body obeys the chat of the player named by ``--operator`` (default
+``Fatih``, the watcher): ``dur``, ``iptal``, ``durum`` and ``devam`` act bare; a
+task needs the prefix ``p:`` (``p: 8 taş getir``, ``--chat-prefix`` changes it,
+an empty prefix takes every line as a task); any other chat stays chat. The
+brain maps a task to a goal and the bot answers in Turkish. Join under that
+name or nothing you type is read (decision 2026-11-09 "Chat: control words
+bare, tasks with a prefix").
 """
 
 from __future__ import annotations
@@ -76,12 +84,24 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_START_TIME,
         help="the world clock at the start of a survival run, in ticks (default: morning)",
     )
+    parser.add_argument(
+        "--operator",
+        default="Fatih",
+        help="the player name whose chat the bot obeys (the one who watches)",
+    )
     args = parser.parse_args(argv)
 
     root = repo_root()
     setup = _peaceful if args.peaceful else _survival(args.start_time)
-    with start_session(args.seed, setup=setup, max_ticks=10**9, keep=True) as session:
+    with start_session(
+        args.seed,
+        setup=setup,
+        max_ticks=10**9,
+        keep=True,
+        extra_args=["--operator", args.operator],
+    ) as session:
         print(f"Watch: Minecraft 26.3 > Direct Connection > 127.0.0.1:{session.server.port}", flush=True)
+        print(f"Join as {args.operator!r}: the bot reads only this player's chat", flush=True)
         print(f"body port {session.port}, run_dir {session.run_dir}", flush=True)
         print("Console: http://127.0.0.1:8765/", flush=True)
         # The body watches this directory: a skill admitted mid-run is live on

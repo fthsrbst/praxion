@@ -36,7 +36,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use azalea_protocol::packets::game::ClientboundGamePacket;
 use praxion_arbiter::{Arbiter, CommandError, FrameSource, IntentState, Needs, Owner, Tier};
+use praxion_decoder::Packet;
 use praxion_eventlog::{Event, EventKind, Outcome as ReceiptOutcome, Versions, Writer};
 use praxion_headless::{AppliedReport, Body, ControlFrame, Driver, Held, Look, TickView};
 use praxion_interpreter::{
@@ -55,6 +57,7 @@ use praxion_reflexes::{EndermanGuard, LatencyClass, ReflexKind, Settings, View};
 use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::{BlockPos, Vec3, World};
 
+use crate::chat::{self, Control, Inbound, Operators, Outbound};
 use crate::summary::{GoalResult, Shared, write_summary};
 use crate::{ReloadedSkills, SkillsWatch};
 
@@ -100,6 +103,15 @@ pub struct BodyOptions {
     /// How long the brain may stay quiet before the body notes it.
     pub brain_silence: Duration,
     pub versions: Versions,
+    /// The body's own login name: its lines come back as chat and are never
+    /// read.
+    pub own_name: String,
+    /// Player names whose chat is obeyed; empty means no chat is read.
+    pub operators: Vec<String>,
+    /// The prefix a task line needs in chat (`p:` by default). Control words
+    /// need none; an empty prefix accepts every operator line as a task
+    /// (decision 2026-11-09 "Chat: control words bare, tasks with a prefix").
+    pub chat_prefix: String,
 }
 
 /// The owner of a tick's look request, for the gaze's reaction delay.
@@ -194,6 +206,17 @@ pub struct BodyDriver {
     night_idle_ticks: u32,
     /// Fallback goals the body started itself, for their command ids.
     night_fallbacks: u64,
+    /// Who is obeyed in chat (`chat.rs`).
+    chat_operators: Operators,
+    /// The prefix a task line needs (`p:` by default, `chat.rs`).
+    chat_prefix: String,
+    /// Lines waiting to be said, from the brain's `say` and the body's own
+    /// `status` answer.
+    outbound: Outbound,
+    /// The line handed to the actuator this tick, until `applied` confirms it.
+    chat_inflight: Option<(String, String)>,
+    /// Counter for the ids of lines the body composes itself (`b-0001`).
+    chat_counter: u64,
 }
 
 /// One primitive execution as the log sees it.
@@ -287,6 +310,9 @@ impl BodyDriver {
             }),
             None => CliGoal::None,
         };
+        let options_own = options.own_name.clone();
+        let options_operators = options.operators.clone();
+        let chat_prefix = options.chat_prefix.clone();
         let mut driver = Self {
             options,
             shared,
@@ -327,6 +353,11 @@ impl BodyDriver {
             desync_logged: false,
             night_idle_ticks: 0,
             night_fallbacks: 0,
+            chat_operators: Operators::new(&options_own, &options_operators),
+            chat_prefix,
+            outbound: Outbound::default(),
+            chat_inflight: None,
+            chat_counter: 0,
         };
         let versions = driver.options.versions.clone();
         driver.record(0, now_ns(), EventKind::RunStarted { versions });
@@ -397,10 +428,157 @@ impl BodyDriver {
                     self.pop_intent(intent_id, tick, ts_ns, world);
                 }
                 // The handshake, pings and resync are the port's own business.
+                BrainMessage::Say { id, text, .. } => self.queue_line(id, text, tick, ts_ns),
                 BrainMessage::Hello { .. } | BrainMessage::ResyncRequest | BrainMessage::Ping => {}
             }
         }
         self.check_brain_silence(tick, ts_ns);
+    }
+
+    /// Queue a line for the chat; a refused line is reported at once so the
+    /// brain's evidence line closes (critique finding 9).
+    fn queue_line(&mut self, id: String, text: String, tick: u64, ts_ns: u64) {
+        if let Err(reason) = self.outbound.push(id.clone(), text, tick) {
+            self.record(
+                tick,
+                ts_ns,
+                EventKind::ChatDropped {
+                    id,
+                    reason: reason.as_str().to_owned(),
+                },
+            );
+        }
+    }
+
+    /// Read this tick's operator chat. Only `ClientboundPlayerChat` counts
+    /// (spike 2026-11-09): `ClientboundDisguisedChat` (`/me`), system messages,
+    /// signs and everyone else are never an instruction. A control word always
+    /// acts; a task needs the configured prefix (`p:` by default) and reaches
+    /// the brain without it; the operator's other chat is not forwarded at all
+    /// (decision 2026-11-09 "Chat: control words bare, tasks with a prefix").
+    fn read_chat(&mut self, view: &TickView<'_>, world: &World, ts_ns: u64) {
+        if self.chat_operators.is_empty() {
+            return;
+        }
+        for observed in view.packets {
+            let Packet::PlayClientbound(ClientboundGamePacket::PlayerChat(chat_packet)) =
+                &observed.packet
+            else {
+                continue;
+            };
+            let sender = chat_packet.sender.as_u128();
+            let text = chat_packet.body.content.clone();
+            match chat::classify(&self.chat_operators, sender, &text, &self.chat_prefix) {
+                Inbound::Ignored => {}
+                Inbound::Task(task) => {
+                    self.record(
+                        view.tick,
+                        ts_ns,
+                        EventKind::ChatReceived {
+                            sender: format!("{sender:032x}"),
+                            text: task,
+                            control: None,
+                        },
+                    );
+                }
+                Inbound::Control(control) => {
+                    self.record(
+                        view.tick,
+                        ts_ns,
+                        EventKind::ChatReceived {
+                            sender: format!("{sender:032x}"),
+                            text,
+                            control: Some(control.name().to_owned()),
+                        },
+                    );
+                    self.act_on_control(control, view.tick, ts_ns, world);
+                }
+            }
+        }
+    }
+
+    /// The body's own effect of a control verb. It works with the brain down
+    /// (architecture §5.4/§7): `stop` and `cancel` end the running command,
+    /// `stop` also removes the suspended ones, `status` answers from body facts,
+    /// and `resume` gives the body back to the newest suspended command (the
+    /// brain's own picking follows on the forwarded event).
+    fn act_on_control(&mut self, control: Control, tick: u64, ts_ns: u64, world: &World) {
+        match control {
+            Control::Stop | Control::Cancel => {
+                let running = self.commands.keys().copied().find(|id| {
+                    self.arbiter
+                        .stack()
+                        .get(*id)
+                        .is_some_and(|entry| entry.state == IntentState::Running)
+                });
+                if let Some(intent_id) = running {
+                    self.cancel_goal(intent_id, tick, ts_ns, world);
+                }
+                if control == Control::Stop {
+                    let rest: Vec<u64> = self.commands.keys().copied().collect();
+                    for intent_id in rest {
+                        self.pop_intent(intent_id, tick, ts_ns, world);
+                    }
+                }
+            }
+            Control::Status => {
+                let line = self.status_line(world);
+                self.chat_counter += 1;
+                let id = format!("b-{:04}", self.chat_counter);
+                self.queue_line(id, line, tick, ts_ns);
+            }
+            Control::Resume => {
+                // Carry on: the newest suspended command takes the body back and
+                // its skill restarts from the top. With the brain up it will
+                // resume the goal on its next settle anyway; this is what makes
+                // `devam` work while the brain is down (review finding 3).
+                let (intent_id, events) = self.arbiter.resume_command(&mut self.mirror, tick);
+                if let Some(intent_id) = intent_id {
+                    self.restart_resumed(intent_id);
+                }
+                for event in events {
+                    self.record(tick, ts_ns, event);
+                }
+            }
+        }
+    }
+
+    /// The `durum` answer, in words the body owns: the running skill and its
+    /// own facts. Never the goal's prose (the brain's richer answer is the
+    /// console's).
+    fn status_line(&self, world: &World) -> String {
+        let facts = port_facts(world);
+        let running = self.arbiter.stack().entries().iter().find(|entry| {
+            entry.state == IntentState::Running && self.commands.contains_key(&entry.intent_id)
+        });
+        match running {
+            Some(entry) => format!(
+                "durum: {} çalışıyor, can {:.0}/20, tokluk {}/20",
+                entry.skill_ref, facts.health, facts.food
+            ),
+            None => format!(
+                "durum: boştayım, can {:.0}/20, tokluk {}/20",
+                facts.health, facts.food
+            ),
+        }
+    }
+
+    /// The line to say this tick, with the stale ones dropped on the way.
+    fn take_chat(&mut self, tick: u64, ts_ns: u64) -> Option<String> {
+        let (line, dropped) = self.outbound.take(tick);
+        for (id, reason) in dropped {
+            self.record(
+                tick,
+                ts_ns,
+                EventKind::ChatDropped {
+                    id,
+                    reason: reason.as_str().to_owned(),
+                },
+            );
+        }
+        let (id, text) = line?;
+        self.chat_inflight = Some((id, text.clone()));
+        Some(text)
     }
 
     /// One command from `pending` to `accepted`, `expired` or `rejected`.
@@ -1526,6 +1704,7 @@ impl Driver for BodyDriver {
 
         let stage = Instant::now();
         self.observe_packets(view, world, ts_ns);
+        self.read_chat(view, world, ts_ns);
         let observe_ns = stage.elapsed().as_nanos() as u64;
         let stage = Instant::now();
         {
@@ -1765,6 +1944,18 @@ impl Driver for BodyDriver {
 
     fn applied(&mut self, tick: u64, report: &AppliedReport) {
         self.last_report = Some((tick, report.clone()));
+        // The actuator's report is the receipt of a chat line: sent, or not.
+        if let Some((id, text)) = self.chat_inflight.take() {
+            let event = if report.chat.is_some() {
+                EventKind::ChatSent { id, text }
+            } else {
+                EventKind::ChatDropped {
+                    id,
+                    reason: "send_failed".to_owned(),
+                }
+            };
+            self.record(tick, now_ns(), event);
+        }
     }
 
     fn done(&self) -> bool {
@@ -1792,6 +1983,7 @@ impl BodyDriver {
     ) -> ControlFrame {
         frame.tick = view.tick;
         frame.generation = view.body.generation();
+        frame.chat = self.take_chat(view.tick, ts_ns);
         // Movement style is the only producer of look output (§5.2): the frame
         // carries the request, the gaze carries the camera. A menu means a
         // still gaze; held forward means a walking gaze; otherwise idle.
@@ -2100,6 +2292,9 @@ skill stall()
             style_seed: 0,
             brain_silence,
             versions: Versions::default(),
+            own_name: "Praxion".to_owned(),
+            operators: vec!["Fatih".to_owned()],
+            chat_prefix: crate::chat::DEFAULT_TASK_PREFIX.to_owned(),
         }
     }
 
@@ -2175,6 +2370,19 @@ skill stall()
                 body: &self.body,
                 world: Some(&self.world),
                 packets: &[],
+            };
+            let frame = self.driver.frame(&view);
+            self.tick += 1;
+            frame
+        }
+
+        /// One tick with `packets` as the tee's catch since the last tick.
+        fn step_with(&mut self, packets: &[praxion_headless::ObservedPacket]) -> ControlFrame {
+            let view = TickView {
+                tick: self.tick,
+                body: &self.body,
+                world: Some(&self.world),
+                packets,
             };
             let frame = self.driver.frame(&view);
             self.tick += 1;
@@ -3433,6 +3641,213 @@ skill stall()
             .map(|receipt| receipt.0)
             .collect();
         assert_eq!(settled, vec!["c-2"]);
+    }
+
+    /// A `ClientboundPlayerChat` as the tee delivers it: `sender` is the offline
+    /// UUID of `name`, `text` is `body.content` (spike 2026-11-09).
+    fn player_chat(name: &str, text: &str) -> praxion_headless::ObservedPacket {
+        use azalea_protocol::packets::game::c_player_chat::{
+            ChatTypeBound, ClientboundPlayerChat, FilterMask, PackedLastSeenMessages,
+            PackedSignedMessageBody,
+        };
+        let packet = ClientboundPlayerChat {
+            global_index: 0,
+            sender: uuid::Uuid::from_u128(crate::chat::offline_uuid(name)),
+            index: 0,
+            signature: None,
+            body: PackedSignedMessageBody {
+                content: text.to_owned(),
+                timestamp: 0,
+                salt: 0,
+                last_seen: PackedLastSeenMessages { entries: Vec::new() },
+            },
+            unsigned_content: None,
+            filter_mask: FilterMask::PassThrough,
+            chat_type: ChatTypeBound {
+                chat_type: azalea_registry::Holder::Reference(
+                    <azalea_registry::data::ChatKind as azalea_registry::DataRegistry>::new_raw(0),
+                ),
+                name: azalea_chat::FormattedText::from(name.to_owned()),
+                target_name: None,
+            },
+        };
+        praxion_headless::ObservedPacket {
+            conn_id: 1,
+            packet: Packet::PlayClientbound(ClientboundGamePacket::PlayerChat(packet)),
+        }
+    }
+
+    /// A server `system_chat` line (RCON `say`, a server message): never an
+    /// operator's `ClientboundPlayerChat`, so never an instruction (design WP4;
+    /// review finding 12).
+    fn system_chat(text: &str) -> praxion_headless::ObservedPacket {
+        use azalea_protocol::packets::game::c_system_chat::ClientboundSystemChat;
+        praxion_headless::ObservedPacket {
+            conn_id: 1,
+            packet: Packet::PlayClientbound(ClientboundGamePacket::SystemChat(
+                ClientboundSystemChat {
+                    content: azalea_chat::FormattedText::from(text.to_owned()),
+                    overlay: false,
+                },
+            )),
+        }
+    }
+
+    fn chat_events(harness: &mut Harness) -> Vec<EventKind> {
+        flush(harness);
+        harness
+            .events()
+            .into_iter()
+            .map(|event| event.event)
+            .filter(|event| {
+                matches!(
+                    event,
+                    EventKind::ChatReceived { .. }
+                        | EventKind::ChatSent { .. }
+                        | EventKind::ChatDropped { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_say_line_becomes_a_chat_frame_and_a_chat_sent_receipt() {
+        let mut harness = harness();
+        harness.driver.queue_line("s-0001".into(), "tamam: 8 taş".into(), 1, 0);
+        let frame = harness.step();
+        assert_eq!(frame.chat.as_deref(), Some("tamam: 8 taş"));
+        // The actuator's report is the receipt.
+        harness.driver.applied(
+            harness.tick - 1,
+            &AppliedReport {
+                chat: Some("tamam: 8 taş".into()),
+                ..AppliedReport::default()
+            },
+        );
+        assert_eq!(
+            chat_events(&mut harness),
+            vec![EventKind::ChatSent { id: "s-0001".into(), text: "tamam: 8 taş".into() }]
+        );
+        // A frame the actuator refused is a drop, not a claim.
+        harness.driver.queue_line("s-0002".into(), "ikinci".into(), harness.tick, 0);
+        harness.run(crate::chat::MIN_GAP_TICKS);
+        harness.driver.chat_inflight = Some(("s-0002".into(), "ikinci".into()));
+        harness.driver.applied(harness.tick, &AppliedReport::default());
+        assert!(chat_events(&mut harness).contains(&EventKind::ChatDropped {
+            id: "s-0002".into(),
+            reason: "send_failed".into()
+        }));
+    }
+
+    #[test]
+    fn a_line_over_the_cap_is_dropped_at_once_with_its_reason() {
+        let mut harness = harness();
+        harness.driver.queue_line("s-0009".into(), "x".repeat(300), 1, 0);
+        assert_eq!(
+            chat_events(&mut harness),
+            vec![EventKind::ChatDropped { id: "s-0009".into(), reason: "too_long".into() }]
+        );
+        assert!(harness.step().chat.is_none());
+    }
+
+    #[test]
+    fn the_operator_is_heard_with_the_prefix_a_stranger_and_the_bots_echo_are_not() {
+        let mut harness = harness();
+        harness.step_with(&[
+            player_chat("Mallory", "p: 8 taş getir"),
+            player_chat("Praxion", "tamam: 8 taş"),
+            // The operator's plain chat is not a task: no prefix, no forward.
+            player_chat("Fatih", "8 taş getir"),
+            player_chat("Fatih", "keşke biraz taş olsa"),
+            player_chat("Fatih", "p: 8 taş getir"),
+        ]);
+        assert_eq!(
+            chat_events(&mut harness),
+            vec![EventKind::ChatReceived {
+                sender: format!("{:032x}", crate::chat::offline_uuid("Fatih")),
+                text: "8 taş getir".into(),
+                control: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_system_chat_line_is_never_an_instruction() {
+        // RCON `say p: 8 taş getir` / `say dur` arrives as SystemChat, not
+        // PlayerChat: the body must neither forward it nor act on it.
+        let mut harness = harness();
+        harness.inject(command("c-0001", "stall"));
+        harness.run(3);
+        let frame = harness.step_with(&[system_chat("p: 8 taş getir"), system_chat("dur")]);
+        assert!(frame.chat.is_none());
+        assert!(chat_events(&mut harness).is_empty());
+        assert!(harness.receipts("settled").is_empty(), "the running skill is untouched");
+    }
+
+    #[test]
+    fn durum_is_answered_by_the_body_and_also_forwarded() {
+        let mut harness = harness();
+        let frame = harness.step_with(&[player_chat("Fatih", "durum")]);
+        let line = frame.chat.expect("the body answers durum without the brain");
+        assert!(line.starts_with("durum: boştayım"), "{line}");
+        assert!(chat_events(&mut harness).iter().any(|event| matches!(
+            event,
+            EventKind::ChatReceived { control: Some(control), .. } if control == "status"
+        )));
+    }
+
+    #[test]
+    fn dur_cancels_the_running_command_and_a_stranger_cannot() {
+        let mut harness = harness();
+        harness.inject(command("c-0001", "stall"));
+        harness.run(3);
+        assert!(harness.receipts("settled").is_empty());
+        harness.step_with(&[player_chat("Mallory", "dur")]);
+        assert!(harness.receipts("settled").is_empty(), "a stranger's dur is ignored");
+        harness.step_with(&[player_chat("Fatih", "dur")]);
+        let settled = harness.receipts("settled");
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].3.as_deref(), Some("cancelled"), "{settled:?}");
+    }
+
+    #[test]
+    fn a_turkish_capital_i_cancel_reaches_the_body() {
+        // Plain lowercasing turns "İptal" into i + U+0307, which matched no
+        // verb: the line went to the brain as a task and the command kept
+        // running (review finding 6).
+        let mut harness = harness();
+        harness.inject(command("c-0001", "stall"));
+        harness.run(3);
+        harness.step_with(&[player_chat("Fatih", "İptal")]);
+        let settled = harness.receipts("settled");
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].3.as_deref(), Some("cancelled"), "{settled:?}");
+        assert!(
+            chat_events(&mut harness).iter().any(|event| matches!(
+                event,
+                EventKind::ChatReceived { control: Some(control), .. } if control == "cancel"
+            )),
+            "the brain is told too"
+        );
+    }
+
+    #[test]
+    fn devam_is_forwarded_and_never_steals_a_running_command() {
+        let mut harness = harness();
+        harness.inject(command("c-0001", "stall"));
+        harness.run(3);
+        let frame = harness.step_with(&[player_chat("Fatih", "devam")]);
+        assert!(frame.chat.is_none(), "carry on says nothing by itself");
+        assert!(harness.receipts("settled").is_empty());
+        assert_eq!(
+            harness.driver.arbiter.owner(),
+            &Owner::Skill { intent_id: 1 },
+            "the running command keeps the body"
+        );
+        assert!(chat_events(&mut harness).iter().any(|event| matches!(
+            event,
+            EventKind::ChatReceived { control: Some(control), .. } if control == "resume"
+        )));
     }
 
     #[test]

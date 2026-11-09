@@ -374,6 +374,17 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   to rejoin, or the decoder rebuilds from later full-chunk packets. Decide before Demo-1 code.
 - Pointers: `body/crates/tee/src/lib.rs`, docs/decisions.md 2026-11-01 "Tee stream format"
 
+### Talk slice: console task box and instructed-chat logging
+- Source: review of `wip/talk2` (`logs/mac1109/review-talk2.answer.txt`), fixed 2026-11-09
+- State: review findings 1-6, 8, 10-15 fixed with tests: chat tasks need the configurable prefix
+  (default `p:`), control words act bare, `devam` works with the brain down, the map call is bounded
+  to 5 s, a repeated task is played again, Turkish `İ`/`I` lowercase correctly.
+- Remaining: the console has the server-side `task` action but no UI control (the static files belong
+  to the console slice; the dock still requires a condition, and no dead button is left behind), so it
+  is reachable only through the API for now; design §3.3's rate-limited `chat_ignored` event is not
+  implemented (needs a decision on whether strangers' identities go into the evidence log).
+- Pointers: findings 7 and 9; `brain/praxion_brain/console/server.py`, `body/crates/body/src/driver.rs`
+
 ## Done
 
 - Choose a license: Apache-2.0 for the open core, 2026-10-29 (session 15). Open: which parts are commercial.

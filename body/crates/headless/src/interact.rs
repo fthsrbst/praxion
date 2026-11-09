@@ -33,7 +33,7 @@ use azalea_inventory::{
 use azalea_physics::collision::BlockWithShape;
 use azalea_protocol::packets::Packet;
 use azalea_protocol::packets::game::{
-    ServerboundAttack, ServerboundContainerClick, ServerboundContainerClose, ServerboundGamePacket,
+    ServerboundAttack, ServerboundChat, ServerboundContainerClick, ServerboundContainerClose, ServerboundGamePacket,
     ServerboundPunch, ServerboundSetCarriedItem, ServerboundUseItem,
     ServerboundUseItemOn,
     s_container_click::{HashedActualItem, HashedPatchMap, HashedStack},
@@ -129,6 +129,8 @@ pub struct AppliedReport {
     pub container_id: Option<i32>,
     /// The entity id an attack packet named.
     pub attack_entity: Option<i32>,
+    /// The chat line the frame sent as an unsigned `ServerboundChat`.
+    pub chat: Option<String>,
 }
 
 impl ActuatorState {
@@ -601,6 +603,24 @@ pub fn plan(
                 }
             }
         }
+    }
+
+    // A chat line the decision layer asked for: unsigned, which the offline 26.3
+    // server accepts (docs/sessions/09-commands.md "2026-11-09 chat spike").
+    if let Some(text) = &frame.chat {
+        packets.push(Outgoing::Packet(Box::new(
+            ServerboundChat {
+                message: text.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_millis() as u64),
+                salt: 0,
+                signature: None,
+                last_seen_messages: Default::default(),
+            }
+            .into_variant(),
+        )));
+        report.chat = Some(text.clone());
     }
 
     (packets, report)

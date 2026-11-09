@@ -67,7 +67,16 @@ def check_control(body: Any) -> dict[str, Any]:
     if action not in ACTIONS:
         raise ValueError(f"action must be one of {', '.join(ACTIONS)}")
     request: dict[str, Any] = {"action": action}
-    if action == "new_goal":
+    if action == "task":
+        # Free text, mapped to a goal by the loop's command path (the same one
+        # chat uses); no condition needed. Newlines fold to spaces.
+        text = " ".join(str(body.get("text") or "").split())
+        if not text:
+            raise ValueError("a task needs text, e.g. \"8 taş getir\" or \"get cobblestone 8\"")
+        if len(text) > MAX_TEXT_CHARS:
+            raise ValueError(f"text is limited to {MAX_TEXT_CHARS} characters")
+        request["text"] = text
+    elif action == "new_goal":
         text = str(body.get("text") or "").strip()
         condition = str(body.get("condition") or "").strip()
         if not condition:
@@ -209,12 +218,12 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, str(error))
             return
-        if request["action"] == "task" and self.app.console.task is None:
+        if request["action"] == "task" and not self.app.console.accepts_tasks:
             # Never accept a request that would be silently dropped; the talk
             # design owns free text -> verifiable goal (decision 2026-11-09).
             self._error(
                 HTTPStatus.SERVICE_UNAVAILABLE,
-                "free-text tasks are not wired yet; give a goal with a condition",
+                "free-text tasks need a running loop; give a goal with a condition",
             )
             return
         self.app.console.control.put(request)

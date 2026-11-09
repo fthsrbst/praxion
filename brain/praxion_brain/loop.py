@@ -53,7 +53,7 @@ from collections import deque
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional
 
-from . import config
+from . import commands, config, speech
 from .admission import (
     AdmissionReport,
     admit,
@@ -143,6 +143,9 @@ class Loop:
     #: Whether the pick gap is a ``nothing_to_do`` back-off (a class default so
     #: a partially built loop in a test reads False).
     _nothing_gap = False
+    #: Set in ``__init__``; a class default so a partly built loop in a test
+    #: simply does not talk.
+    narrator: "speech.Narrator | None" = None
 
     def __init__(
         self,
@@ -168,6 +171,7 @@ class Loop:
         writer_model: str = DEFAULT_MODEL,
         console: Console | None = None,
         gamedata: Gamedata | None = None,
+        map_fn: Callable[..., Any] | None = None,
     ) -> None:
         self.world_id = world_id
         self.memory = memory
@@ -226,11 +230,33 @@ class Loop:
         #: An admitted skill whose goal waits for the next pick.
         self._written: Optional[PendingGoal] = None
         self._console = console
+        if console is not None:
+            # The loop maps console free text to goals (`_handle_user_text`).
+            console.accepts_tasks = True
         self._paused = False
         self._user_goals: list[GoalProposal] = []
+        #: Parallel to ``_user_goals``: whether a repeated queue entry is the
+        #: operator asking again (true, played again) or the console's explicit
+        #: ``new_goal`` (false, still checked against the last one).
+        self._user_repeatable: list[bool] = []
         self._last_route: Optional[dict[str, Any]] = None
         self._last_publish = -float("inf")
+        #: Goals a newer command preempted, oldest first; the body resumes the
+        #: newest when the current one settles (session 9, critique finding 3).
+        self._suspended: list[OpenGoal] = []
+        #: A `dur` the body will confirm with `interrupted` receipts. Stop pops
+        #: the suspended goals too, so the next closed goal must not "resume"
+        #: one that no longer exists (review finding 2).
+        self._stop_requested = False
+        self._map_fn = map_fn if map_fn is not None else commands.map_with_model
+        self._last_reply: Optional[dict[str, Any]] = None
 
+        self.narrator = speech.Narrator(
+            say_fn=lambda text, priority: port.say(text, priority=priority),
+            supported=lambda: self.session.connected and port.supports_say,
+            evidence=self.evidence,
+            clock=self._clock,
+        )
         self.session = BodySession(
             port,
             evidence=self.evidence,
@@ -323,6 +349,8 @@ class Loop:
         self._reap_job()
         self._advance()
         self._survival_check()
+        if self.narrator is not None:
+            self.narrator.pump()
         if self.session.terminated:
             # A terminal bye can also arrive inside a snapshot refresh.
             self._stopped = True
@@ -473,6 +501,11 @@ class Loop:
             self._on_receipt(event)
         elif kind == "wake_brain":
             self._on_body_wake(event)
+        elif kind in ("chat_sent", "chat_dropped"):
+            if self.narrator is not None:
+                self.narrator.on_event(event)
+        elif kind == "chat_received":
+            self._on_chat_received(event)
 
     def _on_body_wake(self, event: Mapping[str, Any]) -> None:
         if event.get("cause") == "hunger_no_food" and self.state == LoopState.IDLE:
@@ -495,12 +528,19 @@ class Loop:
         state = event.get("state")
         open_goal = self._open_goal
         if open_goal is None or open_goal.command_id != command_id:
-            self.evidence.write(
-                "receipt_unmatched",
-                command_id=command_id,
-                state=state,
+            # A preempted goal's later receipts (it settles after being resumed)
+            # still belong to it.
+            open_goal = next(
+                (goal for goal in self._suspended if goal.command_id == command_id),
+                None,
             )
-            return
+            if open_goal is None:
+                self.evidence.write(
+                    "receipt_unmatched",
+                    command_id=command_id,
+                    state=state,
+                )
+                return
 
         if state == "pending":
             return
@@ -516,6 +556,8 @@ class Loop:
                 try:
                     self.session.port.pop(open_goal.intent_id)
                     self.evidence.write("stop_sent_on_accept", intent_id=open_goal.intent_id)
+                    # `dur` covers the preempted goals too.
+                    self._pop_suspended()
                 except PortError as error:
                     self.evidence.write("stop_failed", error=str(error))
             return
@@ -644,7 +686,48 @@ class Loop:
 
     def _goal_finished(self, record: GoalRecord) -> None:
         """Records closed a goal: idle, wait out a failed goal's gap, pick again."""
+        was_suspended = any(g.record.goal_id == record.goal_id for g in self._suspended)
+        self._suspended = [g for g in self._suspended if g.record.goal_id != record.goal_id]
+        self._narrate_finished(record)
+        if was_suspended:
+            # A preempted goal ended on its own (popped, expired): the goal being
+            # played is untouched.
+            if not self._suspended and record.failure_kind == "stopped_by_user":
+                # The stop's pops have all been confirmed: nothing left to say.
+                self._stop_requested = False
+            return
         self._open_goal = None
+        stopped = (
+            self._stop_requested
+            and record.status == "interrupted"
+            and record.failure_kind == "stopped_by_user"
+        )
+        # The flag is for the first goal a `dur` closes; never let it linger.
+        self._stop_requested = False
+        if stopped:
+            # `dur` pops every command, the suspended ones included, so nothing
+            # is on the body's stack to hand back. Their own `popped` receipts
+            # close them; saying "devam ediyorum" for a goal that no longer
+            # exists was review finding 2's contradiction.
+            self._transition(LoopState.IDLE, reason="stopped_by_user")
+            self._set_wake(WakeCause.GOAL_FAILED)
+            return
+        if self._suspended:
+            # The body hands the body back to the newest preempted goal and
+            # restarts its skill from the top (driver.rs restart_resumed): the
+            # loop keeps playing and now waits for that goal's receipt.
+            resumed = self._suspended.pop()
+            self._open_goal = resumed
+            self.evidence.write(
+                "goal_resumed",
+                goal_id=resumed.record.goal_id,
+                command_id=resumed.command_id,
+                after=record.goal_id,
+                restart=True,
+            )
+            self._say("goal_resumed", speech.goal_resumed(resumed.record.text), key=resumed.record.goal_id)
+            self._transition(LoopState.PLAYING, reason="goal_resumed")
+            return
         self._transition(LoopState.IDLE, reason=f"goal_{record.status}")
         if record.status == "failed":
             self._note_failure(record.failure_kind)
@@ -1087,12 +1170,25 @@ class Loop:
         """The user's goals come before the proposer; an invalid one is dropped."""
         while self._user_goals:
             proposal = self._user_goals.pop(0)
-            result = validate(proposal, inventory, self.memory, self._last_proposal)
+            repeatable = self._user_repeatable.pop(0) if self._user_repeatable else False
+            # Same-as-last does not apply to the operator's own sentence, who
+            # may repeat a request (the command path already decided that);
+            # checking it again here refused the repeat with a raw key (review
+            # finding 5). The console's explicit `new_goal` keeps the guard.
+            result = validate(
+                proposal, inventory, self.memory, None if repeatable else self._last_proposal
+            )
             self.evidence.write(
                 "user_goal_result",
                 proposal=proposal.model_dump(),
                 validation=result.model_dump(),
             )
+            if not result.ok:
+                self._say(
+                    "refused",
+                    speech.refused(str(result.reason), result.detail),
+                    priority="urgent",
+                )
             if result.ok:
                 self._pending = PendingGoal(
                     proposal=proposal,
@@ -1344,6 +1440,7 @@ class Loop:
             condition=pending.proposal.condition,
             writer_model=self.writer_model,
         )
+        self._say("learning", speech.learning_started(skill), key=f"learn:{skill}")
         self._transition(LoopState.IDLE, reason="write_started")
         self._set_wake(WakeCause.WRITE_STARTED)
 
@@ -1438,6 +1535,11 @@ class Loop:
             goal_id=job.record.goal_id,
             skill=report.skill_name,
             repairs=report.repairs_used,
+        )
+        self._say(
+            "learned",
+            speech.learning_done(str(report.skill_name)),
+            key=f"learn:{report.skill_name}",
         )
         if self.state == LoopState.IDLE:
             self._set_wake(WakeCause.SKILL_ADMITTED)
@@ -1616,6 +1718,15 @@ class Loop:
                 command_id=command_id,
             )
             self.memory.append_goal(record)
+        if self._open_goal is not None:
+            # A user task preempts the goal in progress: the body suspends it
+            # (session 9) and the loop remembers it for the resume.
+            self._suspended.append(self._open_goal)
+            self.evidence.write(
+                "goal_preempted",
+                goal_id=self._open_goal.record.goal_id,
+                by=record.goal_id,
+            )
         self._open_goal = OpenGoal(
             record=record,
             proposal=pending.proposal,
@@ -1625,6 +1736,20 @@ class Loop:
             survival=pending.source == "survival",
             budget_ticks=pending.budget_ticks,
         )
+        if pending.origin != "user":
+            rung = pending.proposal.rung
+            reason = (
+                f"{rung} basamağı"
+                if rung in {item.id for item in RUNGS}
+                else ("kod yedeği" if pending.source == "code_only" else None)
+            )
+            self._say(
+                "goal_start",
+                speech.goal_started(
+                    pending.proposal.text, pending.proposal.condition, reason=reason
+                ),
+                key=record.goal_id,
+            )
         self.evidence.write(
             "command_sent",
             goal_id=record.goal_id,
@@ -1661,6 +1786,8 @@ class Loop:
                 result, extra = self._stop_goal()
             elif action == "new_goal":
                 result = self._queue_user_goal(request)
+            elif action == "task":
+                result = self._handle_user_text(str(request.get("text") or ""), source="console")
             else:
                 result = "unknown_action"
             self.evidence.write(
@@ -1721,6 +1848,9 @@ class Loop:
                 # Sent but not yet accepted: the body has no intent to pop. Keep
                 # the stop and pop on the accepted receipt, or it would be lost.
                 opened.stop_pending = True
+                # The preempted goals are stopped too; the unaccepted one is
+                # marked the same way.
+                self._pop_suspended()
                 return "stop_queued", {"goal_id": opened.record.goal_id}
             stack = (self.session.snapshot or {}).get("stack") or []
             entry = next((e for e in stack if e.get("intent_id") == opened.intent_id), None)
@@ -1738,6 +1868,9 @@ class Loop:
             # One goal, one stop: until the receipt confirms it, every other
             # stop path (the console, a survival interrupt) leaves it alone.
             opened.stop_pending = True
+            # Stop means everything the user can see, the preempted goals
+            # included.
+            self._pop_suspended()
             return "pop_sent", extra
 
         pending = self._pending
@@ -1757,6 +1890,7 @@ class Loop:
         self._pending = None
         self._wake = None
         self._user_goals.clear()
+        self._user_repeatable.clear()
         self._transition(LoopState.IDLE, reason="stop_goal")
         extra = {}
         if pending is not None:
@@ -1770,18 +1904,238 @@ class Loop:
             extra["cancelled_condition"] = written_condition
         return "pick_cancelled", extra
 
+    def _pop_suspended(self) -> int:
+        """`dur` includes the preempted goals: pop every one the body holds.
+
+        A goal whose command the body has not accepted yet has no intent id; it
+        is marked ``stop_pending`` so its `accepted` receipt pops it at once.
+        """
+        popped = 0
+        for older in self._suspended:
+            if older.intent_id is None:
+                older.stop_pending = True
+                popped += 1
+                continue
+            try:
+                self.session.port.pop(older.intent_id)
+                popped += 1
+            except PortError as error:
+                self.evidence.write("stop_failed", error=str(error))
+        if popped:
+            self._stop_requested = True
+        return popped
+
     def _queue_user_goal(self, request: Mapping[str, Any]) -> str:
         """Queue the console's goal; the condition is what can be verified."""
         condition = str(request.get("condition") or "").strip()
         text = str(request.get("text") or "").strip()
         if not condition:
             return "no_condition"
-        self._user_goals.append(
-            GoalProposal(text=text or condition, condition=condition, rationale="user goal")
+        self._enqueue_user(
+            GoalProposal(text=text or condition, condition=condition, rationale="user goal"),
+            repeatable=False,
         )
         if self.state == LoopState.IDLE:
             self._set_wake(WakeCause.USER)
         return "queued"
+
+    def _enqueue_user(self, proposal: GoalProposal, *, repeatable: bool) -> None:
+        """Queue one operator goal; ``repeatable`` says a repeat may be played
+        again (a chat/console sentence) or is still checked against the last
+        goal (the console's explicit ``new_goal``)."""
+        self._user_goals.append(proposal)
+        self._user_repeatable.append(repeatable)
+
+    # -- talking ---------------------------------------------------------- #
+    def _say(
+        self,
+        topic: str,
+        text: str,
+        *,
+        priority: str = "normal",
+        key: Optional[str] = None,
+    ) -> None:
+        """Narrate one line (chat, when the body can speak; always the feed)."""
+        if self.narrator is not None:
+            self.narrator.say(topic, text, priority=priority, key=key)
+
+    def _reply(self, text: str, *, topic: str = "reply") -> None:
+        """An answer to the operator: spoken, and shown in the console's dock."""
+        self._last_reply = {"text": text, "at": self._wall_clock()}
+        self._say(topic, text, priority="urgent")
+
+    def _narrate_finished(self, record: GoalRecord) -> None:
+        """One line per closed goal, from the record's own fields."""
+        if record.status == "done":
+            self._say("done", speech.goal_done(record.text, record.ticks), key=record.goal_id)
+        elif record.status == "failed":
+            self._say(
+                "failed",
+                speech.goal_failed(record.text, record.failure_kind, record.ticks),
+                key=record.goal_id,
+            )
+        elif record.status == "interrupted" and record.failure_kind == "stopped_by_user":
+            self._say(
+                "stopped", speech.goal_stopped(record.text), priority="urgent", key=record.goal_id
+            )
+        elif record.status == "unverified":
+            self._say(
+                "done",
+                speech.goal_done(record.text, record.ticks) + " (doğrulayamadım)",
+                key=record.goal_id,
+            )
+
+    def _on_chat_received(self, event: Mapping[str, Any]) -> None:
+        """The operator's chat line, already filtered by sender UUID in the body.
+
+        A control verb was acted on by the body (it works with the brain down);
+        the brain only keeps its own picking in step. Anything else is mapped.
+        """
+        text = str(event.get("text") or "")
+        control = event.get("control")
+        self.evidence.write("chat_received", text=text[:200], control=control)
+        if control:
+            self._apply_control_word(str(control), source="chat")
+            return
+        self._handle_user_text(text, source="chat")
+
+    def _apply_control_word(self, control: str, *, source: str) -> str:
+        """``stop``/``cancel``/``status``/``resume`` from chat or the console.
+
+        From chat the body already cancelled the running command (and, for
+        stop, popped the suspended ones); from the console the brain pops.
+        """
+        if control == "stop":
+            self._user_goals.clear()
+            self._user_repeatable.clear()
+            self._paused = True
+            # Chat: the body has already popped every command. Console: the stop
+            # below pops. Either way no suspended goal survives to be resumed,
+            # so the next closed goal must not say "devam ediyorum" (review
+            # finding 2).
+            self._stop_requested = bool(self._suspended) or self._stop_requested
+            result = "paused"
+            if source == "console":
+                result, _ = self._stop_goal()
+            self._say("paused", speech.paused(), priority="urgent")
+            return result
+        if control == "cancel":
+            if source == "console":
+                return self._stop_goal()[0]
+            return "body_cancelled"
+        if control == "status":
+            if source == "console":
+                self._reply(self._status_line(), topic="status")
+            return "status"
+        if control == "resume":
+            self._paused = False
+            if self.state == LoopState.IDLE:
+                self._set_wake(WakeCause.USER)
+            self._reply(speech.resumed(), topic="resumed")
+            return "resumed"
+        return "unknown_control"
+
+    def _status_line(self) -> str:
+        """The brain's own status: the goal it plays and the body's facts."""
+        facts = (self.session.snapshot or {}).get("facts") or {}
+        health = facts.get("health")
+        vitals = f", can {health:.0f}/20" if isinstance(health, (int, float)) else ""
+        opened = self._open_goal
+        if opened is None:
+            return f"durum: boştayım{vitals}"
+        took = speech.seconds(opened.ticks_since(self.session.tick))
+        return speech.clean(
+            f"durum: {opened.record.text} ({opened.record.condition})"
+            + (f", {took} sn" if took is not None else "")
+            + vitals
+        )
+
+    def _map_command(self, text: str) -> Optional[commands.CommandPlan]:
+        """The one paid call of the command path; ``None`` when it may not run."""
+        # The budget is reserved for the model the call actually uses (review
+        # finding 13).
+        denied = self._gate("map", estimate_cost(commands.MAP_MODEL, 800, 200))
+        if denied:
+            return None
+        try:
+            plan = self.governor.call(
+                "map",
+                lambda: self._map_fn(
+                    text,
+                    catalog=self.catalog,
+                    inventory=self._inventory(),
+                    ledger=self.ledger,
+                    evidence=self.evidence,
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - a failed map is "cannot understand"
+            self.governor.record_error()
+            self.evidence.write("command_map_error", error=f"{type(error).__name__}: {error}")
+            return None
+        self.governor.record_success()
+        return plan
+
+    def _handle_user_text(self, text: str, *, source: str) -> str:
+        """One sentence from chat or the console: resolve it, answer, play it."""
+        self.evidence.write("command_received", source=source, text=text[:200])
+        resolved = commands.resolve(
+            text,
+            inventory=self._inventory(),
+            catalog=self.catalog,
+            memory=self.memory,
+            map_fn=self._map_command,
+        )
+        self.evidence.write(
+            "command_resolved",
+            source=source,
+            resolution=resolved.kind,
+            reason=resolved.reason,
+            via=resolved.via,
+            condition=resolved.proposal.condition if resolved.proposal else None,
+            skill=resolved.skill,
+        )
+        if resolved.kind == "control":
+            return self._apply_control_word(str(resolved.control), source=source)
+        if resolved.kind == "unsupported":
+            self._reply(speech.cannot_understand(text), topic="cannot_understand")
+            return "unsupported"
+        if resolved.kind == "refused":
+            self._reply(speech.refused(str(resolved.reason), resolved.detail), topic="refused")
+            return f"refused:{resolved.reason}"
+        proposal = resolved.proposal
+        assert proposal is not None and resolved.validation is not None
+        known = resolved.skill is not None and self.catalog.by_name(resolved.skill) is not None
+        self._reply(
+            speech.task_accepted(proposal.text, proposal.condition, learning=not known),
+            topic="task_accepted",
+        )
+        if self.state == LoopState.PLAYING and self._open_goal is not None and known:
+            self._pending = PendingGoal(
+                proposal=proposal,
+                validation=resolved.validation,
+                goal=goal_of(proposal, resolved.validation),
+                source="user",
+                forced_skill=resolved.skill,
+                origin="user",
+            )
+            self._last_route = {
+                "decision": "play",
+                "skill": resolved.skill,
+                "scores": None,
+                "condition": proposal.condition,
+                "source": "user_task",
+            }
+            self._remember_user_task(proposal)
+            self._play()
+            return "preempted"
+        # A sentence from the operator may repeat a request (review finding 5).
+        self._enqueue_user(proposal, repeatable=True)
+        if self.state == LoopState.IDLE:
+            self._set_wake(WakeCause.USER)
+        return "queued"
+
+    def _remember_user_task(self, proposal: GoalProposal) -> None:
+        self._last_proposal = proposal
 
     def _publish(self, *, force: bool = False) -> None:
         """Hand the console a fresh read-only state (copy on update, no lock).
@@ -1844,6 +2198,8 @@ class Loop:
                     "spent_session": self.governor.spent_session(),
                 },
                 "user_goals": len(self._user_goals),
+                "suspended": len(self._suspended),
+                "reply": self._last_reply,
                 "updated": self._wall_clock(),
             }
         )

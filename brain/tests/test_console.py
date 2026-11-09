@@ -314,10 +314,10 @@ def test_control_refuses_bad_requests(server, console, body) -> None:
     assert console.control.drain() == []
 
 
-def test_a_task_request_answers_503_until_the_talk_work_lands(server, console) -> None:
+def test_a_task_request_answers_503_without_a_loop_to_take_it(server, console) -> None:
     status, found = call(server, "POST", "/api/control", {"action": "task", "text": "dig down"})
     assert status == 503
-    assert "not wired" in found["error"]
+    assert "need a running loop" in found["error"]
     assert console.control.drain() == []
 
     for body in ({"action": "task"}, {"action": "task", "text": "x" * 201}):
@@ -325,7 +325,7 @@ def test_a_task_request_answers_503_until_the_talk_work_lands(server, console) -
         assert status == 400
         assert console.control.drain() == []
 
-    console.task = lambda text: None
+    console.accepts_tasks = True
     status, found = call(server, "POST", "/api/control", {"action": "task", "text": "dig down"})
     assert status == 202
     assert found == {"ok": True, "queued": "task"}
@@ -561,6 +561,16 @@ def console_loop(body, tmp_path, **kwargs):
         **kwargs,
     )
     return console, loop
+
+
+def test_a_loop_with_a_console_takes_free_text_tasks(tmp_path) -> None:
+    """The console's task box opens only while a loop drains it (talk + console)."""
+    with FakeBody(skills={"get_furnace", "get_coal"}, facts={"inventory": {}}) as body:
+        console, loop = console_loop(body, tmp_path)
+        try:
+            assert console.accepts_tasks
+        finally:
+            loop.close()
 
 
 def test_user_goal_goes_before_the_proposer_and_is_recorded_as_the_users(tmp_path) -> None:
@@ -946,3 +956,13 @@ def test_metrics_report_useful_ticks_and_stock_goals(server, console) -> None:
     # attempt and the two gathers moved nothing.
     assert found["useful_goal_ticks"] == {"useful": 600, "total": 1300, "ratio": 0.462}
     assert found["stock_goals"] == 2
+
+
+def test_the_task_action_takes_free_text_without_a_condition(server, console) -> None:
+    console.accepts_tasks = True
+    status, body = call(server, "POST", "/api/control", {"action": "task", "text": "8 taş\ngetir"})
+    assert status == 202 and body["queued"] == "task"
+    assert console.control.drain() == [{"action": "task", "text": "8 taş getir"}]
+    for bad in ({"action": "task"}, {"action": "task", "text": "   "}, {"action": "task", "text": "x" * 201}):
+        status, _ = call(server, "POST", "/api/control", bad)
+        assert status == 400

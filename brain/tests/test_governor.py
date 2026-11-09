@@ -194,8 +194,11 @@ def test_call_timeouts(tmp_path) -> None:
     assert governor.timeout("route") == 5.0
     assert governor.timeout("write") == 180.0
     assert governor.timeout("admission") > governor.timeout("write")
+    # The map call runs on the loop thread: its deadline bounds how long a
+    # sentence can freeze the loop (review finding 4, design D4's 5 s).
+    assert governor.timeout("map") == 5.0
     # Every call class the loop can gate has a provider and a deadline.
-    for call_class in ("propose", "route", "write"):
+    for call_class in ("propose", "route", "write", "map"):
         assert governor.allow(call_class, 0.0).allowed is True
 
 

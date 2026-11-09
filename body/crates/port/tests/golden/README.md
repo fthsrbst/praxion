@@ -30,7 +30,7 @@ Run this from `brain/`, with `GOLDEN_DIR` pointing at this directory:
 ```python
 from pathlib import Path
 from praxion_brain.port import (
-    ClientHello, Command, Ping, Pop, ResyncRequest, encode_frame,
+    ClientHello, Command, Ping, Pop, ResyncRequest, Say, encode_frame,
 )
 
 GOLDEN_DIR = Path("../body/crates/port/tests/golden")
@@ -47,6 +47,7 @@ frames = {
         budget_ticks=6000,
     ),
     "brain_pop.bin": Pop(id="c-0008", intent_id=3),
+    "brain_say.bin": Say(id="s-0007", text="bitti: 8 taş", priority="urgent"),
     "brain_resync_request.bin": ResyncRequest(),
     "brain_ping.bin": Ping(),
 }

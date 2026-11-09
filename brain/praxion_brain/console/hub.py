@@ -9,7 +9,7 @@ the server puts requests, the loop drains them once per step.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from ..evidence import Evidence
 from ..ledger import Ledger
@@ -53,10 +53,10 @@ class Console:
         self.core_dir = core_dir
         self.active_dir = active_dir
         self.control = ControlQueue()
-        #: Where a free-text task goes once the talk work lands; ``None`` means
-        #: the server answers 503 instead of dropping the request silently
-        #: (decision 2026-11-09 "Console").
-        self.task: Optional[Callable[[str], None]] = None
+        #: Whether a loop that maps free text to goals drains the control queue.
+        #: Without one the server answers 503 instead of dropping a task
+        #: silently (decision 2026-11-09 "Console"); the loop sets it.
+        self.accepts_tasks = False
         self._watchers = 0
         self._watch_lock = threading.Lock()
         self._state: dict[str, Any] = {"world_id": world_id, "state": "starting"}

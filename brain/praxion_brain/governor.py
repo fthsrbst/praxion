@@ -48,6 +48,11 @@ CALL_TIMEOUTS: dict[str, float] = {
     "route": 5.0,
     "write": 180.0,
     "admission": 1800.0,
+    # One cheap structured call that maps a chat or console sentence to a goal
+    # (talk slice 1, decision 2026-11-09 "Five next areas"). The loop thread
+    # runs this call, so its deadline is the most the loop can freeze; design D4
+    # measured 5 s as the useful bound (review finding 4).
+    "map": 5.0,
 }
 #: Provider a call class is charged to.
 CALL_PROVIDERS: dict[str, str] = {
@@ -55,6 +60,7 @@ CALL_PROVIDERS: dict[str, str] = {
     "route": "typesafe",
     "write": "openai",
     "admission": "openai",
+    "map": "openai",
 }
 #: (calls allowed, window seconds) per call class.
 DEFAULT_RATE_LIMITS: dict[str, tuple[int, float]] = {
@@ -62,6 +68,7 @@ DEFAULT_RATE_LIMITS: dict[str, tuple[int, float]] = {
     "route": (120, 3600.0),
     "write": (6, 3600.0),
     "admission": (6, 3600.0),
+    "map": (60, 3600.0),
 }
 #: Consecutive errors that open the breaker.
 BREAKER_THRESHOLD = 3

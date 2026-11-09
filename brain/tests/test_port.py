@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import select
 import socket
 import struct
 import time
@@ -29,6 +30,7 @@ from praxion_brain.port import (
     ProtocolError,
     ResyncRequest,
     Slot,
+    Say,
     Snapshot,
     StackEntry,
     VersionMismatch,
@@ -100,6 +102,22 @@ def wait_for(
 
 def wait_snapshot(port: PortClient, timeout: float = 2.0) -> Snapshot:
     return wait_for(port, lambda message: isinstance(message, Snapshot), timeout, "snapshot")
+
+
+def wait_readable(port: PortClient, timeout: float = 2.0) -> None:
+    """Wait until the client's socket holds a frame.
+
+    macOS reports a loopback socket as unreadable to the first zero-timeout
+    ``select`` right after the peer's send (measured: 297 of 300 attempts), so
+    "the frame is already sent" has to be waited for before a default
+    ``poll()`` (timeout 0) can be expected to return it.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([port._sock], [], [], 0.02)
+        if ready:
+            return
+    raise AssertionError(f"no frame became readable within {timeout}s")
 
 
 def wait_event(port: PortClient, kind: str, timeout: float = 2.0) -> EventMessage:
@@ -350,15 +368,9 @@ def test_poll_default_returns_a_frame_already_sent(
 ) -> None:
     wait_snapshot(client)
     body.emit_event("note", text="ready")
-    # The write is synchronous, but macOS loopback can keep the bytes in
-    # transit for a moment, and a zero-timeout select is then honestly empty.
-    # Retry the zero-timeout poll until they land rather than sleeping a fixed
-    # time: a sleep would hide a pump that stopped pumping (review finding 5).
-    deadline = time.monotonic() + 2.0
-    message = None
-    while message is None:
-        assert time.monotonic() < deadline, "the note never reached the client"
-        message = client.poll()  # the default timeout is zero, but it must pump
+    wait_readable(client)
+
+    message = client.poll()  # the default timeout is zero, but it must pump
 
     assert isinstance(message, EventMessage)
     assert message.event["text"] == "ready"
@@ -628,6 +640,7 @@ def test_python_brain_frames_are_pinned() -> None:
             budget_ticks=6000,
         ),
         "brain_pop.bin": Pop(id="c-0008", intent_id=3),
+        "brain_say.bin": Say(id="s-0007", text="bitti: 8 taş", priority="urgent"),
         "brain_resync_request.bin": ResyncRequest(),
         "brain_ping.bin": Ping(),
     }
@@ -639,7 +652,7 @@ def test_rust_body_frames_parse() -> None:
     """Frames written by the Rust server must parse with the Python models."""
     assert parse_golden("rust_hello.bin") == Hello(
         port_version=0,
-        caps=["command", "snapshot", "pop"],
+        caps=["command", "snapshot", "pop", "say"],
         body="praxion 0.x (abc123)",
         run_id="run-1",
     )

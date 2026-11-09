@@ -187,6 +187,22 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    /// A line the operator typed in game chat that is not a body-parsed control
+    /// verb, forwarded for the brain to map. `control` is set when the body
+    /// parsed a control verb (`stop`, `cancel`, `status`, `resume`) and already
+    /// acted on it; the brain only keeps its own picking in step.
+    ChatReceived {
+        sender: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control: Option<String>,
+    },
+    /// A `say` line went out as a `ServerboundChat`. `id` is the brain's line
+    /// id (`b-...` for a line the body composed itself).
+    ChatSent { id: String, text: String },
+    /// A `say` line was not sent: `too_long`, `stale`, `queue_full` or
+    /// `send_failed`.
+    ChatDropped { id: String, reason: String },
     /// The brain should wake. Demo-0 has no brain yet, so this is only logged.
     WakeBrain { cause: String, detail: String },
     /// Free-form operator or test note.

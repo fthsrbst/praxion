@@ -2140,12 +2140,14 @@ dependencies = [
 name = "praxion-body"
 version = "0.0.0"
 dependencies = [
+ "azalea-chat",
  "azalea-protocol",
  "azalea-registry",
  "env_logger",
  "log",
  "praxion-arbiter",
  "praxion-blueprint",
+ "praxion-decoder",
  "praxion-eventlog",
  "praxion-facts",
  "praxion-gamedata",
@@ -2162,6 +2164,7 @@ dependencies = [
  "praxion-world",
  "serde",
  "serde_json",
+ "uuid",
  "windows-sys 0.59.0",
 ]
 
