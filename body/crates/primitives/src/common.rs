@@ -445,4 +445,144 @@ mod tests {
             ToolChoice::Select("wooden_axe".into())
         );
     }
+
+    #[test]
+    fn hand_select_sends_one_swap_then_resends_after_the_wait() {
+        use azalea_registry::builtin::ItemKind;
+        use crate::test_world::{give, hold, world};
+
+        let mut world = world();
+        hold(&mut world, ItemKind::OakPlanks);
+        give(&mut world, 20, ItemKind::WoodenPickaxe, 1);
+        let mut hand = HandSelect::default();
+
+        let mut frame = ControlFrame::new(0, 0, Held::NONE);
+        assert_eq!(
+            hand.tick(&world, "wooden_pickaxe", &mut frame),
+            Selecting::Pending
+        );
+        assert!(frame.menu.is_some(), "the first tick sends the swap");
+        assert_eq!(frame.select_slot, Some(0));
+
+        for tick in 1..=SWAP_WAIT_TICKS {
+            let mut frame = ControlFrame::new(u64::from(tick), 0, Held::NONE);
+            assert_eq!(
+                hand.tick(&world, "wooden_pickaxe", &mut frame),
+                Selecting::Pending
+            );
+            assert!(
+                frame.menu.is_none(),
+                "no new swap while waiting at tick {tick}"
+            );
+        }
+
+        let mut frame = ControlFrame::new(u64::from(SWAP_WAIT_TICKS + 1), 0, Held::NONE);
+        assert_eq!(
+            hand.tick(&world, "wooden_pickaxe", &mut frame),
+            Selecting::Pending
+        );
+        assert!(
+            frame.menu.is_some(),
+            "the swap is sent again after {SWAP_WAIT_TICKS} ticks without it landing"
+        );
+    }
+
+    #[test]
+    fn hold_tool_falls_back_to_the_held_item_after_the_tool_wait() {
+        use azalea_registry::builtin::ItemKind;
+        use crate::test_world::{give, hold, world as make_world};
+        use praxion_headless::Body;
+        use praxion_perception::Perception;
+
+        // A pickaxe sits in the main inventory but the swap never lands (the
+        // server sends no slot update). After the tool wait the dig holds the
+        // planks; stone then drops nothing, so it is `needs_tool`.
+        let mut world = make_world();
+        hold(&mut world, ItemKind::OakPlanks);
+        give(&mut world, 20, ItemKind::WoodenPickaxe, 1);
+        let stone = BlockState::from(BlockKind::Stone);
+        let body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        let mut hand = HandSelect::default();
+        let mut waited = 0;
+        for tick in 0..TOOL_SELECT_TICKS {
+            let mut frame = ControlFrame::new(u64::from(tick), body.generation(), Held::NONE);
+            let step = {
+                let ctx = Ctx {
+                    tick: u64::from(tick),
+                    body: &body,
+                    world: &world,
+                    perception: &mut perception,
+                    style: praxion_planner::Personality::default(),
+                };
+                hold_tool(&ctx, stone, &mut hand, &mut waited, &mut frame)
+            };
+            assert_eq!(step, ToolStep::Pending, "the pickaxe is still on its way");
+        }
+        let mut frame = ControlFrame::new(
+            u64::from(TOOL_SELECT_TICKS),
+            body.generation(),
+            Held::NONE,
+        );
+        let step = {
+            let ctx = Ctx {
+                tick: u64::from(TOOL_SELECT_TICKS),
+                body: &body,
+                world: &world,
+                perception: &mut perception,
+                style: praxion_planner::Personality::default(),
+            };
+            hold_tool(&ctx, stone, &mut hand, &mut waited, &mut frame)
+        };
+        assert_eq!(
+            step,
+            ToolStep::Missing,
+            "planks never drop stone, so the fallback refuses"
+        );
+        assert!(frame.menu.is_none(), "the fallback frame carries no swap");
+
+        // A log still drops with the item already in hand, so the fallback
+        // digs with it instead of failing.
+        let mut log_world = make_world();
+        hold(&mut log_world, ItemKind::StonePickaxe);
+        give(&mut log_world, 20, ItemKind::WoodenAxe, 1);
+        let log = BlockState::from(BlockKind::OakLog);
+        let mut hand = HandSelect::default();
+        let mut waited = 0;
+        for tick in 0..TOOL_SELECT_TICKS {
+            let mut frame = ControlFrame::new(u64::from(tick), body.generation(), Held::NONE);
+            let step = {
+                let ctx = Ctx {
+                    tick: u64::from(tick),
+                    body: &body,
+                    world: &log_world,
+                    perception: &mut perception,
+                    style: praxion_planner::Personality::default(),
+                };
+                hold_tool(&ctx, log, &mut hand, &mut waited, &mut frame)
+            };
+            assert_eq!(step, ToolStep::Pending, "the axe is still on its way");
+        }
+        let mut frame = ControlFrame::new(
+            u64::from(TOOL_SELECT_TICKS),
+            body.generation(),
+            Held::NONE,
+        );
+        let step = {
+            let ctx = Ctx {
+                tick: u64::from(TOOL_SELECT_TICKS),
+                body: &body,
+                world: &log_world,
+                perception: &mut perception,
+                style: praxion_planner::Personality::default(),
+            };
+            hold_tool(&ctx, log, &mut hand, &mut waited, &mut frame)
+        };
+        assert_eq!(
+            step,
+            ToolStep::Ready,
+            "the pickaxe in hand still drops the log"
+        );
+        assert!(frame.menu.is_none(), "the fallback frame carries no swap");
+    }
 }

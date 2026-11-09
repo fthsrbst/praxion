@@ -98,7 +98,8 @@ pub enum EventKind {
     },
     /// The followed connection lost framing or decoding.
     WorldDesync { reason: String },
-    /// A bounded, aggregated entry from perception's denied-attempt ledger.
+    /// A bounded, aggregated entry from perception's ledger of denied attempts
+    /// and privileged reads.
     Ledger {
         query: String,
         fact: String,

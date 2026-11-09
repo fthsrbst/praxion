@@ -22,6 +22,7 @@ mod known;
 mod ledger;
 mod see_through;
 mod sight;
+mod sky;
 mod sweep;
 mod view;
 mod workable;
@@ -46,6 +47,7 @@ pub use config::{
 };
 pub use known::Remembered;
 pub use ledger::{FactKind, Ledger, LedgerEntry, QueryKind};
+pub use sky::{COLUMN_BLOCKS, PrivilegedColumn};
 pub use sweep::Sweep;
 pub use workable::{exposes_fluid, workable};
 
@@ -323,6 +325,21 @@ impl Perception {
 
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    /// Record `count` privileged reads of `fact` under `query` for this tick.
+    ///
+    /// The ledger's per-tick rate rule applies: a read is recorded once per
+    /// (query, fact) per tick, and every further read on that tick only raises
+    /// that entry's running counter. Explore's frontier scan, which reads a
+    /// column per candidate, therefore reports once and ends as one entry
+    /// holding the scan's total. A caller that must count reads in a scope
+    /// borrowing this perception (the scan holds the known map) counts them
+    /// itself and reports the total here once the scan returns.
+    pub fn ledger_privileged(&mut self, query: QueryKind, fact: FactKind, count: u32) {
+        for _ in 0..count {
+            self.ledger.record(query, fact, self.tick);
+        }
     }
 
     /// Cells a ray has reached and the known map keeps.

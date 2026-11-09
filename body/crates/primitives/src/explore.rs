@@ -9,6 +9,7 @@ use azalea_registry::builtin::BlockKind;
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Look};
 use praxion_interpreter::Outcome;
+use praxion_perception::{FactKind, QueryKind};
 use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, Step};
 use praxion_world::{BlockState, World};
 
@@ -576,6 +577,7 @@ impl Explore {
             // tier made only of covered cells emptied the list while open
             // cells waited in a lower tier (seed 101, 2026-11-08: 106
             // `not_found` in a row).
+            let sky_reads = std::cell::Cell::new(0_u32);
             let scan = scan_frontiers(
                 start,
                 horizontal,
@@ -585,10 +587,29 @@ impl Explore {
                 known,
                 self.allow_water,
                 |cell| {
-                    open_to_sky(cell, ctx.world.surface_y(cell.x, cell.z), |pos| {
-                        ctx.world.block_state(pos)
-                    })
+                    sky_reads.set(sky_reads.get() + 1);
+                    // The raw column is a privileged read (heightmap and
+                    // blocks the body may never have seen), so perception
+                    // serves it and the ledger counts it after the scan; the
+                    // judgement above it stays here.
+                    let column = ctx.perception.privileged_column(
+                        ctx.world,
+                        cell.x,
+                        cell.z,
+                        cell.y.saturating_add(1),
+                        SKY_SCAN_BLOCKS,
+                    );
+                    open_to_sky(
+                        cell,
+                        column.as_ref().map(|column| column.surface),
+                        |pos| column.as_ref().and_then(|column| column.state_at(pos.y)),
+                    )
                 },
+            );
+            ctx.perception.ledger_privileged(
+                QueryKind::SkyColumn,
+                FactKind::Column,
+                sky_reads.get(),
             );
             if !self.lookout_done && self.plan_lookout(ctx, start, &scan) {
                 self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
@@ -1018,6 +1039,10 @@ fn look_around_allowed(on_ground: bool, in_water: bool) -> bool {
 /// Blocks above the head a column may hold before the cell counts as covered.
 /// A roof farther up than this is a mountain over a cave, not a canopy.
 const SKY_SCAN_BLOCKS: i32 = 48;
+
+// Explore asks perception for at most the states one privileged read serves:
+// a larger window would silently truncate, a smaller one would waste reads.
+const _: () = assert!(SKY_SCAN_BLOCKS as usize <= praxion_perception::COLUMN_BLOCKS);
 
 /// Whether the column above the body cell `feet` is open to the sky.
 ///
@@ -1732,6 +1757,246 @@ mod tests {
         assert!(
             explore.follower.is_none(),
             "an empty perception cannot plan"
+        );
+    }
+
+    #[test]
+    fn cue_walks_stop_at_max_cue_attempts_with_a_leaf_still_known() {
+        use crate::test_world::{set_block, swept, world};
+
+        // Three distinct known leaf cells inside the sweep radius: a cue is
+        // always available, so only the cap can stop the third walk.
+        let mut world = world();
+        let leaves = [at(0, 70, 2), at(2, 70, 2), at(2, 70, 0)];
+        for cell in leaves {
+            set_block(&mut world, cell, BlockState::from(BlockKind::OakLeaves));
+        }
+        let mut perception = swept(&world);
+        for cell in leaves {
+            // The sweep covers a rotating slice of the eye's section, so a
+            // specific cell can fall outside the ten ticks; record the leaf
+            // like a confirmed change to make the canopy known.
+            perception.note_changed(&world, cell);
+            assert!(
+                perception.known(cell).is_some(),
+                "the known map holds the leaf at {cell:?}"
+            );
+        }
+
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        let start = at(0, 64, 0);
+        for _ in 0..MAX_CUE_ATTEMPTS {
+            {
+                let mut ctx = ctx(0, &body, &world, &mut perception);
+                explore.seek(&mut ctx, start);
+            }
+            // Reset the leg, not only the cap: the `Cue && follower` guard
+            // would refuse the second call for another reason.
+            explore.follower = None;
+            explore.chase = Chase::Frontier;
+        }
+        assert_eq!(
+            explore.cue_attempts, MAX_CUE_ATTEMPTS,
+            "each call spends one cue attempt"
+        );
+
+        // The third leaf is still known: a fourth cue would exist if the cap
+        // did not refuse it.
+        assert!(
+            nearest_known_block(
+                &perception,
+                &world,
+                "#leaves",
+                EXPLORE_SEARCH_RADIUS,
+                &explore.cue_done,
+            )
+            .is_some(),
+            "a known leaf is still left"
+        );
+        {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            assert!(
+                !explore.seek(&mut ctx, start),
+                "the third seek is refused by the cap, not by a missing cue"
+            );
+        }
+        assert_eq!(explore.cue_attempts, MAX_CUE_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_capped_walk_back_does_not_consume_the_explored_cell() {
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &Ground);
+        }
+        assert!(body.on_ground());
+        let world = World::new();
+        let mut perception = Perception::new(praxion_perception::Config::default());
+
+        explore.look_around_started = true;
+        explore.lookout_done = true;
+        explore.target_search_tick = 1_000;
+        explore.frontier_scan_tick = 1_000;
+        explore.allow_water = true;
+        explore.idle_ticks = 10;
+        explore.walk_backs = EXPLORE_MAX_WALK_BACKS;
+        explore.explored = vec![at(1, 64, 0)];
+
+        {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory);
+        }
+        assert_eq!(
+            explore.explored,
+            vec![at(1, 64, 0)],
+            "a capped walk-back must not remove the cell it would not walk to"
+        );
+        assert_eq!(
+            explore.walk_backs, EXPLORE_MAX_WALK_BACKS,
+            "no walk-back was counted"
+        );
+        assert!(explore.follower.is_none());
+    }
+
+    #[test]
+    fn an_empty_walk_back_plan_drops_the_cell_and_waits_five_ticks() {
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &Ground);
+        }
+        assert!(body.on_ground());
+        let world = World::new();
+        let mut perception = Perception::new(praxion_perception::Config::default());
+
+        explore.look_around_started = true;
+        explore.lookout_done = true;
+        explore.target_search_tick = 1_000;
+        explore.frontier_scan_tick = 1_000;
+        explore.allow_water = true;
+        explore.idle_ticks = 10;
+        explore.walk_backs = 1;
+        // Within TARGET_APPROACH_RADIUS of the start: the plan succeeds with no
+        // steps, so a walk back would end on the next tick.
+        explore.explored = vec![at(2, 64, 0)];
+        let tick = 20;
+
+        {
+            let mut ctx = ctx(tick, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory);
+        }
+        assert!(
+            !explore.explored.contains(&at(2, 64, 0)),
+            "an already-reached cell is not a walk-back target"
+        );
+        assert_eq!(
+            explore.next_plan_tick,
+            tick + 5,
+            "the next plan attempt waits five ticks"
+        );
+        assert_eq!(explore.walk_backs, 1, "no walk started, so none counted");
+        assert!(explore.follower.is_none());
+    }
+
+    #[test]
+    fn a_target_becoming_visible_mid_turn_ends_the_look_around() {
+        use crate::test_world::{set_block, swept, world_with};
+
+        // A stone floor the planner can walk on; no log is known yet, so the
+        // first tick arms the turn.
+        let mut world = world_with(1, 63, |_| BlockState::from(BlockKind::Stone));
+        let mut perception = swept(&world);
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &Ground);
+        }
+        assert!(body.on_ground());
+
+        let first = {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory).0
+        };
+        assert!(explore.look_around.is_some(), "the first tick arms the turn");
+        assert!(matches!(first.look, Look::Aim { .. }));
+
+        // A log appears in view, beyond the approach radius so the seek starts
+        // a real walk, and the sweep records it.
+        let log = at(0, 64, 8);
+        set_block(&mut world, log, BlockState::from(BlockKind::OakLog));
+        perception.begin_tick(&world);
+        perception.sweep(&world);
+        assert!(perception.known(log).is_some(), "the log is known now");
+
+        // The next search period runs while the turn is still active: the
+        // target wins, the turn ends, and the frame walks instead of turning.
+        let frame = {
+            let mut ctx = ctx(20, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory).0
+        };
+        assert!(
+            explore.look_around.is_none(),
+            "a target in sight ends the look-around"
+        );
+        assert!(
+            !matches!(frame.look, Look::Aim { .. }),
+            "the frame does not keep turning once the target is known"
+        );
+        assert!(explore.follower.is_some(), "the log starts a walk");
+    }
+
+    #[test]
+    fn a_frontier_scan_ledgers_its_privileged_column_reads() {
+        use crate::test_world::{swept, world_with};
+
+        // A stone plain with no log in sight: the frontier scan is the only
+        // thing this tick can do, and it reads one privileged column per
+        // candidate.
+        let world = world_with(2, 63, |_| BlockState::from(BlockKind::Stone));
+        let mut perception = swept(&world);
+        assert!(
+            perception
+                .ledger()
+                .get(QueryKind::SkyColumn, FactKind::Column)
+                .is_none(),
+            "nothing has asked for a column yet"
+        );
+        let mut memory = ExploreMemory::default();
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &Ground);
+        }
+        assert!(body.on_ground());
+
+        // Skip the start turn and the target search so this tick reaches the
+        // frontier scan.
+        explore.look_around_started = true;
+        explore.target_search_tick = 1_000;
+        explore.frontier_scan_tick = 0;
+        let tick = perception.tick();
+        {
+            let mut ctx = ctx(tick, &body, &world, &mut perception);
+            explore.tick(&mut ctx, false, &mut memory);
+        }
+
+        let entry = perception
+            .ledger()
+            .get(QueryKind::SkyColumn, FactKind::Column)
+            .expect("the frontier scan ledgers the columns it reads");
+        assert!(entry.count() > 0, "every scanned candidate is counted");
+        assert_eq!(entry.first_tick(), tick);
+        assert_eq!(entry.last_tick(), tick);
+        assert_eq!(
+            perception.ledger().len(),
+            1,
+            "one entry per (query, fact), not one per read"
         );
     }
 }
