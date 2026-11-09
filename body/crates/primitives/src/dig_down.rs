@@ -45,9 +45,9 @@ use praxion_planner::{blocks, center};
 use praxion_world::BlockState;
 
 use crate::branch_mine::{Branch, Candidates};
-use crate::common::{HandSelect, ToolStep, aim_precise, hold_tool, idle};
+use crate::common::{HandSelect, ToolStep, aim_precise, hold_tool, idle, pickup_frame};
 use crate::frontier::nearest_known_block;
-use crate::mine::{block_gone, pickup_frame};
+use crate::mine::block_gone;
 use crate::runner::{Ctx, IntentSpec};
 
 /// How deep the staircase may go below where the call started.

@@ -6,10 +6,13 @@ use praxion_gamedata as gamedata;
 use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
 use praxion_perception::{Answer, Caller, EntityFilter, exposes_fluid, workable};
-use praxion_planner::{WALK_TOLERANCE_DEG, center, look_towards};
+use praxion_planner::center;
 use praxion_world::BlockState;
 
-use crate::common::{HandSelect, ToolStep, aim_precise, block_target_where, hold_tool, idle};
+use crate::common::{
+    HandSelect, ToolStep, aim_precise, block_target_where, hold_tool, idle, pickup_frame,
+    walk_point,
+};
 use crate::frontier::nearest_known_block;
 use crate::runner::{Ctx, IntentSpec};
 
@@ -292,8 +295,8 @@ impl Mine {
                 if self.target.is_none() {
                     self.waited += 1;
                     // Walk toward a known cell until a ray reaches it, as
-                    // `craft` does for its table; only a block the known map
-                    // lost too is gone.
+                    // `craft` does for its table (`Station`); only a block the
+                    // known map lost too is gone.
                     if let Some((cell, _)) =
                         nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &[])
                     {
@@ -533,22 +536,6 @@ fn is_soft_occluder(state: BlockState) -> bool {
         && hand_break_ticks(state) <= HAND_BREAK_TICKS
 }
 
-/// Where to walk while a known cell is out of sight. A cell under the body's
-/// own column is only ever seen through the floor, which is never dug, so the
-/// body first steps two blocks aside (away from the cell) and looks from there
-/// (seed 202 live run 2026-11-08: stone two below the feet, 80 ticks, no_block).
-fn walk_point(feet: BlockPos, cell: BlockPos) -> Vec3 {
-    let (dx, dz) = (feet.x - cell.x, feet.z - cell.z);
-    if cell.y < feet.y && dx.abs() <= 1 && dz.abs() <= 1 {
-        let (sx, sz) = match (dx.signum(), dz.signum()) {
-            (0, 0) => (1, 0),
-            away => away,
-        };
-        return center(BlockPos::new(cell.x + 2 * sx, feet.y, cell.z + 2 * sz));
-    }
-    center(cell)
-}
-
 /// Whether removing `cell` leaves the body's own column over a drop deeper
 /// than two blocks. Count the cells below the feet as if `removed` were air,
 /// and stop at the first solid cell; an unknown cell is not evidence of a drop.
@@ -597,22 +584,6 @@ fn pickup_arrived(position: Vec3, target: Vec3) -> bool {
     let dx = position.x - target.x;
     let dz = position.z - target.z;
     dx * dx + dz * dz < 0.49 && (position.y - target.y).abs() < 1.0
-}
-
-/// Steer toward a drop: aim first, then walk, and jump when it is above.
-pub(crate) fn pickup_frame(ctx: &Ctx<'_>, target: Vec3) -> ControlFrame {
-    let mut frame = idle(ctx);
-    let eye = ctx.body.eye_position();
-    let aim_point = Vec3::new(target.x, target.y + 0.25, target.z);
-    let (look, aligned) = look_towards(ctx.body.look(), eye, aim_point, WALK_TOLERANCE_DEG);
-    frame.look = look;
-    if aligned {
-        frame.held.forward = true;
-        if target.y > ctx.body.position().y + 0.5 && ctx.body.on_ground() {
-            frame.held.jump = true;
-        }
-    }
-    frame
 }
 
 #[cfg(test)]

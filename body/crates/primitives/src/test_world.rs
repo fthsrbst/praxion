@@ -231,3 +231,53 @@ pub(crate) fn swept(world: &World) -> Perception {
     }
     perception
 }
+
+/// Put `count` of `item` into player-inventory `slot` (window 0 numbering), as
+/// a server slot update.
+pub(crate) fn give(
+    world: &mut World,
+    slot: u16,
+    item: azalea_registry::builtin::ItemKind,
+    count: i32,
+) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerSetSlot(
+            azalea_protocol::packets::game::ClientboundContainerSetSlot {
+                container_id: 0,
+                state_id: 0,
+                slot,
+                item_stack: azalea_inventory::ItemStack::new(item, count),
+            },
+        ),
+    );
+}
+
+/// The server opens menu `id` of `kind` (`open_screen`). Its content arrives
+/// separately, see [`set_menu_content`].
+pub(crate) fn open_menu(world: &mut World, id: i32, kind: azalea_registry::builtin::MenuKind) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::OpenScreen(azalea_protocol::packets::game::ClientboundOpenScreen {
+            container_id: id,
+            menu_type: kind,
+            title: "Menu".into(),
+        }),
+    );
+}
+
+/// The server sends the full slot list of the open menu `id`
+/// (`container_set_content`).
+pub(crate) fn set_menu_content(world: &mut World, id: i32, slots: Vec<azalea_inventory::ItemStack>) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerSetContent(
+            azalea_protocol::packets::game::ClientboundContainerSetContent {
+                container_id: id,
+                state_id: 0,
+                items: slots,
+                carried_item: azalea_inventory::ItemStack::Empty,
+            },
+        ),
+    );
+}
