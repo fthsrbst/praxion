@@ -3,17 +3,16 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
+use azalea_registry::builtin::{BlockKind, MenuKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, MenuAction, MenuMode};
 use praxion_interpreter::Outcome;
 use praxion_world::World;
 
-use crate::common::{aim_precise, block_target, count_item, idle, item_name};
-use crate::frontier::nearest_known_block;
-use crate::place::{cell_centre, place_support};
+use crate::common::{count_item, idle, item_name};
 use crate::runner::{Ctx, IntentSpec};
+use crate::station::{Station, StationStep};
 
 #[derive(Debug)]
 pub(crate) struct Craft {
@@ -22,7 +21,11 @@ pub(crate) struct Craft {
     stage: CraftStage,
     clicks: VecDeque<MenuAction>,
     wait: u32,
-    table: Option<BlockPos>,
+    /// Walks to the crafting table and opens it.
+    station: Station,
+    /// The table menu has been seen; `wait` restarted then, so the wait for
+    /// its content does not inherit the ticks spent reaching the table.
+    menu_seen: bool,
     close_sent: bool,
     /// The receipt settled while the table is still open. The craft sends its
     /// close next tick and only then finishes, so the menu does not outlive the
@@ -60,7 +63,8 @@ impl Craft {
             stage: CraftStage::Open,
             clicks: VecDeque::new(),
             wait: 0,
-            table: None,
+            station: Station::new(BlockKind::CraftingTable, MenuKind::Crafting, "needs_table"),
+            menu_seen: false,
             close_sent: false,
             close_outcome: None,
             grid: GridClear::Unchecked,
@@ -157,51 +161,14 @@ impl Craft {
         let recipe = self.recipe.expect("checked above");
         let open = ctx.world.open_container().map(|c| (c.id(), c.kind()));
         if recipe.needs_table && open.is_none() && self.stage == CraftStage::Open {
-            if self.table.is_none() {
-                // Prefer the block the crosshair can actually pick; fall back
-                // to the known map so a remembered table beside the body is
-                // still approached and clicked.
-                self.table = block_target(ctx, "crafting_table", 4).or_else(|| {
-                    nearest_known_block(ctx.perception, ctx.world, "crafting_table", 4, &[])
-                        .map(|(cell, _)| cell)
-                });
-                if self.table.is_none() {
-                    return (frame, None, Some(Outcome::Failed("needs_table".into())));
+            match self.station.tick(ctx) {
+                StationStep::Pending(station_frame) => return (station_frame, None, None),
+                StationStep::Failed(kind) => {
+                    return (frame, None, Some(Outcome::Failed(kind.into())));
                 }
+                // No menu is open here, so the station cannot report it open.
+                StationStep::Opened => {}
             }
-            let table = self.table.expect("checked above");
-            // Aim at the table's true centre: `center` is the cell's floor,
-            // and a ray at a block's bottom edge can pass under it (seed 303
-            // clicked three times and no menu opened).
-            let (look, aligned) = aim_precise(ctx, cell_centre(table));
-            frame.look = look;
-            // Retry the use click while no menu has opened: one missed click
-            // (a block update in the same tick, a slightly early aim) used to
-            // doom the whole craft after the single attempt. The click only
-            // goes out when the crosshair is on the table, as in `place`; a
-            // plant in the way is broken first.
-            if aligned && (self.wait <= 1 || self.wait.is_multiple_of(10)) {
-                let pick = praxion_headless::pick(ctx.world, ctx.body);
-                match pick.block.filter(|hit| !hit.miss) {
-                    Some(hit) if hit.block_pos == table => {
-                        frame.clicks.push(praxion_headless::Click::Use);
-                    }
-                    Some(hit)
-                        if !pick.entity_closer
-                            && ctx
-                                .world
-                                .block_state(hit.block_pos)
-                                .is_some_and(|state| !state.is_air() && !place_support(state)) =>
-                    {
-                        frame.clicks.push(praxion_headless::Click::Attack);
-                    }
-                    _ => {}
-                }
-            }
-            if self.wait > 60 {
-                return (frame, None, Some(Outcome::Failed("needs_table".into())));
-            }
-            return (frame, None, None);
         }
         if self.clicks.is_empty() && self.stage == CraftStage::Open {
             // Wait for the server's full container content before planning
@@ -209,6 +176,10 @@ impl Craft {
             if let Some(container) = ctx.world.open_container()
                 && container.slots().len() < 46
             {
+                if !self.menu_seen {
+                    self.menu_seen = true;
+                    self.wait = 0;
+                }
                 if self.wait > 40 {
                     return (frame, None, Some(Outcome::Failed("no_menu".into())));
                 }
@@ -399,6 +370,21 @@ fn recipe_cells(
     cells
 }
 
+/// Pick up the stack in `source`, right-click one item into each of `targets`,
+/// and put the rest back. A furnace menu uses the same triple (input slot 0,
+/// fuel slot 1).
+pub(crate) fn spread_one_each(window: u32, source: usize, targets: &[usize]) -> Vec<MenuAction> {
+    let click = |slot: usize, button: i8| MenuAction {
+        window,
+        slot: slot as i16,
+        button,
+    };
+    let mut clicks = vec![click(source, 0)];
+    clicks.extend(targets.iter().map(|slot| click(*slot, 1)));
+    clicks.push(click(source, 0));
+    clicks
+}
+
 fn build_craft_clicks(
     recipe: &gamedata::Recipe,
     slots: &[ItemStack],
@@ -426,30 +412,265 @@ fn build_craft_clicks(
                     .get(*slot)
                     .is_some_and(|stack| ingredient.matches(item_name(stack)))
         })?;
-        clicks.push(MenuAction {
-            window,
-            slot: source as i16,
-            button: 0,
-        });
-        let mut used = 0;
+        let mut targets = Vec::new();
         while index < cells.len()
             && cells[index].1.effect_item() == effect
-            && remaining.get(&source).copied().unwrap_or(0) > used
+            && remaining.get(&source).copied().unwrap_or(0) > targets.len() as i32
         {
-            clicks.push(MenuAction {
-                window,
-                slot: cells[index].0 as i16,
-                button: 1,
-            });
-            used += 1;
+            targets.push(cells[index].0);
             index += 1;
         }
-        clicks.push(MenuAction {
-            window,
-            slot: source as i16,
-            button: 0,
-        });
+        let used = targets.len() as i32;
+        clicks.extend(spread_one_each(window, source, &targets));
         *remaining.get_mut(&source)? -= used;
     }
     Some(clicks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_world::{feet, give, open_menu, set_block, set_menu_content, swept, world};
+    use azalea_core::position::BlockPos;
+    use azalea_registry::builtin::ItemKind;
+    use praxion_headless::Body;
+    use praxion_perception::Perception;
+    use praxion_planner::Personality;
+    use praxion_world::BlockState;
+
+    type Tick = (ControlFrame, Option<IntentSpec>, Option<Outcome>);
+
+    /// One craft tick; the frame's look is applied to the body as the driver
+    /// would (the body never moves).
+    fn run(
+        craft: &mut Craft,
+        world: &World,
+        perception: &mut Perception,
+        body: &mut Body,
+        tick: u64,
+    ) -> Tick {
+        let mut ctx = Ctx {
+            tick,
+            body,
+            world,
+            perception,
+            style: Personality::default(),
+        };
+        let result = craft.tick(&mut ctx, false);
+        result
+            .0
+            .apply_with_menu(body, tick)
+            .expect("frame applies");
+        result
+    }
+
+    /// A full 46 slot crafting-table menu with `items` in player slots.
+    fn menu_slots(items: &[(usize, ItemKind, i32)]) -> Vec<ItemStack> {
+        let mut slots = vec![ItemStack::Empty; 46];
+        for (slot, kind, count) in items {
+            slots[*slot] = ItemStack::new(*kind, *count);
+        }
+        slots
+    }
+
+    fn pickaxe_world() -> World {
+        let mut world = world();
+        give(&mut world, 9, ItemKind::OakPlanks, 3);
+        give(&mut world, 10, ItemKind::Stick, 2);
+        world
+    }
+
+    fn is_close(frame: &ControlFrame, window: u32) -> bool {
+        frame.menu_mode == MenuMode::Close
+            && frame.menu.is_some_and(|menu| menu.window == window)
+    }
+
+    #[test]
+    fn a_table_behind_stone_is_walked_toward_and_fails_at_the_cap() {
+        let mut world = pickaxe_world();
+        set_block(
+            &mut world,
+            BlockPos::new(0, 65, 3),
+            BlockState::from(BlockKind::CraftingTable),
+        );
+        let mut perception = swept(&world);
+        // The map knows the table; a stone block then appears on the line to
+        // it, so the pick cannot reach the cell.
+        set_block(
+            &mut world,
+            BlockPos::new(0, 65, 2),
+            BlockState::from(BlockKind::Stone),
+        );
+        let mut body = Body::new(feet());
+        let mut craft = Craft::new("wooden_pickaxe".to_owned()).unwrap();
+        // Tick 0 returns the grid items, tick 1 turns the look, ticks after
+        // that walk. The station gives up on its 81st walking tick; the close
+        // path swallows that tick and reports one tick later.
+        let mut reported = None;
+        for tick in 0..100u64 {
+            let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+            assert!(!frame.clicks.contains(&praxion_headless::Click::Use));
+            if outcome.is_some() {
+                reported = Some((tick, frame, outcome));
+                break;
+            }
+        }
+        let (tick, frame, outcome) = reported.expect("the craft gives up");
+        assert_eq!(outcome, Some(Outcome::Failed("needs_table".into())));
+        assert!((82..=84).contains(&tick), "reported at tick {tick}");
+        assert!(is_close(&frame, 0), "the close path still runs");
+    }
+
+    #[test]
+    fn an_adjacent_table_gets_a_use_click_on_the_first_aligned_tick() {
+        let mut world = pickaxe_world();
+        set_block(
+            &mut world,
+            BlockPos::new(0, 65, 2),
+            BlockState::from(BlockKind::CraftingTable),
+        );
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut craft = Craft::new("wooden_pickaxe".to_owned()).unwrap();
+        let mut used_at = None;
+        for tick in 0..6u64 {
+            let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+            assert!(outcome.is_none());
+            if used_at.is_none() && frame.clicks.contains(&praxion_headless::Click::Use) {
+                used_at = Some(tick);
+            }
+        }
+        assert!(used_at.is_some_and(|tick| tick <= 3), "got {used_at:?}");
+    }
+
+    #[test]
+    fn a_menu_that_opens_after_tick_45_does_not_fail_no_menu() {
+        let mut world = pickaxe_world();
+        set_block(
+            &mut world,
+            BlockPos::new(0, 65, 2),
+            BlockState::from(BlockKind::CraftingTable),
+        );
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut craft = Craft::new("wooden_pickaxe".to_owned()).unwrap();
+        for tick in 0..=45u64 {
+            let (_, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+            assert!(outcome.is_none(), "tick {tick}");
+        }
+        open_menu(&mut world, 3, MenuKind::Crafting);
+        // The screen is open but its content has not arrived.
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, 46);
+        assert!(outcome.is_none() && frame.menu.is_none());
+        set_menu_content(
+            &mut world,
+            3,
+            menu_slots(&[(10, ItemKind::OakPlanks, 3), (11, ItemKind::Stick, 2)]),
+        );
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, 47);
+        assert!(outcome.is_none(), "got {outcome:?}");
+        let click = frame.menu.expect("the first recipe click goes out");
+        assert_eq!(click.window, 3);
+    }
+
+    /// A craft of `stick` (2x2, no table) whose window-0 grid slot 1 holds
+    /// planks.
+    fn grid_world() -> World {
+        let mut world = world();
+        give(&mut world, 9, ItemKind::OakPlanks, 4);
+        give(&mut world, 1, ItemKind::OakPlanks, 1);
+        world
+    }
+
+    #[test]
+    fn a_busy_grid_is_closed_once_then_fails_grid_busy() {
+        let world = grid_world();
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut craft = Craft::new("stick".to_owned()).unwrap();
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, 0);
+        assert!(is_close(&frame, 0), "the first tick closes window 0");
+        assert!(outcome.is_none());
+        // The server never returns the item: 20 ticks of waiting, the failure
+        // is swallowed once by the close path, then reported.
+        for tick in 1..=21u64 {
+            let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+            assert!(outcome.is_none(), "tick {tick}");
+            assert!(frame.menu.is_none(), "tick {tick}: no second close while waiting");
+        }
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, 22);
+        assert_eq!(outcome, Some(Outcome::Failed("grid_busy".into())));
+        assert!(is_close(&frame, 0));
+    }
+
+    #[test]
+    fn a_grid_that_empties_lets_the_craft_plan_its_clicks() {
+        let mut world = grid_world();
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut craft = Craft::new("stick".to_owned()).unwrap();
+        let (frame, _, _) = run(&mut craft, &world, &mut perception, &mut body, 0);
+        assert!(is_close(&frame, 0));
+        for tick in 1..=3u64 {
+            let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+            assert!(outcome.is_none() && frame.menu.is_none());
+        }
+        // The server returned the grid items.
+        give(&mut world, 1, ItemKind::OakPlanks, 0);
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, 4);
+        assert!(outcome.is_none());
+        assert_eq!(frame.menu_mode, MenuMode::Click);
+        assert!(frame.menu.is_some(), "the first recipe click goes out");
+    }
+
+    #[test]
+    fn a_craft_cut_short_with_the_grid_in_use_closes_window_0_once() {
+        let mut world = world();
+        give(&mut world, 9, ItemKind::OakPlanks, 4);
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut craft = Craft::new("stick".to_owned()).unwrap();
+        let mut tick = 0u64;
+        let first_click = loop {
+            let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+            assert!(outcome.is_none());
+            tick += 1;
+            if frame.menu_mode == MenuMode::Click && frame.menu.is_some() {
+                break frame;
+            }
+            assert!(tick < 10, "no click planned");
+        };
+        assert_eq!(first_click.menu.map(|menu| menu.window), Some(0));
+        // The click put an item into the grid.
+        give(&mut world, 1, ItemKind::OakPlanks, 1);
+        craft.request_close(Outcome::Preempted);
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick);
+        assert!(is_close(&frame, 0));
+        assert_eq!(outcome, Some(Outcome::Preempted));
+        let (frame, _, outcome) = run(&mut craft, &world, &mut perception, &mut body, tick + 1);
+        assert!(frame.menu.is_none(), "the close is sent once");
+        assert_eq!(outcome, Some(Outcome::Preempted));
+    }
+
+    #[test]
+    fn a_table_menu_always_closes_whatever_the_outcome() {
+        for outcome in [Outcome::Failed("no_result".into()), Outcome::Confirmed] {
+            let mut world = pickaxe_world();
+            open_menu(&mut world, 5, MenuKind::Crafting);
+            set_menu_content(
+                &mut world,
+                5,
+                menu_slots(&[(10, ItemKind::OakPlanks, 3), (11, ItemKind::Stick, 2)]),
+            );
+            let mut perception = swept(&world);
+            let mut body = Body::new(feet());
+            let mut craft = Craft::new("wooden_pickaxe".to_owned()).unwrap();
+            let (frame, _, settled) = run(&mut craft, &world, &mut perception, &mut body, 0);
+            assert!(settled.is_none() && frame.menu.is_some(), "a click is planned");
+            craft.request_close(outcome.clone());
+            let (frame, _, settled) = run(&mut craft, &world, &mut perception, &mut body, 1);
+            assert!(is_close(&frame, 5), "the table window closes for {outcome:?}");
+            assert_eq!(settled, Some(outcome));
+        }
+    }
 }

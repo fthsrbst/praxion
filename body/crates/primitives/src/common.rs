@@ -7,7 +7,7 @@ use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Held, Look, MenuAction, MenuMode};
 use praxion_perception::{BlockFilter, BlockRegion, Caller};
-use praxion_planner::{Inventory as PlanInventory, WALK_TOLERANCE_DEG, look_towards};
+use praxion_planner::{Inventory as PlanInventory, WALK_TOLERANCE_DEG, center, look_towards};
 use praxion_world::{BlockDescription, BlockState, World};
 
 use crate::runner::Ctx;
@@ -267,6 +267,38 @@ pub(crate) fn held_matches(world: &World, wanted: &str) -> bool {
         .inventory()
         .get(36 + slot)
         .is_some_and(|stack| item_matches(stack, wanted))
+}
+
+/// Where to walk while a known cell is out of sight. A cell under the body's
+/// own column is only ever seen through the floor, which is never dug, so the
+/// body first steps two blocks aside (away from the cell) and looks from there
+/// (seed 202 live run 2026-11-08: stone two below the feet, 80 ticks, no_block).
+pub(crate) fn walk_point(feet: BlockPos, cell: BlockPos) -> Vec3 {
+    let (dx, dz) = (feet.x - cell.x, feet.z - cell.z);
+    if cell.y < feet.y && dx.abs() <= 1 && dz.abs() <= 1 {
+        let (sx, sz) = match (dx.signum(), dz.signum()) {
+            (0, 0) => (1, 0),
+            away => away,
+        };
+        return center(BlockPos::new(cell.x + 2 * sx, feet.y, cell.z + 2 * sz));
+    }
+    center(cell)
+}
+
+/// Steer toward a drop: aim first, then walk, and jump when it is above.
+pub(crate) fn pickup_frame(ctx: &Ctx<'_>, target: Vec3) -> ControlFrame {
+    let mut frame = idle(ctx);
+    let eye = ctx.body.eye_position();
+    let aim_point = Vec3::new(target.x, target.y + 0.25, target.z);
+    let (look, aligned) = look_towards(ctx.body.look(), eye, aim_point, WALK_TOLERANCE_DEG);
+    frame.look = look;
+    if aligned {
+        frame.held.forward = true;
+        if target.y > ctx.body.position().y + 0.5 && ctx.body.on_ground() {
+            frame.held.jump = true;
+        }
+    }
+    frame
 }
 
 /// The nearest visible block of `wanted` within `radius`.
