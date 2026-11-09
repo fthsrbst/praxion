@@ -1,0 +1,24 @@
+[package]
+name = "praxion-blueprint"
+description = "Blueprint v1: the layered ASCII design format, its bounds and the intrinsic shelter rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "praxion_blueprint"
+path = "src/lib.rs"
+
+[dependencies]
+# `azalea-core`'s `game_type.rs` uses `bevy_ecs` unconditionally while the
+# dependency is optional. The body's other crates get the feature through
+# `azalea-world` (via `praxion-world`); this crate has no world dependency, so
+# it asks for the feature itself instead of failing inside azalea-core.
+azalea-core = { path = "../../../third_party/azalea/azalea-core", features = ["bevy_ecs"] }
+azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+# `azalea-buf` uses `serde_json::Error` in `impls/mod.rs` unconditionally but
+# declares serde_json optional. The full body workspace turns the feature on
+# through `azalea-chat`'s `azalea-buf` feature; a crate that depends on
+# azalea-core alone must ask for it or azalea-buf does not compile.
+azalea-buf = { path = "../../../third_party/azalea/azalea-buf", features = ["serde_json"] }

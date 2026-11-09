@@ -1,0 +1,40 @@
+blueprint v1
+size: 5 5 4
+axes: x west->east, z north->south, y up; layer y0 = the feet level
+// The Demo-3 design's example (build.out.md §3.2) with the critique's findings
+// 1 and 4 applied: the torch stands on the floor at (2, 0, 1) instead of on the
+// north wall at head height, because a wall torch arrives as
+// minecraft:wall_torch and the place receipt would never settle. Counts, pinned
+// by the crate's tests: 71 cobblestone walls + 2 entry cells = 73 placements,
+// plus 1 torch = 74 cells. The unused `_` entry is deliberate: it exercises the
+// unused-palette warning.
+palette:
+  W: cobblestone
+  T: torch
+  .: air
+  e: cobblestone entry
+  _: keep
+layer y0:
+WWWWW
+W.T.W
+W...W
+W...W
+WWeWW
+layer y1:
+WWWWW
+W...W
+W...W
+W...W
+WWeWW
+layer y2:
+WWWWW
+W...W
+W...W
+W...W
+WWWWW
+layer y3:
+WWWWW
+WWWWW
+WWWWW
+WWWWW
+WWWWW
