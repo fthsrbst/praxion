@@ -982,3 +982,453 @@ mod tests {
         assert_eq!(all.len(), 4, "four distinct axes");
     }
 }
+
+/// `branch_mine` driven the way production drives it: the primitive is started
+/// through [`Runner`], one persistent [`Body`] is stepped with the frames the
+/// primitive emits, and every dig intent is registered and settled by the
+/// runner, as the body driver does.
+///
+/// The `Digger` lives inside the runner and `Runner` hands back only the
+/// outcome, so these tests pin its counters through what it produces (the dig
+/// intents and the feet path), never by reading its private fields.
+#[cfg(test)]
+mod digger_tests {
+    use std::collections::HashSet;
+
+    use azalea_core::position::Vec3;
+    use azalea_registry::builtin::{BlockKind, ItemKind};
+    use praxion_headless::{Body, Click, ControlFrame, Held, Look};
+    use praxion_interpreter::{Outcome, StartAction};
+    use praxion_perception::{BlockFilter, BlockRegion, Caller, Perception};
+    use praxion_planner::Personality;
+    use praxion_rules::registry::EXPLORE_NEAR_RADIUS;
+    use praxion_rules::ArgValue;
+    use praxion_world::World;
+
+    use super::*;
+    use crate::runner::Runner;
+    use crate::test_world::{hold, move_body, set_block, world_with};
+
+    const EAST_YAW: f32 = -90.0;
+
+    /// What one driven call did.
+    struct Run {
+        /// Every feet cell the body stood on, in order, the start first.
+        path: Vec<BlockPos>,
+        /// Every cell a dig intent broke, in order.
+        dug: Vec<BlockPos>,
+        outcome: Option<Outcome>,
+        /// The perception the call read, for the confirm-side assertions.
+        perception: Perception,
+    }
+
+    /// What the server does with a registered dig. `Confirmed` is the normal
+    /// path; `Unsettled` leaves the receipt hanging, the state production must
+    /// bound outside the primitive.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Receipt {
+        Confirmed,
+        Unsettled,
+    }
+
+    /// A runner with one `branch_mine(ore)` started through `Runner::start`, as
+    /// the interpreter starts it.
+    fn branch_mine(ore: &str) -> Runner {
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "branch_mine".to_owned(),
+                args: vec![ArgValue::Name(ore.to_owned())],
+            })
+            .expect("branch_mine starts");
+        runner
+    }
+
+    fn feet_position(feet: BlockPos) -> Vec3 {
+        Vec3::new(
+            f64::from(feet.x) + 0.5,
+            f64::from(feet.y),
+            f64::from(feet.z) + 0.5,
+        )
+    }
+
+    /// Set the body's look through the frame path, like the actuator does.
+    fn set_body_look(body: &mut Body, yaw: f32, pitch: f32) {
+        let mut frame = ControlFrame::new(0, body.generation(), Held::NONE);
+        frame.look = Look::Aim { yaw, pitch };
+        frame.apply(body, 0).expect("a look frame applies");
+    }
+
+    /// One driven call: where the body starts, how it looks, what the server
+    /// does with its receipts, which block the stand-in observer watches, and
+    /// the tick cap.
+    struct Call {
+        start: BlockPos,
+        look: (f32, f32),
+        receipt: Receipt,
+        watch: Option<BlockKind>,
+        max_ticks: u64,
+    }
+
+    impl Call {
+        /// A call east from `start` whose receipts confirm, as in production.
+        fn new(start: BlockPos) -> Self {
+            Self {
+                start,
+                look: (EAST_YAW, 0.0),
+                receipt: Receipt::Confirmed,
+                watch: None,
+                max_ticks: 1500,
+            }
+        }
+    }
+
+    /// Drive the runner's active primitive like the body driver and the server
+    /// do, for the call's tick cap or until `stop` sees the feet path:
+    ///
+    /// - one persistent [`Body`] from `start`, moved only by stepping the
+    ///   physics with the held controls of each frame the primitive emits; its
+    ///   real position is the position the server and perception see;
+    /// - the frame applied and the body stepped once per tick, as the actuator
+    ///   does;
+    /// - `watch` answers the wanted block once per tick for a region around the
+    ///   eye, the deterministic stand-in for the background sweep (the sweep is
+    ///   not what these tests guard); a refused query fails the test;
+    /// - a dig intent is registered through `Runner::registered`, the server
+    ///   turns its cell air, and `Runner::settle(Confirmed)` forwards that only
+    ///   — `Runner::settle` is the only writer of `Digger::note_settled`, and it
+    ///   does so solely for `Confirmed`, as the driver does. With
+    ///   [`Receipt::Unsettled`] the settle is never sent.
+    fn drive(
+        world: &mut World,
+        runner: &mut Runner,
+        call: Call,
+        stop: impl Fn(&[BlockPos]) -> bool,
+    ) -> Run {
+        let Call {
+            start,
+            look,
+            receipt,
+            watch,
+            max_ticks,
+        } = call;
+        let mut body = Body::new(feet_position(start));
+        set_body_look(&mut body, look.0, look.1);
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        let mut path = vec![start];
+        let mut dug = Vec::new();
+        let mut outcome = None;
+        let mut intent = 0;
+        for tick in 0..max_ticks {
+            // The server, and perception with it, follows the body physics put
+            // at this position.
+            move_body(world, body.position());
+            perception.begin_tick(world);
+            if let Some(kind) = watch
+                && let Some(eye) = perception.eye_cell(world)
+            {
+                let region = BlockRegion::around(eye, EXPLORE_NEAR_RADIUS);
+                let answer =
+                    perception.blocks_in(Caller::Other, world, region, BlockFilter::Kind(kind));
+                assert!(
+                    answer.value().is_some(),
+                    "the watch query was refused: {answer:?}"
+                );
+            }
+            let result = {
+                let mut ctx = Ctx {
+                    tick,
+                    body: &body,
+                    world: &*world,
+                    perception: &mut perception,
+                    style: Personality::default(),
+                };
+                runner.tick(&mut ctx)
+            };
+            let frame = &result.frame;
+            // The actuator applies the frame and steps the physics once.
+            frame.apply(&mut body, tick).expect("the digger frame applies");
+            body.step(&frame.held, world);
+            if let Some(pending) = &result.pending {
+                let IntentSpec::Dig { pos, .. } = pending else {
+                    panic!("the digger emitted a non-dig intent");
+                };
+                let pos = *pos;
+                assert!(
+                    frame.clicks.contains(&Click::Attack),
+                    "a dig intent carries its click"
+                );
+                dug.push(pos);
+                intent += 1;
+                runner.registered(intent);
+                set_block(world, pos, BlockState::from(BlockKind::Air));
+                if receipt == Receipt::Confirmed {
+                    runner.settle(Outcome::Confirmed);
+                }
+            }
+            // A cell the body really stood in: grounded, with solid support
+            // beneath it. The tick it steps over a just-dug cell it is still
+            // flagged `on_ground` while hanging over the hole, and that cell is
+            // not a floor it stood on.
+            if body.on_ground() {
+                let feet = body.position().to_block_pos_floor();
+                let support = BlockPos::new(feet.x, feet.y - 1, feet.z);
+                let standing = world
+                    .block_state(support)
+                    .is_some_and(praxion_planner::blocks::is_solid);
+                if standing && path.last() != Some(&feet) {
+                    path.push(feet);
+                }
+            }
+            if let Some(result) = result.outcome {
+                outcome = Some(result);
+                break;
+            }
+            if stop(&path) {
+                break;
+            }
+        }
+        Run {
+            path,
+            dug,
+            outcome,
+            perception,
+        }
+    }
+
+    fn stone_below(top: i32) -> impl Fn(BlockPos) -> BlockState {
+        move |pos| {
+            if pos.y <= top {
+                BlockState::from(BlockKind::Stone)
+            } else {
+                BlockState::from(BlockKind::Air)
+            }
+        }
+    }
+
+    /// Guards the real state machine's two phases: over a `World` with real
+    /// chunks, `branch_mine(coal_ore)` cuts 16 one-block-down stairs along one
+    /// axis to the ore height and then tunnels level at that height.
+    #[test]
+    fn branch_mine_descends_to_the_ore_height_then_tunnels_level() {
+        let start = BlockPos::new(0, 64, 0);
+        let mut world = world_with(3, 63, stone_below(63));
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = branch_mine("coal_ore");
+        // No watch: the world has no coal, so nothing can confirm the call.
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call::new(start),
+            |path| path.iter().filter(|pos| pos.y == 48).count() >= 6,
+        );
+        assert_eq!(run.outcome, None, "no ore in the world: nothing confirms");
+        assert!(run.path.len() > 17, "the tunnel was cut: {:?}", run.path);
+        assert_eq!(run.path[16], BlockPos::new(16, 48, 0), "{:?}", run.path);
+        for pair in run.path[..=16].windows(2) {
+            assert_eq!(pair[1].y, pair[0].y - 1, "one block down per stair");
+            assert_eq!(pair[1].x, pair[0].x + 1, "one column along the axis");
+            assert_eq!(pair[1].z, pair[0].z);
+        }
+        // Every stair broke its tread, once.
+        for step in 1..=16 {
+            let tread = BlockPos::new(step, 64 - step, 0);
+            assert_eq!(
+                run.dug.iter().filter(|pos| **pos == tread).count(),
+                1,
+                "tread {tread:?} in {:?}",
+                run.dug
+            );
+        }
+        // One intent per block: nothing anywhere is dug twice.
+        let unique: HashSet<BlockPos> = run.dug.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            run.dug.len(),
+            "a block was dug twice: {:?}",
+            run.dug
+        );
+        // The plain negative the missing watch would otherwise hide: the known
+        // map the stop rule reads holds no coal at all.
+        assert!(
+            run.perception
+                .nearest_known(&world, 64, |_| false, |_, state| {
+                    BlockKind::from(state) == BlockKind::CoalOre
+                })
+                .is_none(),
+            "the known map holds no coal_ore"
+        );
+        // From the target height on the tunnel is level.
+        assert!(
+            run.path[16..].iter().all(|pos| pos.y == 48),
+            "{:?}",
+            &run.path[16..]
+        );
+        assert!(
+            run.path.iter().filter(|pos| pos.y == 48).count() >= 6,
+            "five level steps after the last stair: {:?}",
+            run.path
+        );
+    }
+
+    /// Guards the stop rule: when a dig opens the face of a wanted block inside
+    /// [`EXPLORE_NEAR_RADIUS`], the Digger confirms before the next dig can
+    /// break the ore itself.
+    #[test]
+    fn branch_mine_confirms_when_the_tunnel_exposes_the_ore() {
+        let ore = BlockPos::new(20, 48, 0);
+        let mut world = world_with(3, 63, move |pos| {
+            if pos.y > 63 {
+                BlockState::from(BlockKind::Air)
+            } else if pos == ore {
+                BlockState::from(BlockKind::CoalOre)
+            } else {
+                BlockState::from(BlockKind::Stone)
+            }
+        });
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = branch_mine("coal_ore");
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call {
+                watch: Some(BlockKind::CoalOre),
+                ..Call::new(BlockPos::new(0, 64, 0))
+            },
+            |_| false,
+        );
+        assert_eq!(run.outcome, Some(Outcome::Confirmed));
+        // The last dig was the feet cell (19, 48); it opened the ore's west
+        // face at (20, 48). The next dig in line, the head cell (20, 49), was
+        // never requested, and the ore itself was never touched.
+        assert_eq!(
+            run.dug.last(),
+            Some(&BlockPos::new(19, 48, 0)),
+            "the exposing dig is the last one: {:?}",
+            run.dug
+        );
+        assert!(
+            !run.dug.contains(&BlockPos::new(20, 49, 0)),
+            "no dig intent follows the ore exposure: {:?}",
+            run.dug
+        );
+        assert!(
+            !run.dug.contains(&ore),
+            "the ore was dug instead of confirmed: {:?}",
+            run.dug
+        );
+        assert_eq!(
+            world.block_state(ore),
+            Some(BlockState::from(BlockKind::CoalOre)),
+            "the ore is still in the world"
+        );
+        // It descended to the ore height and tunneled level from there.
+        assert!(
+            run.path.iter().any(|pos| pos.y == 48 && pos.x >= 18),
+            "{:?}",
+            run.path
+        );
+        assert!(run.path.iter().all(|pos| pos.y >= 48));
+    }
+
+    /// Guards the branch dig budget: a wanted block with no known height
+    /// (`stone`) gets only [`TUNNEL_RESERVE_DUGS`]; in a world without it the
+    /// call digs exactly that many blocks and fails `not_found`, not `stuck`.
+    #[test]
+    fn branch_mine_fails_not_found_when_the_dig_budget_runs_out() {
+        let start = BlockPos::new(0, 48, 0);
+        let mut world = world_with(4, 63, move |pos| {
+            let pocket = (pos.x, pos.z) == (0, 0) && (48..=49).contains(&pos.y);
+            if pos.y > 63 || pocket {
+                BlockState::from(BlockKind::Air)
+            } else {
+                BlockState::from(BlockKind::Dirt)
+            }
+        });
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = branch_mine("stone");
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call {
+                max_ticks: 3000,
+                ..Call::new(start)
+            },
+            |_| false,
+        );
+        assert_eq!(run.outcome, Some(Outcome::Failed("not_found".into())));
+        // `Runner` owns the `Digger`, so its `dug` counter is not readable
+        // here; exactly the reserve count of dig intents, each cell once, is
+        // the same invariant (`Digger::dug` only ever counts a settled dig).
+        assert_eq!(run.dug.len() as u32, crate::branch_mine::TUNNEL_RESERVE_DUGS);
+        let unique: HashSet<BlockPos> = run.dug.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            run.dug.len(),
+            "a block was dug twice: {:?}",
+            run.dug
+        );
+    }
+
+    /// Guards the open-cave loop: in a pre-carved level tunnel the branch route
+    /// only walks, so the dry-step cap must end the call as `stuck` after
+    /// [`MAX_DRY_LEVEL_STEPS`] floor cells.
+    #[test]
+    fn branch_mine_fails_stuck_after_too_many_dry_level_steps() {
+        let start = BlockPos::new(0, 48, 0);
+        let mut world = world_with(3, 47, stone_below(47));
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = branch_mine("coal_ore");
+        let run = drive(&mut world, &mut runner, Call::new(start), |_| false);
+        assert_eq!(run.outcome, Some(Outcome::Failed("stuck".into())));
+        assert!(run.dug.is_empty(), "an open tunnel needs no dig: {:?}", run.dug);
+        // The start cell plus 63 walks: the cap fires on the 64th accepted
+        // walk before that cell is walked, so the feet path ends there.
+        assert_eq!(run.path.len() as u32, MAX_DRY_LEVEL_STEPS);
+        assert!(run.path.iter().all(|pos| pos.y == 48), "{:?}", run.path);
+    }
+
+    /// Names a gap in the primitive rather than guarding a feature: once the
+    /// block is air and the dig started, `tick_target` has no timeout of its
+    /// own for "started, not settled", so a receipt that never settles holds the
+    /// call. Production bounds it outside the primitive: `branch_mine`'s flight
+    /// deadline is 15,000 ticks (`Primitives::standard()`), after which the
+    /// interpreter preempts the call, and the body's receipt poll drops an
+    /// `Expired` receipt without ever calling `settle`. No production behaviour
+    /// is changed here; the test only makes the gap visible.
+    #[test]
+    fn an_unsettled_dig_receipt_waits_for_the_flight_deadline() {
+        let start = BlockPos::new(0, 64, 0);
+        let mut world = world_with(3, 63, stone_below(63));
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = branch_mine("coal_ore");
+        // Far beyond every internal wait (`TARGET_WAIT_TICKS`, `WALK_TICKS`,
+        // `AIRBORNE_TICKS` and `SETTLE_TICKS` are all at most 80 ticks) and far
+        // below the 15,000-tick flight deadline.
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call {
+                receipt: Receipt::Unsettled,
+                max_ticks: 600,
+                ..Call::new(start)
+            },
+            |_| false,
+        );
+        assert_eq!(
+            run.outcome, None,
+            "an unsettled receipt never finishes the digger"
+        );
+        assert_eq!(
+            run.dug.len(),
+            1,
+            "the digger waits on its first dig: {:?}",
+            run.dug
+        );
+        assert_eq!(run.path, vec![start], "and never walks");
+        assert!(
+            runner.is_active(),
+            "the call is still in flight, bounded only by the flight deadline"
+        );
+    }
+}

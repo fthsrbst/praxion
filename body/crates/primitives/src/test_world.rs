@@ -1,5 +1,6 @@
-//! A minimal real world for primitive tests that need block states: one loaded
-//! chunk of air, the player at [`feet`], a `set_block` and a swept perception.
+//! A minimal real world for primitive tests that need block states: a loaded
+//! square of chunks, the player at [`feet`], a `set_block` and a swept
+//! perception.
 //!
 //! The world is built from the same login, chunk and player packets a server
 //! sends, so `World::block_state` and `Perception` see real chunks instead of an
@@ -9,20 +10,20 @@ use std::sync::Arc;
 
 use azalea_buf::AzBuf;
 use azalea_core::game_type::{GameMode, OptionalGameType};
-use azalea_core::position::Vec3;
+use azalea_core::position::{ChunkSectionBlockPos, Vec3};
 use azalea_protocol::common::movements::MoveFlags;
 use azalea_protocol::packets::{
     common::CommonPlayerSpawnInfo,
     game::{
-        ClientboundBlockUpdate, ClientboundGamePacket, ClientboundLevelChunkWithLight,
-        ClientboundLogin, ServerboundGamePacket, ServerboundMovePlayerPos,
-        c_level_chunk_with_light::ClientboundLevelChunkPacketData,
+        ClientboundBlockUpdate, ClientboundContainerSetContent, ClientboundGamePacket,
+        ClientboundLevelChunkWithLight, ClientboundLogin, ServerboundGamePacket,
+        ServerboundMovePlayerPos, c_level_chunk_with_light::ClientboundLevelChunkPacketData,
     },
 };
 use azalea_registry::{DataRegistry, data::DimensionKind, identifier::Identifier};
 use azalea_world::Chunk;
 use praxion_perception::{Config, Perception};
-use praxion_world::{BlockPos, BlockState, World};
+use praxion_world::{BlockPos, BlockState, ItemStack, World};
 
 /// Ticks of sweeping that fill the eye's section at the per-tick ray slice.
 const SWEEP_TICKS: usize = 10;
@@ -64,8 +65,7 @@ fn login() -> ClientboundLogin {
     }
 }
 
-fn chunk_packet(x: i32, z: i32) -> ClientboundLevelChunkWithLight {
-    let chunk = Chunk::default();
+fn chunk_packet_with(x: i32, z: i32, chunk: &Chunk) -> ClientboundLevelChunkWithLight {
     let mut buffer = Vec::new();
     for section in &chunk.sections {
         section.azalea_write(&mut buffer).expect("write section");
@@ -82,6 +82,51 @@ fn chunk_packet(x: i32, z: i32) -> ClientboundLevelChunkWithLight {
     }
 }
 
+fn chunk_packet(x: i32, z: i32) -> ClientboundLevelChunkWithLight {
+    chunk_packet_with(x, z, &Chunk::default())
+}
+
+/// A chunk whose sections up to `top` are set by `fill`; every cell above
+/// `top` stays air, so the sections above it are not even walked.
+fn chunk_with_blocks(
+    min_y: i32,
+    x: i32,
+    z: i32,
+    top: i32,
+    fill: &impl Fn(BlockPos) -> BlockState,
+) -> Chunk {
+    let mut chunk = Chunk::default();
+    for (index, section) in chunk.sections.iter_mut().enumerate() {
+        let base_y = (i32::try_from(index).expect("a chunk has 24 sections") + (min_y >> 4)) * 16;
+        if base_y > top {
+            continue;
+        }
+        for ly in 0..16u8 {
+            let y = base_y + i32::from(ly);
+            if y > top {
+                break;
+            }
+            for lz in 0..16u8 {
+                for lx in 0..16u8 {
+                    let pos = BlockPos::new(
+                        x * 16 + i32::from(lx),
+                        y,
+                        z * 16 + i32::from(lz),
+                    );
+                    let state = fill(pos);
+                    if !state.is_air() {
+                        section.get_and_set_block_state(
+                            ChunkSectionBlockPos::new(lx, ly, lz),
+                            state,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    chunk
+}
+
 /// A valid world: chunk (0, 0) loaded and all air, the player at [`feet`].
 pub(crate) fn world() -> World {
     let mut world = World::new();
@@ -91,17 +136,79 @@ pub(crate) fn world() -> World {
         0,
         &ClientboundGamePacket::LevelChunkWithLight(chunk_packet(0, 0)),
     );
+    move_player(&mut world, BlockPos::new(0, 64, 0));
+    world
+}
+
+/// A valid world like [`world`] but with a `chunks` by `chunks` square of
+/// chunks loaded from (0, 0). Every block at or below `top` is `fill(pos)`,
+/// every block above `top` is air.
+pub(crate) fn world_with(chunks: i32, top: i32, fill: impl Fn(BlockPos) -> BlockState) -> World {
+    let mut world = World::new();
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    let min_y = world.min_y().expect("the login resolves a dimension");
+    for x in 0..chunks {
+        for z in 0..chunks {
+            let chunk = chunk_with_blocks(min_y, x, z, top, &fill);
+            world.apply_clientbound_play(
+                0,
+                &ClientboundGamePacket::LevelChunkWithLight(chunk_packet_with(x, z, &chunk)),
+            );
+        }
+    }
+    move_player(&mut world, BlockPos::new(0, 64, 0));
+    world
+}
+
+/// Move the followed player's feet to `feet`, as a server position packet does.
+pub(crate) fn move_player(world: &mut World, feet: BlockPos) {
     world.apply_serverbound_play(
         0,
         &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
-            pos: feet(),
+            pos: Vec3::new(
+                f64::from(feet.x) + 0.5,
+                f64::from(feet.y),
+                f64::from(feet.z) + 0.5,
+            ),
             flags: MoveFlags {
                 on_ground: true,
                 horizontal_collision: false,
             },
         }),
     );
-    world
+}
+
+/// Move the followed player's feet to exactly `position`, as the client's own
+/// position packet does. Unlike [`move_player`] this keeps sub-block precision,
+/// so a stepped body can report every tick's real position to perception.
+pub(crate) fn move_body(world: &mut World, position: Vec3) {
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
+            pos: position,
+            flags: MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+}
+
+/// Give the followed player a full inventory whose hotbar slot 0 holds `item`,
+/// so a primitive can hold it without a swap showing up in the world.
+pub(crate) fn hold(world: &mut World, item: azalea_registry::builtin::ItemKind) {
+    let mut items = vec![ItemStack::Empty; 46];
+    items[36] = ItemStack::new(item, 1);
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerSetContent(ClientboundContainerSetContent {
+            container_id: 0,
+            state_id: 1,
+            items,
+            carried_item: ItemStack::Empty,
+        }),
+    );
 }
 
 /// Place `state` at `pos`, as a server block update.
