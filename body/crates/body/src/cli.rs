@@ -11,6 +11,9 @@
 //! praxion-body --forwarder ... --tee ... --run-dir runs/<id> --port 127.0.0.1:P
 //!
 //! praxion-body check-skills --candidates DIR [--skills body/skills]
+//!
+//! praxion-body check-blueprint <file> [--inventory '{"block": n}']
+//!              [--max-placements N] [--emit-plan] [--anchor X Y Z]
 //! ```
 //!
 //! `--forwarder` is the forwarder's game listener (the address a client would
@@ -25,6 +28,7 @@
 //! from the brain, and `--goal` (when given) is injected as command `cli` so
 //! there is one goal-start path (proposal §2.6).
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -196,6 +200,93 @@ impl CheckArgs {
     }
 }
 
+/// Parsed arguments of the `check-blueprint` subcommand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlueprintCheckArgs {
+    pub file: PathBuf,
+    /// Short block id to count, for the material rule. `None` skips the rule
+    /// and only reports the plan's materials.
+    pub inventory: Option<BTreeMap<String, u32>>,
+    /// Overrides the slice-0 placement budget; `None` keeps
+    /// [`praxion_blueprint::Limits::SLICE0`].
+    pub max_placements: Option<usize>,
+    /// Print the resolved plan (blueprint cells, world positions, block ids)
+    /// so the referee never re-parses the format.
+    pub emit_plan: bool,
+    /// World position of blueprint cell `(0, 0, 0)`.
+    pub anchor: (i32, i32, i32),
+}
+
+impl BlueprintCheckArgs {
+    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Self, String> {
+        let mut file = None;
+        let mut inventory = None;
+        let mut max_placements = None;
+        let mut emit_plan = false;
+        let mut anchor = (0, 0, 0);
+
+        let mut args = args.into_iter();
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--inventory" => {
+                    let text = args.next().ok_or("--inventory wants a JSON object")?;
+                    let raw: BTreeMap<String, u32> = serde_json::from_str(&text).map_err(
+                        |error| format!("--inventory wants {{\"block\": count}}, got {error}"),
+                    )?;
+                    inventory = Some(
+                        raw.into_iter()
+                            .map(|(block, count)| {
+                                (
+                                    block
+                                        .strip_prefix("minecraft:")
+                                        .unwrap_or(block.as_str())
+                                        .to_owned(),
+                                    count,
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                "--max-placements" => {
+                    let text = args.next().ok_or("--max-placements wants a number")?;
+                    max_placements = Some(
+                        text.parse()
+                            .map_err(|_| format!("--max-placements wants a number, got {text:?}"))?,
+                    );
+                }
+                "--emit-plan" => emit_plan = true,
+                "--anchor" => {
+                    let mut numbers = [0i32; 3];
+                    for slot in &mut numbers {
+                        let text = args.next().ok_or("--anchor wants three numbers")?;
+                        *slot = text
+                            .parse()
+                            .map_err(|_| format!("--anchor wants three numbers, got {text:?}"))?;
+                    }
+                    anchor = (numbers[0], numbers[1], numbers[2]);
+                }
+                other if other.starts_with("--") => {
+                    return Err(format!("unknown argument {other:?}"));
+                }
+                other => {
+                    if file.is_some() {
+                        return Err(format!("only one blueprint file, got {other:?} too"));
+                    }
+                    file = Some(PathBuf::from(other));
+                }
+            }
+        }
+
+        Ok(Self {
+            file: file.ok_or("a blueprint file is required")?,
+            inventory,
+            max_placements,
+            emit_plan,
+            anchor,
+        })
+    }
+}
+
 /// Type a goal's arguments from the skill's declared parameters.
 pub fn resolve_goal_args(
     program: &Program,
@@ -329,6 +420,76 @@ mod tests {
         assert_eq!(
             CheckArgs::parse(std::iter::empty()).unwrap_err(),
             "--candidates is required"
+        );
+    }
+
+    #[test]
+    fn check_blueprint_arguments_parse() {
+        let args = BlueprintCheckArgs::parse(
+            [
+                "local/blueprints/shelter_1.bp",
+                "--inventory",
+                "{\"minecraft:cobblestone\": 74, \"torch\": 4}",
+                "--max-placements",
+                "150",
+                "--emit-plan",
+                "--anchor",
+                "112",
+                "64",
+                "-38",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.file, PathBuf::from("local/blueprints/shelter_1.bp"));
+        assert_eq!(
+            args.inventory,
+            Some(
+                [
+                    ("cobblestone".to_owned(), 74),
+                    ("torch".to_owned(), 4)
+                ]
+                .into_iter()
+                .collect()
+            )
+        );
+        assert_eq!(args.max_placements, Some(150));
+        assert!(args.emit_plan);
+        assert_eq!(args.anchor, (112, 64, -38));
+
+        let minimal = BlueprintCheckArgs::parse(["shelter.bp"].map(str::to_owned)).unwrap();
+        assert_eq!(minimal.inventory, None);
+        assert_eq!(minimal.max_placements, None);
+        assert!(!minimal.emit_plan);
+        assert_eq!(minimal.anchor, (0, 0, 0));
+    }
+
+    #[test]
+    fn check_blueprint_argument_errors_are_named() {
+        assert_eq!(
+            BlueprintCheckArgs::parse(std::iter::empty()).unwrap_err(),
+            "a blueprint file is required"
+        );
+        assert_eq!(
+            BlueprintCheckArgs::parse(["--inventory"].map(str::to_owned)).unwrap_err(),
+            "--inventory wants a JSON object"
+        );
+        assert!(
+            BlueprintCheckArgs::parse(["--inventory", "[1]"].map(str::to_owned))
+                .unwrap_err()
+                .contains("--inventory wants")
+        );
+        assert_eq!(
+            BlueprintCheckArgs::parse(["--anchor", "1", "2"].map(str::to_owned)).unwrap_err(),
+            "--anchor wants three numbers"
+        );
+        assert_eq!(
+            BlueprintCheckArgs::parse(["--wat"].map(str::to_owned)).unwrap_err(),
+            "unknown argument \"--wat\""
+        );
+        assert_eq!(
+            BlueprintCheckArgs::parse(["a.bp", "b.bp"].map(str::to_owned)).unwrap_err(),
+            "only one blueprint file, got \"b.bp\" too"
         );
     }
 

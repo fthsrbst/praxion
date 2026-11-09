@@ -6,17 +6,22 @@ use std::time::{Duration, Instant};
 
 use praxion_body::summary::{SessionSummary, Shared};
 use praxion_body::{
-    Args, BodyDriver, BodyOptions, CheckArgs, ProgramLoadError, SkillsWatch, Versions, find_root,
-    git_commit, load_skill_files, load_startup_program, read_skill_files, resolve_goal_args,
-    settings_path, skills_dir, summary,
+    Args, BlueprintCheckArgs, BodyDriver, BodyOptions, CheckArgs, ProgramLoadError, SkillsWatch,
+    Versions, find_root, git_commit, load_skill_files, load_startup_program, read_skill_files,
+    resolve_goal_args, settings_path, skills_dir, summary,
 };
+use praxion_blueprint::{Limits, parse, validate};
 use praxion_headless::{ConnectOptions, DriverHandle, Event, Session, TICK};
 use praxion_manifest::Manifest;
 use praxion_port::{PortConfig, PortServer};
 use praxion_reflexes::Settings;
 use praxion_rules::check_candidates;
+use praxion_world::BlockPos;
 
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A blueprint is a small text file (the design's 64 KiB bound); anything
+/// larger is not a design and is refused before it is parsed.
+const MAX_BLUEPRINT_BYTES: usize = 64 * 1024;
 
 fn main() -> ExitCode {
     // `--verbose` shows the debug diagnostics (packet traces); RUST_LOG overrides.
@@ -27,14 +32,29 @@ fn main() -> ExitCode {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("check-skills") {
-        return match run_check_skills(args) {
-            Ok(code) => code,
-            Err(message) => {
-                eprintln!("praxion-body: {message}");
-                ExitCode::from(2)
-            }
-        };
+    // One token decides the subcommand; `run` reads the arguments again, so
+    // consuming it here is harmless. Matching both names against separate
+    // `next()` calls would swallow the first flag of the second subcommand.
+    match args.next().as_deref() {
+        Some("check-skills") => {
+            return match run_check_skills(args) {
+                Ok(code) => code,
+                Err(message) => {
+                    eprintln!("praxion-body: {message}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Some("check-blueprint") => {
+            return match run_check_blueprint(args) {
+                Ok(code) => code,
+                Err(message) => {
+                    eprintln!("praxion-body: {message}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        _ => {}
     }
     match run() {
         Ok(code) => code,
@@ -95,6 +115,111 @@ fn run_check_skills<I: Iterator<Item = String>>(args: I) -> Result<ExitCode, Str
         "candidates": candidate_json,
     }))
     .map_err(|error| error.to_string())?;
+    println!("{text}");
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// `check-blueprint`: no server and no network; one JSON object on stdout and
+/// exit 1 when the design is rejected, the same shape as `check-skills`. The
+/// brain's repair loop reads `kind`, `message` and `cells`; the harness reads
+/// `--emit-plan` so the referee never re-parses the format.
+fn run_check_blueprint<I: Iterator<Item = String>>(args: I) -> Result<ExitCode, String> {
+    let args = BlueprintCheckArgs::parse(args)?;
+    let text = std::fs::read_to_string(&args.file)
+        .map_err(|error| format!("cannot read {}: {error}", args.file.display()))?;
+    if text.len() > MAX_BLUEPRINT_BYTES {
+        return Err(format!(
+            "{} is {} bytes; a blueprint is at most {MAX_BLUEPRINT_BYTES}",
+            args.file.display(),
+            text.len()
+        ));
+    }
+    let name = args
+        .file
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let limits = Limits {
+        max_placements: args.max_placements.unwrap_or(Limits::SLICE0.max_placements),
+        ..Limits::SLICE0
+    };
+    let anchor = BlockPos::new(args.anchor.0, args.anchor.1, args.anchor.2);
+
+    let result = parse(&text).and_then(|blueprint| {
+        validate(&blueprint, &limits, args.inventory.as_ref())
+            .map(|warnings| (blueprint, warnings))
+    });
+    let (ok, verdict) = match result {
+        Ok((blueprint, warnings)) => {
+            let mut verdict = serde_json::json!({
+                "ok": true,
+                "file": args.file.display().to_string(),
+                "blueprint": name,
+                "anchor": [anchor.x, anchor.y, anchor.z],
+                "size": [
+                    blueprint.size().x,
+                    blueprint.size().z,
+                    blueprint.size().y,
+                ],
+                "placements": blueprint.materials().values().sum::<u32>(),
+                "materials": blueprint.materials(),
+                "warnings": warnings
+                    .iter()
+                    .map(|warning| serde_json::json!({
+                        "kind": warning.kind,
+                        "message": warning.message,
+                    }))
+                    .collect::<Vec<_>>(),
+            });
+            if args.emit_plan {
+                verdict["plan"] = serde_json::json!(
+                    blueprint
+                        .placements(anchor)
+                        .into_iter()
+                        .map(|placement| serde_json::json!({
+                            "cell": [placement.cell.0, placement.cell.1, placement.cell.2],
+                            "pos": [placement.pos.x, placement.pos.y, placement.pos.z],
+                            "block": placement.block,
+                            "kind": placement.kind.as_str(),
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            (true, verdict)
+        }
+        Err(error) => {
+            let mut verdict = serde_json::json!({
+                "ok": false,
+                "file": args.file.display().to_string(),
+                "blueprint": name,
+                "anchor": [anchor.x, anchor.y, anchor.z],
+                "kind": error.kind.as_str(),
+                "message": error.message,
+                "cells": error
+                    .cells
+                    .iter()
+                    .map(|cell| [
+                        anchor.x + cell.x,
+                        anchor.y + cell.y,
+                        anchor.z + cell.z,
+                    ])
+                    .collect::<Vec<_>>(),
+            });
+            // The repair loop reads `kind` and the prose; a caller that has to
+            // act on a shortfall (a gather goal, design §3.4) reads numbers.
+            if let Some(shortfall) = &error.shortfall {
+                verdict["block"] = serde_json::json!(shortfall.block);
+                verdict["need"] = serde_json::json!(shortfall.need);
+                verdict["have"] = serde_json::json!(shortfall.have);
+            }
+            (false, verdict)
+        }
+    };
+    let text = serde_json::to_string(&verdict).map_err(|error| error.to_string())?;
     println!("{text}");
     Ok(if ok {
         ExitCode::SUCCESS

@@ -1,0 +1,38 @@
+blueprint v1
+size: 5 5 4
+axes: x west->east, z north->south, y up; layer y0 = the feet level
+// Hand-written fallback shelter (decision 2026-11-09 "Five next areas",
+// Demo-3): the body builds this when the brain is silent, so it cannot depend
+// on a model. It is the safety net architecture §5.4 promises, not a template
+// the designer copies. Cobblestone and one torch: a 3x3 interior three cells
+// high, a 1x2 entry in the east wall sealed last from inside, and the torch on
+// a one-cell pedestal so it is never at the body's feet.
+palette:
+  #: cobblestone
+  t: torch
+  .: air
+  d: cobblestone entry
+layer y0:
+#####
+##..#
+#...d
+#...#
+#####
+layer y1:
+#####
+#t..#
+#...d
+#...#
+#####
+layer y2:
+#####
+#...#
+#...#
+#...#
+#####
+layer y3:
+#####
+#####
+#####
+#####
+#####

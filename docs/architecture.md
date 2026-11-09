@@ -535,9 +535,9 @@ One repository with the layers enforced by tooling [D]. Agent layers do not impo
 version-pack layers [D]. Only the directories Demo-0 needs are created first:
 
 ```
-body/        Rust workspace, one crate per directory under body/crates/: arbiter, body, decoder,
-             eventlog, facts, forwarder, gamedata, headless, interpreter, manifest, perception,
-             planner, primitives, receipts, reflexes, rules, tee, world
+body/        Rust workspace, one crate per directory under body/crates/: arbiter, blueprint, body,
+             decoder, eventlog, facts, forwarder, gamedata, headless, interpreter, manifest,
+             perception, planner, primitives, receipts, reflexes, rules, tee, world
 harness/     test server control, referee, fixtures, server checklist, body smoke test
 versions/    version manifest and Azalea patches
 docs/        decisions, sessions, research, reviews, this file
