@@ -13,7 +13,9 @@ use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, 
 use praxion_world::{BlockState, World};
 
 use crate::common::{block_name, idle, plan_inventory};
-use crate::frontier::{FrontierChoice, near_block, nearest_known_block, scan_frontiers};
+use crate::frontier::{
+    FrontierChoice, FrontierScan, near_block, nearest_known_block, scan_frontiers,
+};
 use crate::heading::SearchHeading;
 use crate::runner::{Ctx, IntentSpec, PrimitiveEvent};
 
@@ -37,6 +39,13 @@ const EXPLORE_FRONTIER_VERTICAL: i32 = 12;
 /// cave wall's exposed face while staying inside the five-block mine reach.
 const TARGET_APPROACH_RADIUS: f32 = 4.0;
 
+/// The nearest best-tier frontier must lie closer than this many blocks for the
+/// once-per-call climb to a lookout. A frontier that near means terrain, not
+/// sight range, ends the known map, so a higher view can show what lies past
+/// it; a far one means the view already reaches as far as the sight range
+/// (decision 2026-11-09, "Explore may climb once per call for a view").
+const LOOKOUT_NEAR_FRONTIER: i64 = 32;
+
 /// Ticks one explore path step may take before the follower is considered
 /// stuck and the frontier is rejected. Long enough for the jump nudge to free
 /// a corner; still shorter than the default 200 so a 1200-tick search can try
@@ -44,7 +53,8 @@ const TARGET_APPROACH_RADIUS: f32 = 4.0;
 const EXPLORE_STEP_TICKS: u32 = 160;
 
 /// Hard cap on one look-around: four held quarters must fit in five seconds
-/// even when the gaze is slow. Never more than one turn per call.
+/// even when the gaze is slow. One turn at the start of a call, plus at most one more on
+/// arrival at a lookout (decision 2026-11-09).
 const LOOK_AROUND_MAX_TICKS: u64 = 100;
 
 /// How close the body's yaw must be to a held quarter before the quarter
@@ -124,11 +134,15 @@ pub(crate) struct Explore {
     chase: Chase,
     /// When nothing is known yet, the call first turns once on the spot, so
     /// the view scan sees every side before a frontier is picked; a person
-    /// looks around before walking off. Armed at most once per call.
+    /// looks around before walking off. Armed at the start of a call and at most
+    /// once more on arrival at a lookout (decision 2026-11-09).
     look_around: Option<LookAround>,
     /// Whether this call already made its look-around decision. It prevents a
     /// later failed seek from arming a turn after the first leg.
     look_around_started: bool,
+    /// Whether this call already climbed to a lookout (or tried and failed).
+    /// The climb happens at most once per call (decision 2026-11-09).
+    lookout_done: bool,
     /// Cue approaches this call has attempted, successful plans or not.
     cue_attempts: u32,
     /// Cue cells this call reached, rejected or found already at. Kept apart
@@ -298,6 +312,7 @@ impl Explore {
             chase: Chase::Frontier,
             look_around: None,
             look_around_started: false,
+            lookout_done: false,
             cue_attempts: 0,
             cue_done: Vec::new(),
             explored: {
@@ -366,6 +381,10 @@ impl Explore {
                 if !target_known {
                     self.look_around = Some(LookAround::new(ctx.tick, ctx.body.look().y_rot()));
                 }
+            } else {
+                // The start look-around was refused, so "it found nothing"
+                // cannot hold: a call that began in water gets no lookout.
+                self.lookout_done = true;
             }
         }
 
@@ -395,6 +414,13 @@ impl Explore {
                         // Cue cells have their own per-call memory. They must
                         // not seed the frontier-avoid ring or the ranking.
                         self.note_cue_done(goal);
+                    } else if self.chase == Chase::Lookout {
+                        // A viewpoint is not an explored frontier: it enters
+                        // neither memory nor the heading. The view scan sees
+                        // the land from up here only if the body looks around
+                        // again, so the turn is armed once more. It waits for
+                        // solid ground if the arrival tick is airborne.
+                        self.look_around = Some(LookAround::new(ctx.tick, ctx.body.look().y_rot()));
                     } else if self.chase == Chase::WalkBack {
                         // The cell was taken out of `explored` to walk back to
                         // it; putting it back would make it the next walk-back
@@ -459,7 +485,9 @@ impl Explore {
                 if let Some(goal) = self.goal.take() {
                     if self.chase == Chase::Cue {
                         self.note_cue_done(goal);
-                    } else {
+                    } else if self.chase != Chase::Lookout {
+                        // A stalled climb only costs the climb (`lookout_done`
+                        // is already set); the cell is no frontier to reject.
                         memory.remember(goal);
                         remember(&mut self.rejected, goal);
                     }
@@ -511,6 +539,9 @@ impl Explore {
         let mut aim = None;
         // The ground can give way mid-turn (sand, a flood): stop turning then.
         let still_allowed = look_around_allowed(ctx.body.on_ground(), ctx.body.is_in_water());
+        if self.look_around.is_some() && !still_allowed {
+            log::debug!("explore look-around dropped: the body is no longer on dry ground");
+        }
         if let Some(turn) = self.look_around.as_mut()
             && still_allowed
             && turn.advance(ctx.tick, ctx.body.look().y_rot(), period)
@@ -559,6 +590,10 @@ impl Explore {
                     })
                 },
             );
+            if !self.lookout_done && self.plan_lookout(ctx, start, &scan) {
+                self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
+                return (frame, None, None);
+            }
             let heading = memory.heading.direction(start, &scan.sector_weights());
             self.candidates = scan.rank(heading).into();
             self.frontier_scan_tick = ctx.tick + EXPLORE_SEARCH_PERIOD_TICKS;
@@ -727,6 +762,51 @@ impl Explore {
         (frame, None, None)
     }
 
+    /// The once-per-call climb: when the look-around found nothing and the
+    /// nearest best-tier frontier is near, walk to the highest reachable
+    /// lookout so the look-around can see over the terrain that ends the known
+    /// map. Returns whether a walk started. The climb is spent once the gate
+    /// opens and a lookout exists, whether or not the plan succeeds, so a
+    /// failed climb is not retried on the next scan.
+    fn plan_lookout(&mut self, ctx: &mut Ctx<'_>, start: BlockPos, scan: &FrontierScan) -> bool {
+        let nearest = scan.nearest_best_distance_sq();
+        if !lookout_gate_open(nearest) {
+            log::debug!(
+                "explore lookout skipped: nearest best-tier frontier at {:?} blocks",
+                nearest.map(|distance_sq| (distance_sq as f64).sqrt().round())
+            );
+            return false;
+        }
+        let Some(choice) = scan.lookout() else {
+            log::debug!("explore lookout skipped: no reachable viewpoint in the window");
+            return false;
+        };
+        self.lookout_done = true;
+        let goal = choice.cell;
+        let plan = self.plan_to(ctx, start, Goal::Block(goal));
+        if plan.status != praxion_planner::PlanStatus::Success
+            || plan.steps.is_empty()
+            || (!self.allow_water && plan_crosses_water(&plan))
+        {
+            log::debug!("explore lookout {goal:?} abandoned: no walkable plan");
+            return false;
+        }
+        log::debug!(
+            "explore lookout cell={:?} rise={} nearest_frontier={:.0} steps={}",
+            goal,
+            goal.y - start.y,
+            nearest.map_or(0.0, |distance_sq| (distance_sq as f64).sqrt()),
+            plan.steps.len()
+        );
+        self.path_ticks = plan.cost.ceil().max(0.) as u64;
+        self.goal = Some(goal);
+        self.chase = Chase::Lookout;
+        self.follower = Some(self.follow(ctx, plan.steps));
+        self.idle_ticks = 0;
+        self.next_plan_tick = 0;
+        true
+    }
+
     /// The planning state a plan and its follower share: the run's inventory
     /// and the cells explore has stalled in.
     fn planning_state(&self, world: &World) -> PlanningState {
@@ -866,6 +946,9 @@ enum Chase {
     /// enters the frontier memory.
     Cue,
     Target,
+    /// The one climb per call to a viewpoint; like a cue it is not a frontier
+    /// arrival and enters no memory.
+    Lookout,
     /// A walk back to a cell an earlier leg reached, so the search can scan
     /// from there. It is not a frontier arrival either.
     WalkBack,
@@ -893,6 +976,13 @@ fn cue_goal(
     mut nearest: impl FnMut(&str, u32) -> Option<BlockPos>,
 ) -> Option<BlockPos> {
     nearest(cue_for(target)?, radius)
+}
+
+/// Whether the nearest best-tier frontier (squared distance, `None` without
+/// one) is close enough to try a lookout: strictly under
+/// [`LOOKOUT_NEAR_FRONTIER`] blocks.
+fn lookout_gate_open(nearest_distance_sq: Option<i64>) -> bool {
+    nearest_distance_sq.is_some_and(|distance_sq| distance_sq < LOOKOUT_NEAR_FRONTIER.pow(2))
 }
 
 /// Whether an empty successful plan means the body is already at the goal.
@@ -1240,6 +1330,10 @@ mod tests {
             explore.look_around_started,
             "the gate was evaluated in water, so the call does not retry it"
         );
+        assert!(
+            explore.lookout_done,
+            "a refused start look-around leaves no lookout for the call"
+        );
 
         // An airborne body stands nowhere either; it must fall, not turn. The
         // first tick must not consume the one look-around: the body may land
@@ -1393,5 +1487,251 @@ mod tests {
         );
         memory.remember(at(5, 64, 0));
         assert_eq!(memory.recent().len(), RECENT_EXPLORED_CELLS);
+    }
+
+    /// Height of the test pyramid above the floor at `(x, z)`: a 5-block
+    /// stair pyramid whose top is `(8, 8)`, one block per ring.
+    fn pyramid_height(x: i32, z: i32) -> i32 {
+        (5 - (x - 8).abs().max((z - 8).abs())).max(0)
+    }
+
+    /// The block the pyramid world holds at `pos`: floor to y = 63, the pyramid
+    /// on it and air elsewhere.
+    fn pyramid_block(pos: BlockPos) -> BlockState {
+        if pos.y <= 63 + pyramid_height(pos.x, pos.z) {
+            BlockState::from(BlockKind::Stone)
+        } else {
+            air()
+        }
+    }
+
+    /// Lets the body walk the pyramid world.
+    struct PyramidBlocks;
+
+    impl Blocks for PyramidBlocks {
+        fn block(&self, pos: BlockPos) -> Option<BlockState> {
+            Some(pyramid_block(pos))
+        }
+
+        fn ready(&self, _position: Vec3) -> bool {
+            true
+        }
+    }
+
+    /// A one-chunk world with a stair pyramid (top `(8, 69, 8)`, +5 above the
+    /// start) and a swept perception of it; `with_pyramid` false leaves flat
+    /// ground. The body stands at the origin on the floor.
+    fn pyramid_world(with_pyramid: bool) -> (World, Perception, Body) {
+        use crate::test_world::{set_block, swept, world};
+
+        let mut world = world();
+        for x in 0..16 {
+            for z in 0..16 {
+                let top = if with_pyramid {
+                    63 + pyramid_height(x, z)
+                } else {
+                    63
+                };
+                for y in 63..=top {
+                    set_block(&mut world, at(x, y, z), BlockState::from(BlockKind::Stone));
+                }
+            }
+        }
+        let mut perception = swept(&world);
+        for _ in 0..300 {
+            perception.begin_tick(&world);
+            perception.sweep(&world);
+        }
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        for _ in 0..5 {
+            body.step(&Held::NONE, &PyramidBlocks);
+        }
+        assert!(body.on_ground());
+        (world, perception, body)
+    }
+
+    /// An explore call whose planner may take seconds: the body budget is six
+    /// wall-clock milliseconds, which a loaded test machine can exceed, and a
+    /// timed-out lookout plan spends the climb.
+    fn patient_explore(memory: &mut ExploreMemory) -> Explore {
+        let mut explore = Explore::new("#logs".into(), memory).expect("a known block tag");
+        let mut planner = Planner::with_budget(praxion_planner::Budget::new(
+            Duration::from_secs(10),
+            200_000,
+        ));
+        planner.set_allow_world_changes(false);
+        explore.planner = planner;
+        explore
+    }
+
+    /// Ticks `explore` with the body following every frame until `stop` holds
+    /// or the tick range ends. Returns the tick `stop` first held at.
+    fn drive(
+        explore: &mut Explore,
+        memory: &mut ExploreMemory,
+        (world, perception, body): (&World, &mut Perception, &mut Body),
+        range: std::ops::Range<u64>,
+        mut stop: impl FnMut(&Explore) -> bool,
+    ) -> Option<u64> {
+        for tick in range {
+            let frame = {
+                let mut ctx = ctx(tick, body, world, perception);
+                explore.tick(&mut ctx, true, memory).0
+            };
+            frame.apply(body, tick).expect("the frame applies");
+            body.step(&frame.held, &PyramidBlocks);
+            if stop(explore) {
+                return Some(tick);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_near_frontier_and_a_mound_climb_once_then_look_around_again() {
+        let (world, mut perception, mut body) = pyramid_world(true);
+        let mut memory = ExploreMemory::default();
+        let mut explore = patient_explore(&mut memory);
+        let top = at(8, 69, 8);
+
+        // The look-around finds nothing, the nearest frontier is the chunk
+        // edge beside the start, and the pyramid is a reachable +5 viewpoint.
+        let planned = drive(
+            &mut explore,
+            &mut memory,
+            (&world, &mut perception, &mut body),
+            0..300,
+            |e| e.lookout_done && e.follower.is_some(),
+        );
+        assert!(planned.is_some(), "the lookout walk starts");
+        assert_eq!(explore.chase, Chase::Lookout);
+        assert_eq!(explore.goal, Some(top), "the pyramid top is the viewpoint");
+        assert!(explore.look_around.is_none(), "the first turn is over");
+
+        // On arrival the look-around is armed once more.
+        let arrived = drive(
+            &mut explore,
+            &mut memory,
+            (&world, &mut perception, &mut body),
+            planned.unwrap() + 1..900,
+            |e| e.follower.is_none(),
+        );
+        assert!(arrived.is_some(), "the body reaches the top");
+        assert_eq!(body.position().to_block_pos_floor(), top);
+        assert!(
+            explore.look_around.is_some(),
+            "arrival re-arms the look-around"
+        );
+        assert!(
+            memory.recent().is_empty() && !explore.explored.contains(&top),
+            "a viewpoint is not an explored frontier"
+        );
+
+        // The turn runs out and normal exploring resumes: no second climb, no
+        // second turn.
+        let rearmed = std::cell::Cell::new(0_u32);
+        let second_climb = std::cell::Cell::new(false);
+        let mut was_turning = true;
+        drive(
+            &mut explore,
+            &mut memory,
+            (&world, &mut perception, &mut body),
+            arrived.unwrap() + 1..arrived.unwrap() + 400,
+            |e| {
+                let turning = e.look_around.is_some();
+                if turning && !was_turning {
+                    rearmed.set(rearmed.get() + 1);
+                }
+                was_turning = turning;
+                if e.chase == Chase::Lookout && e.follower.is_some() {
+                    second_climb.set(true);
+                }
+                false
+            },
+        );
+        assert_eq!(rearmed.get(), 0, "the look-around is not armed again");
+        assert!(!second_climb.get(), "the call climbs once");
+    }
+
+    #[test]
+    fn flat_ground_near_the_frontier_plans_no_lookout() {
+        let (world, mut perception, mut body) = pyramid_world(false);
+        let mut memory = ExploreMemory::default();
+        let mut explore = patient_explore(&mut memory);
+        let climbed = drive(
+            &mut explore,
+            &mut memory,
+            (&world, &mut perception, &mut body),
+            0..200,
+            |e| e.chase == Chase::Lookout,
+        );
+        assert_eq!(climbed, None, "no viewpoint, no climb");
+        assert!(!explore.lookout_done, "the climb is not spent");
+    }
+
+    #[test]
+    fn the_lookout_gate_opens_only_for_a_frontier_under_32_blocks() {
+        assert!(!lookout_gate_open(None), "no frontier, no gate");
+        assert!(lookout_gate_open(Some(31 * 31)));
+        assert!(!lookout_gate_open(Some(32 * 32)), "32 blocks is not closer");
+        assert!(!lookout_gate_open(Some(60 * 60)));
+
+        // The same decision through `Explore`: a big known platform with a
+        // +6 stair mound, the edge of the known map 50 blocks out (far) or
+        // 25 blocks out (near).
+        let scan_of = |half: i32| {
+            let mut map: HashMap<BlockPos, BlockState> = HashMap::new();
+            for x in -half..=half {
+                for z in -half..=half {
+                    let rise = (6 - (x - 8).abs().max(z.abs())).clamp(0, 6);
+                    for y in 63..=64 + rise + 1 {
+                        let state = if y <= 63 + rise {
+                            BlockState::from(BlockKind::Stone)
+                        } else {
+                            air()
+                        };
+                        map.insert(at(x, y, z), state);
+                    }
+                }
+            }
+            scan_frontiers(
+                at(0, 64, 0),
+                80,
+                EXPLORE_FRONTIER_VERTICAL,
+                &[],
+                &[],
+                move |pos| map.get(&pos).copied(),
+                false,
+                |_| true,
+            )
+        };
+        let body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        let world = World::new();
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        let mut memory = ExploreMemory::default();
+
+        let far = scan_of(50);
+        assert!(far.lookout().is_some(), "the mound is there either way");
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            explore.plan_lookout(&mut ctx, at(0, 64, 0), &far);
+        }
+        assert!(!explore.lookout_done, "a far frontier keeps the climb");
+
+        let near = scan_of(25);
+        let mut explore = Explore::new("#logs".into(), &mut memory).expect("a known block tag");
+        {
+            let mut ctx = ctx(0, &body, &world, &mut perception);
+            explore.plan_lookout(&mut ctx, at(0, 64, 0), &near);
+        }
+        assert!(
+            explore.lookout_done,
+            "a near frontier spends the climb, even if the plan then fails"
+        );
+        assert!(
+            explore.follower.is_none(),
+            "an empty perception cannot plan"
+        );
     }
 }
