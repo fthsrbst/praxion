@@ -19,6 +19,13 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Voice: ElevenLabs speech out, push-to-talk commands in (user, 2026-11-09)
+- Source: user, 2026-11-09 (notes.md); for the demo/presentation.
+- State: not designed. Depends on the talk slice (narration + command path, branch `wip/talk2`).
+- Remaining: design session with the user (TTS/STT provider and cost, latency, hotkey per OS, local-only audio, keys),
+  then build: narration lines spoken via ElevenLabs, bot questions to the user, hotkey-held speech -> transcript -> the
+  same operator command path.
+
 ### Simplification pass, then movement style (2026-11-07 plan)
 - Source: Claude Opus 5.5, 2026-11-07 (`docs/decisions.md` 2026-11-07)
 - State: A1-A4 done, A5 fixtures done (forwarder, receipts, perception, interpreter); movement style

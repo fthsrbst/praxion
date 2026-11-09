@@ -6,6 +6,15 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-09, user: voice (for the demo/presentation)
+- The bot will talk with us by voice through ElevenLabs: speak its narration, ask questions, and react to the user's
+  commands.
+- The user will hold a hotkey and speak a command; it is transcribed and goes into the same command path as chat and
+  console text (operator-only, control verbs parsed locally first).
+- Not designed yet. Builds on the talk slice (Turkish narration, chat/console commands). Session 9 listed "voice channel:
+  later"; this makes it a planned feature. Open: TTS/STT providers and cost, latency budget, where audio runs (brain
+  machine), privacy of recordings (architecture §7: local only), hotkey on Windows vs macOS, key storage.
+
 ## 2026-11-09, Claude Opus 5.5: autonomous run 5 and find_ore
 - Run 5, fresh seed 505, commit 0c27a5f: wood -> crafting table -> wooden pickaxe -> cobblestone (x8) -> stone pickaxe
   -> stone sword -> furnace, all done, about 4 minutes; the furnace again by the self-written `get_furnace`.
