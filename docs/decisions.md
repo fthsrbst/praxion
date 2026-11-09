@@ -8,6 +8,23 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 All four approved by the user (macOS session), each the recommended option; designs from the code scout in
 `logs/mac1109/design-scout.json` (ignored).
 
+- **Five next areas, all started in parallel (user, after watching runs 6 and 7).** The user found the bot still a
+  narrow rung climber and asked for: a bot that talks and takes tasks, real survival, smarter play, a detailed web
+  console, and building (Demo-3) now rather than later. Designs: `logs/mac1109/design/*.out.md` (drafts) and
+  `*.crit.out.md` (critiques), both ignored; each area starts with the critique's smaller first slice. The user's choices:
+  - **Talk:** the bot narrates in Turkish (Turkish control verbs `dur`, `iptal`, `durum`, `devam`, with an English table
+    for tests). A task from the user preempts the running goal; the old one resumes after it (session 9).
+  - **Survival:** autonomy runs start in the morning with the day cycle and mobs on (smoke tests stay frozen and
+    peaceful). At night, armed with a sword and healthy, the bot hunts hostile mobs (not creepers or Endermen) and
+    retreats when hurt; unarmed or hurt, it shelters.
+  - **Smarter play:** a mining skill may place blocks under itself to reach a block above (at most about 3, never in
+    explore or dig_down), and the column stays; `get_wood` crafts an axe from surplus planks on its own, and mining picks
+    the right tool.
+  - **Console:** while a page is open it refreshes the bot's state every second; items show as lettered tiles shipped
+    with the console (no Mojang textures).
+  - **Persona:** the user writes `local/persona/active.toml`; code only appends what it built to a separate history.
+  Technical picks taken as the drafts recommended unless a critique corrected them; each lands with its own entry.
+
 - **`smelt(item)` cooks one item per call (user).** `item` is the output, as in `craft(item)`. The body reaches a
   `furnace` known within 4 (same walk as craft, below), loads one input and one fuel with the craft click triple
   (no shift-click: Azalea predicts a shift-clicked fuel into the input slot), waits for the output slot (cook time +
