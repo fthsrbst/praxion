@@ -6,6 +6,20 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-09, OpenCode (DeepSeek V4.1 Flash): smarter slice 2 review fixes
+- The scaffolding set left `praxion-primitives` for `praxion_perception::scaffold`. The review's HIGH finding was
+  that `mine`'s target search skipped the body's own scaffold log and the `near` fact did not, so `get_wood` could
+  chop nothing, burn its held logs on a column and fail; the facts crate could not see the primitive crate's
+  registry. Perception holds it now, and all four call sites ask the same `is_scaffold`.
+- A scaffold cell is remembered only when the place receipt confirms it, and forgotten when any sight of it finds it
+  empty again (our own dig settled, or something else broke it). Recording it at click time meant a refused click
+  hid a real block from every target search for the rest of the process.
+- The pillar's call bound was shorter than the worst case its own stages allow (two jumps plus a receipt) and a
+  jump that never got a click reported `no_place` as if a placement were refused; the bound is 165 against a
+  registry budget of 180 and that case is now `no_click`.
+- Remaining design questions (backlog "smarter slice 2 review leftovers"): a failure-kind fact for the climb rule,
+  and whether `mine` should walk before it fails `out_of_reach`.
+
 ## 2026-11-09, user: voice (for the demo/presentation)
 - The bot will talk with us by voice through ElevenLabs: speak its narration, ask questions, and react to the user's
   commands.

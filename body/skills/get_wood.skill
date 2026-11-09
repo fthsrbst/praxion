@@ -2,9 +2,32 @@
 # tool needed. `#logs` comes from the 26.3 block tag, so birch, spruce and the
 # other woods work on any seed. No log in sight means walk to a frontier of the
 # perception known map before mining; `explore` sleeps at most 1200 ticks.
+#
+# Two things were added after run 6 (decision 2026-11-09 "Five next areas"):
+#
+# An axe from surplus planks. Six planks is deliberate: the axe never competes
+# with the first pickaxe (three planks) or the first table (four), it is paid
+# from what is left over, and it needs the table already near (two sticks and
+# three planks are a 3x3 recipe). `choose_tool` then holds the axe for logs with
+# no further code. It sits above the search so a body that stands next to its
+# table and holds the planks fixes itself before chopping.
+#
+# A climb to a log it cannot reach. The mine goes through the child `cut_log`,
+# so that a log the crosshair cannot hit (`out_of_reach`: overhead; `no_sight`:
+# behind another block) is one failure of the caller's rule. That rule is then
+# ineligible for one tick, and the rule under it places a log under the feet
+# (`pillar`, one block per call) before the mine tries again. Three failures of
+# the mining rule end the skill, which bounds the climb to two blocks. The
+# scaffold is a real log but is never a target: `near`, `mine` and `explore`
+# all skip it through `praxion_perception::scaffold`. With no
+# log to climb on, the skill fails `unreachable` at once. Mining skills other
+# than this one do not climb; they stay on the ground.
 skill get_wood(n: int = 1)
-  doc "Collect at least n logs of any wood type."
+  doc "Collect at least n logs of any wood type, crafting an axe from surplus planks and climbing a log at a time to a log it cannot reach."
   rules:
     count(#logs) >= $n -> done
+    not has(#axes) and count(#planks) >= 6 and count(stick) >= 2 and near(crafting_table, 4) -> craft(wooden_axe)
     not near(#logs, 5) -> explore(#logs)
-    true -> mine(#logs)
+    near(#logs, 5) -> do cut_log($n)
+    count(#logs) >= 1 -> pillar(#logs)
+    true -> fail(unreachable)

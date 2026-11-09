@@ -201,6 +201,12 @@ The perception API itself:
   occurrence per (query, fact kind) per tick plus a counter).
 - **Containers** are live only while their window is open; otherwise they are seen facts with an
   age. No identity is assumed across break plus place [D].
+- **Own placements** [P]: the cells the body filled as scaffolding (`pillar`) are remembered in
+  perception and skipped by every target search (`near`, `mine`, `explore`), so a column of logs is
+  not taken for `#logs` (review finding 1 of `logs/mac1109/review-smarter2.answer.txt`). A cell
+  becomes scaffolding only when its place receipt confirms the block, and stops being one when the
+  cell is seen empty; the set lives in perception because the facts and the primitives must ask the
+  same rule (§5.1, decision 2026-11-09 "Five next areas").
 
 ### 5.2 Action: frames, actuators and take-over
 

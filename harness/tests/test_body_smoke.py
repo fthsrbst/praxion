@@ -552,3 +552,116 @@ def test_night_watch_kills_a_zombie_with_the_sword_and_survives() -> None:
         assert not _zombie_alive(run), "the zombie is still alive\n" + context
         assert run.referee.death_count(BODY) == 0, "the referee saw a death\n" + context
         assert run.referee.player_health(BODY) > 0.0, context
+
+
+REACH_TIMEOUT = 240.0
+#: A log this many blocks above the feet cell. The eye is 1.62 above the feet
+#: and the reach is 4.5 (4.25 for the body's own margin), so six blocks up is
+#: 4.88 above the eye: out of reach from the ground, and 3.88 above it after one
+#: placed block.
+HIGH_LOG_HEIGHT = 6
+
+
+def _setup_high_log(fixture, referee, run: BodyRun) -> None:
+    """Peaceful daytime, two logs to climb on, one lone log six blocks up.
+
+    Two, not three: the goal below asks for three, so the done rule cannot fire
+    on the first tick and the climb gets its turn (review finding 2 — with three
+    logs given, `count(#logs) >= 3` was already true when the goal started, the
+    skill ended at once and `pillar` never ran). Two logs also cover the one
+    placement the six-block log needs, with one left over after the climb.
+    """
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(1000)
+    fixture.give(BODY, "oak_log", 2)
+    px, py, pz = _feet_cell(referee)
+    fixture.setblock(px, py + HIGH_LOG_HEIGHT, pz, "oak_log")
+
+
+def test_the_body_pillars_up_to_a_log_it_cannot_reach() -> None:
+    """Decision 2026-11-09 "Five next areas": climb a log at a time.
+
+    The only log in sight is six blocks overhead. ``mine`` fails
+    ``out_of_reach``, ``get_wood`` places a held log under the feet (``pillar``)
+    and mines it from the top of that block; the referee, not the body, sees the
+    log cell become air. The goal asks for three logs while two are given, so it
+    cannot be done before the climb; the climb spends one of them again and the
+    cut log pays one back, still short of three, so the goal does not settle and
+    the test watches the world instead. Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "get_wood",
+        ["3"],
+        setup=_setup_high_log,
+        max_ticks=8000,
+        start_delay_ticks=80,
+    ) as run:
+        px, py, pz = _feet_cell(run.referee)
+        cell = (px, py + HIGH_LOG_HEIGHT, pz)
+        deadline = time.monotonic() + REACH_TIMEOUT
+        gone = False
+        while time.monotonic() < deadline:
+            if run.referee.block_is(*cell, "air"):
+                gone = True
+                break
+            if run.process.poll() is not None:
+                break
+            time.sleep(1.0)
+        events = run.events()
+        context = "\n".join(
+            [
+                f"run dir: {run.run_dir}",
+                f"log cell {cell}, feet {_feet_cell(run.referee)}",
+                f"pillar starts: {_intent_starts(events, 'pillar')}",
+                f"body output tail:\n{run.output()[-2000:]}",
+            ]
+        )
+        assert _intent_starts(events, "pillar"), "the body never climbed\n" + context
+        assert _intent_starts(events, "mine"), "nothing was mined\n" + context
+        assert gone, "the log six blocks up was never broken\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def _setup_axe_from_planks(fixture, referee, run: BodyRun) -> None:
+    """Peaceful daytime; eight planks, two sticks, a table two blocks east and
+    a three-log trunk four blocks east."""
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(1000)
+    fixture.give(BODY, "oak_planks", 8)
+    fixture.give(BODY, "stick", 2)
+    px, py, pz = _feet_cell(referee)
+    fixture.setblock(px + 2, py, pz, "crafting_table")
+    for dy in range(3):
+        fixture.setblock(px + 4, py + dy, pz + 1, "oak_log")
+
+
+def test_get_wood_crafts_an_axe_from_surplus_planks_and_chops_with_it() -> None:
+    """Eight planks and two sticks beside a table: the axe comes before the chop."""
+    with start_body(
+        101,
+        "get_wood",
+        ["1"],
+        setup=_setup_axe_from_planks,
+        max_ticks=8000,
+        start_delay_ticks=80,
+    ) as run:
+        summary = run.wait_for_outcome(REACH_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "wooden_axe") >= 1, "no axe was crafted\n" + context
+        assert _count(inventory, "oak_log") >= 1, "no log was cut\n" + context
+        crafts = [
+            event
+            for event in _intent_starts(events, "craft")
+            if _first_arg(event) == "wooden_axe"
+        ]
+        mines = _intent_starts(events, "mine")
+        assert crafts, "the axe was not crafted by `craft`\n" + context
+        assert mines, "nothing was mined\n" + context
+        assert crafts[0]["seq"] < mines[0]["seq"], "the axe came after the first chop\n" + context

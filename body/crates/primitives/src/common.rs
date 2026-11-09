@@ -6,7 +6,7 @@ use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Held, Look, MenuAction, MenuMode};
-use praxion_perception::{BlockFilter, BlockRegion, Caller};
+use praxion_perception::{BlockFilter, BlockRegion, Caller, scaffold};
 use praxion_planner::{Inventory as PlanInventory, WALK_TOLERANCE_DEG, center, look_towards};
 use praxion_world::{BlockDescription, BlockState, World};
 
@@ -324,12 +324,18 @@ pub(crate) fn block_target_where(
         return blocks
             .iter()
             .filter(|fact| {
-                gamedata::block_in_tag(fact.kind.to_str(), tag) && accept(fact.pos, fact.state)
+                gamedata::block_in_tag(fact.kind.to_str(), tag)
+                    && !scaffold::is_scaffold(fact.pos)
+                    && accept(fact.pos, fact.state)
             })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
             .map(|fact| fact.pos);
     }
     let kind = wanted.parse::<BlockKind>().ok()?;
+    // The body's own scaffolding is never a target
+    // (`praxion_perception::scaffold`).
+    let accept =
+        |pos: BlockPos, state: BlockState| !scaffold::is_scaffold(pos) && accept(pos, state);
     let nearest = ctx
         .perception
         .nearest_block(Caller::Other, ctx.world, kind, radius)
@@ -418,6 +424,40 @@ mod tests {
         assert_eq!(
             choose_tool(stone, &inventory, &inventory[38]),
             ToolChoice::Keep
+        );
+    }
+
+    #[test]
+    fn an_axe_beats_the_held_pickaxe_on_a_log_and_a_shovel_beats_it_on_dirt_sand_and_gravel() {
+        // Decision 2026-11-09 "Five next areas": the right tool, held or in
+        // the inventory. A pickaxe is no faster than a hand on wood or earth.
+        use azalea_registry::builtin::ItemKind;
+        let log = BlockState::from(BlockKind::OakLog);
+        let inventory = inventory_with(&[(20, ItemKind::StoneAxe), (36, ItemKind::WoodenPickaxe)]);
+        assert_eq!(
+            choose_tool(log, &inventory, &inventory[36]),
+            ToolChoice::Select("stone_axe".into()),
+            "an axe in the main inventory, a pickaxe in hand"
+        );
+        // Holding the axe already: nothing to do, and a worse axe is not swapped in.
+        let inventory = inventory_with(&[(36, ItemKind::StoneAxe), (37, ItemKind::WoodenAxe)]);
+        assert_eq!(choose_tool(log, &inventory, &inventory[36]), ToolChoice::Keep);
+
+        for earth in [BlockKind::Dirt, BlockKind::Sand, BlockKind::Gravel] {
+            let state = BlockState::from(earth);
+            let inventory =
+                inventory_with(&[(21, ItemKind::WoodenShovel), (36, ItemKind::StonePickaxe)]);
+            assert_eq!(
+                choose_tool(state, &inventory, &inventory[36]),
+                ToolChoice::Select("wooden_shovel".into()),
+                "{earth:?}"
+            );
+        }
+        // A shovel is no help on a log: the axe wins there.
+        let inventory = inventory_with(&[(20, ItemKind::WoodenShovel), (21, ItemKind::WoodenAxe)]);
+        assert_eq!(
+            choose_tool(log, &inventory, &ItemStack::Empty),
+            ToolChoice::Select("wooden_axe".into())
         );
     }
 

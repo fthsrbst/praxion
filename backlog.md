@@ -19,6 +19,23 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### smarter slice 2 review leftovers (pillar, scaffolding, axe)
+- Source: review `logs/mac1109/review-smarter2.answer.txt` (OpenCode/DeepSeek V4.1 Flash fixes, 2026-11-09).
+- State: findings 1-3 and 6 fixed and pinned by tests: the scaffolding set moved to
+  `praxion_perception::scaffold` and `near`/`mine`/`explore` share it; the pillar marks its cell only on the
+  confirmed place receipt and an emptied cell (of our own dig or anyone else's) is forgotten; the high-log smoke
+  test gives two logs against a goal of three; the pillar's call bound now outlasts two jumps and the receipt, and
+  a jump that never clicked fails `no_click` instead of `no_place`.
+- Remaining (findings 4-5, both design choices, the reviewer's own verdict leaves them to the next slice):
+  (a) finding 4: `get_wood`'s `count(#logs) >= 1 -> pillar(#logs)` rule fires on any child failure kind, so a
+  `no_block`/`needs_tool` also spends a log on a column; needs a failure-kind fact
+  (`last_failure_is(out_of_reach)`) or a kind-aware retry in the interpreter — a design decision for the user.
+  (b) finding 5: `mine`'s instant `above_reach` refuses a target a short uphill walk would reach; brief step 1
+  asks for the fast typed failure, and the alternative (walk the 80-tick budget, then fail `out_of_reach`) is a
+  design choice, not a bug fix.
+- Pointers: `body/crates/perception/src/scaffold.rs`, `body/crates/primitives/src/pillar.rs`,
+  `body/crates/primitives/src/mine.rs`, `body/skills/get_wood.skill`, `docs/architecture.md` §5.1.
+
 ### Voice: ElevenLabs speech out, push-to-talk commands in (user, 2026-11-09)
 - Source: user, 2026-11-09 (notes.md); for the demo/presentation.
 - State: not designed. Depends on the talk slice (narration + command path, branch `wip/talk2`).

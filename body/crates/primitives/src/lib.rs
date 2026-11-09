@@ -14,6 +14,7 @@ mod heading;
 mod mine;
 mod move_to;
 mod pickup;
+mod pillar;
 mod place;
 mod runner;
 mod small;

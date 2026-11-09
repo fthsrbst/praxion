@@ -1,0 +1,10 @@
+# Mine logs until n are held: a child of `get_wood` so that a mine which cannot
+# reach its log (it fails `out_of_reach` or `no_sight`) is ONE failure of the
+# caller's rule. A failed primitive is retried by its own rule; a failed child
+# skill instead makes the caller's rule ineligible for a tick, and the rules
+# below it get their turn. That turn is the climb (`pillar`), see `get_wood`.
+skill cut_log(n: int = 1)
+  doc "Mine logs of any wood type until n are held; fails with the mine's own kind (out_of_reach, no_sight) when none can be hit."
+  rules:
+    count(#logs) >= $n -> done
+    true -> mine(#logs)

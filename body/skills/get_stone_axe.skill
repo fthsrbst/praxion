@@ -1,0 +1,11 @@
+# A stone axe needs 3 cobblestone and 2 sticks, and a placed crafting table.
+# Shaped like `get_stone_pickaxe`: cobblestone first (the pickaxe it needs is
+# the cobblestone skill's own business), then sticks, then the table.
+skill get_stone_axe()
+  doc "Have a stone axe."
+  rules:
+    count(stone_axe) >= 1 -> done
+    count(cobblestone) >= 3 and count(stick) >= 2 and near(crafting_table, 4) -> craft(stone_axe)
+    count(cobblestone) < 3 -> do get_cobblestone(3)
+    count(stick) < 2 -> do get_sticks(2)
+    true -> do get_crafting_table_near()
