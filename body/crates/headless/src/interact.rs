@@ -193,6 +193,20 @@ pub fn pick(world: &praxion_world::World, body: &Body) -> Pick {
     }
 }
 
+/// The block the crosshair WOULD be over if the body looked along `yaw` and
+/// `pitch` (degrees) from its current eye. Same ray as [`pick`], but the body
+/// is not changed and entities are ignored: the caller uses it to choose where
+/// to aim before it turns.
+pub fn pick_block_looking(
+    world: &praxion_world::World,
+    body: &Body,
+    yaw: f32,
+    pitch: f32,
+) -> Option<BlockHitResult> {
+    let look = azalea_entity::LookDirection::new(yaw, pitch.clamp(-90., 90.));
+    pick_block(world, body.eye_position(), look, body.block_interaction_range())
+}
+
 /// `azalea-client/src/plugins/interact/pick.rs:225-243` (`pick_block`) with the
 /// traversal of `azalea-physics/src/clip.rs:92-251`.
 fn pick_block(

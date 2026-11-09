@@ -46,7 +46,9 @@ pub use driver::{Driver, DriverHandle, TickView};
 pub use error::Error;
 pub use events::Event;
 pub use frame::{Click, ControlFrame, FrameError, Held, Look, MenuAction, MenuMode};
-pub use interact::{ActuatorState, AppliedReport, Outgoing, Pick, held_item, pick};
+pub use interact::{
+    ActuatorState, AppliedReport, Outgoing, Pick, held_item, pick, pick_block_looking,
+};
 pub use login::protocol_version;
 pub use physics::{Blocks, Body, ToolFit, tool_fit};
 pub use script::{Script, ScriptLook, Step};
