@@ -1,0 +1,29 @@
+# Get an ore within mining reach. It is a skill of its own so that a failed
+# search is ONE failure of the caller's rule, like find_stone: the caller then
+# falls through to its next rule. Ore sits inside rock and no ray from the
+# surface sees it, so the surface search (search_surface) comes first and, when
+# it finds nothing, `branch_mine` opens the rock: a stair down to the ore's best
+# height, then a tunnel in legs that turn.
+#
+# Why search, then branch_mine, without the two rules fighting (interpreter
+# 6.1): the highest true rule fires, but a rule whose child just failed is
+# ineligible for that one tick only. So the search comes first and
+# `branch_mine` fires exactly on the tick the search frame failed (three failed
+# explores inside search_surface, one cap). It is a discrete primitive, which
+# the interpreter runs to its outcome before it evaluates any guard again, so
+# the search cannot take over mid-tunnel. It confirms once the ore is known
+# within mining reach, and the guard on top then ends the skill. The failure
+# cap counts per rule (the third failure of one rule fails the skill, normally
+# not_found): a failed search and a failed tunnel alternate until the cap, and
+# a finished rule clears its own count.
+#
+# The skill fails with the last failure kind: normally not_found from the
+# tunnel, but a tunnel that keeps refusing (e.g. fluid) can reach its cap
+# first, and then the skill fails with that kind instead. A caller must not
+# read every failure as "keep searching".
+skill find_ore(ore: block)
+  doc "Get the given ore within mining reach: search the surface, then tunnel underground; fails with the last failure kind (normally not_found) when it is not found."
+  rules:
+    near($ore, 5) -> done
+    not near($ore, 5) -> do search_surface($ore)
+    not near($ore, 5) -> branch_mine($ore)

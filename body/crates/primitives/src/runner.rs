@@ -17,7 +17,7 @@ use praxion_world::World;
 
 use crate::common::{HandSelect, idle};
 use crate::craft::Craft;
-use crate::dig_down::DigDown;
+use crate::dig_down::Digger;
 use crate::explore::{Explore, ExploreMemory};
 use crate::mine::Mine;
 use crate::move_to::Move;
@@ -121,7 +121,7 @@ pub struct Runner {
 #[derive(Debug)]
 enum Active {
     Mine(Mine),
-    DigDown(DigDown),
+    Dig(Digger),
     Place(Place),
     Craft(Craft),
     Eat(Eat),
@@ -139,7 +139,8 @@ impl Active {
     /// going until its target is gone, a `craft` first closes its open
     /// crafting table, and `move_to` treats "unrefuted" as "not corrected",
     /// not as "arrived": the follower's own goal check ends it. `dig_down`
-    /// digs many blocks, one receipt each, and ends on its own stop rule.
+    /// and `branch_mine` dig many blocks, one receipt each, and end on their
+    /// own stop rule.
     ///
     /// `craft` is the one exception to the confirmed gate: it enters its close
     /// path on any receipt, so `Runner::settle` keeps it active; `Runner::tick`
@@ -148,7 +149,7 @@ impl Active {
         match self {
             Active::Craft(craft) => craft.close_outcome.is_some(),
             Active::Mine(mine) => *outcome == Outcome::Confirmed && mine.pickup.is_some(),
-            Active::Move(_) | Active::Explore(_) | Active::Attack(_) | Active::DigDown(_) => {
+            Active::Move(_) | Active::Explore(_) | Active::Attack(_) | Active::Dig(_) => {
                 *outcome == Outcome::Confirmed
             }
             _ => false,
@@ -184,7 +185,8 @@ impl Runner {
                 pickup: None,
                 dig_through: None,
             }),
-            "dig_down" => Active::DigDown(DigDown::new(arg)),
+            "dig_down" => Active::Dig(Digger::dig_down(arg)),
+            "branch_mine" => Active::Dig(Digger::branch_mine(arg)),
             "place" => Active::Place(Place {
                 block: arg,
                 target: None,
@@ -251,7 +253,7 @@ impl Runner {
             match active {
                 Active::Craft(craft) => craft.request_close(outcome.clone()),
                 Active::Mine(mine) if outcome == Outcome::Confirmed => mine.begin_pickup(),
-                Active::DigDown(dig) if outcome == Outcome::Confirmed => dig.note_settled(),
+                Active::Dig(dig) if outcome == Outcome::Confirmed => dig.note_settled(),
                 _ => {}
             }
         }
@@ -273,7 +275,7 @@ impl Runner {
         // move only here, when the receipt really exists.
         match &mut self.active {
             Some(Active::Mine(mine)) => mine.note_registered(),
-            Some(Active::DigDown(dig)) => dig.note_registered(),
+            Some(Active::Dig(dig)) => dig.note_registered(),
             _ => {}
         }
     }
@@ -352,7 +354,7 @@ impl Runner {
         };
         let (frame, pending, outcome) = match active {
             Active::Mine(state) => state.tick(ctx, self.started),
-            Active::DigDown(state) => state.tick(ctx),
+            Active::Dig(state) => state.tick(ctx),
             Active::Place(state) => state.tick(ctx, self.started),
             Active::Craft(state) => state.tick(ctx, self.started),
             Active::Eat(state) => state.tick(ctx, self.started),

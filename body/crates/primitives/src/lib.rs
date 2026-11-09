@@ -4,6 +4,7 @@
 //! The runner takes a [`Ctx`] with the body, the raw store, perception and the
 //! look style, and returns a frame plus the intent to register.
 
+mod branch_mine;
 mod common;
 mod craft;
 mod dig_down;

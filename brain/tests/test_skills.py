@@ -28,6 +28,8 @@ CORE_NAMES = {
     "get_wood",
     "get_wooden_pickaxe",
     "find_stone",
+    "find_ore",
+    "search_surface",
 }
 
 
@@ -58,7 +60,14 @@ def test_catalog_text_contains_every_skill_source() -> None:
 
 def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
     catalog = load_catalog()
-    assert primitive_names(catalog) == ["craft", "dig_down", "explore", "mine", "place"]
+    assert primitive_names(catalog) == [
+        "branch_mine",
+        "craft",
+        "dig_down",
+        "explore",
+        "mine",
+        "place",
+    ]
     assert fact_names(catalog) == ["count", "has", "near"]
 
 

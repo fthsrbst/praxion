@@ -51,6 +51,10 @@ Rules of the DSL:
   `$n`, and integer counts. Prefer a tag over one variant (`#logs`, not
   `oak_log`; `#planks`, not `oak_planks`): a skill that searches for one wood
   type fails wherever that tree does not grow.
+- `explore` only walks the surface; ore (coal_ore, iron_ore, copper_ore)
+  mostly lies inside rock. To reach an ore, call `do find_ore(<ore>)`, which
+  searches the surface and then tunnels underground, and mine it once it is
+  near.
 - A skill may call the core skills listed below, but not itself. A core
   skill counts as one step; at most two levels of new skills may nest.
 - A skill has at most 30 rules.

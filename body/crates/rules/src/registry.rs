@@ -150,8 +150,8 @@ pub enum BlockRef {
     Named(&'static str),
     /// The block or item named by argument `index`.
     Param(usize),
-    /// Any breakable ground block (`dig_down` removes whatever lies in its
-    /// way).
+    /// Any breakable ground block (`dig_down` and `branch_mine` remove
+    /// whatever lies in their way).
     Any,
 }
 
@@ -292,6 +292,28 @@ impl Primitives {
             // for dirt), tool selection and the walk onto each stair; the
             // interpreter must not preempt a staircase that is progressing.
             default_max_ticks: 1500,
+            effects: dig_down_effects.clone(),
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::BlockBecomesAir,
+        });
+
+        primitives.add(PrimitiveRecord {
+            name: "branch_mine",
+            version: 1,
+            params: vec![PrimParam {
+                name: "block",
+                ty: ArgType::Value(ValueType::Block),
+            }],
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            // Worst case, from the new start-height budget: a mountain start at
+            // y 150 tunnels for the lowest target (y 16) after a descent of
+            // 3 * 134 = 402 digs, plus the 160-dig tunnel reserve: 562 digs. At
+            // about 26 ticks per dig (the receipt, the walk onto each step, a
+            // gravel settle) that is 14,612 ticks, so 15000 covers it with room
+            // for a slow pickaxe. The interpreter must not preempt a tunnel
+            // that is progressing.
+            default_max_ticks: 15000,
             effects: dig_down_effects,
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::BlockBecomesAir,
@@ -494,7 +516,10 @@ fn delta(item: &str, count: u32) -> ItemDelta {
 /// The exact effects of one loot table, plus the block change if it has one.
 fn loot_effects(drops: &'static [gamedata::Drop], changes: Vec<BlockChange>) -> Effects {
     Effects {
-        produces: drops.iter().map(|drop| delta(drop.item, drop.max)).collect(),
+        produces: drops
+            .iter()
+            .map(|drop| delta(drop.item, drop.max))
+            .collect(),
         drops: drops.iter().map(item_drop).collect(),
         consumes: Vec::new(),
         changes,
@@ -590,10 +615,7 @@ fn craft_summary() -> Effects {
 /// every member the primitive already knows. `mine(#logs)` therefore declares
 /// the drops of every log type, and `craft(#planks)` the inputs of every planks
 /// recipe.
-fn insert_tag_effects(
-    record: &mut PrimitiveRecord,
-    tags: &[gamedata::Tag],
-) {
+fn insert_tag_effects(record: &mut PrimitiveRecord, tags: &[gamedata::Tag]) {
     for tag in tags {
         let mut merged = Effects::default();
         let mut any = false;
@@ -620,7 +642,11 @@ fn insert_item_tag_effects(record: &mut PrimitiveRecord) {
 
 fn merge_effects(into: &mut Effects, other: &Effects) {
     for delta in &other.produces {
-        match into.produces.iter_mut().find(|entry| entry.item == delta.item) {
+        match into
+            .produces
+            .iter_mut()
+            .find(|entry| entry.item == delta.item)
+        {
             Some(entry) => entry.count = entry.count.max(delta.count),
             None => into.produces.push(delta.clone()),
         }
@@ -638,7 +664,11 @@ fn merge_effects(into: &mut Effects, other: &Effects) {
         }
     }
     for delta in &other.consumes {
-        match into.consumes.iter_mut().find(|entry| entry.item == delta.item) {
+        match into
+            .consumes
+            .iter_mut()
+            .find(|entry| entry.item == delta.item)
+        {
             Some(entry) => entry.count = entry.count.max(delta.count),
             None => into.consumes.push(delta.clone()),
         }
@@ -658,10 +688,22 @@ mod tests {
     fn every_required_record_exists() {
         let primitives = Primitives::standard();
         for name in [
-            "move_to", "mine", "dig_down", "place", "craft", "eat", "explore", "attack", "equip", "wait",
+            "move_to",
+            "mine",
+            "dig_down",
+            "branch_mine",
+            "place",
+            "craft",
+            "eat",
+            "explore",
+            "attack",
+            "equip",
+            "wait",
             "observe",
         ] {
-            let record = primitives.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            let record = primitives
+                .get(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
             assert_eq!(record.version, 1);
             assert!(record.default_max_ticks > 0);
         }
@@ -684,8 +726,14 @@ mod tests {
                 ty: ArgType::Value(ValueType::Block),
             }]
         );
-        assert_eq!(p.get("explore").unwrap().evidence, EvidenceKind::NoCorrection);
-        assert_eq!(p.get("mine").unwrap().evidence, EvidenceKind::BlockBecomesAir);
+        assert_eq!(
+            p.get("explore").unwrap().evidence,
+            EvidenceKind::NoCorrection
+        );
+        assert_eq!(
+            p.get("mine").unwrap().evidence,
+            EvidenceKind::BlockBecomesAir
+        );
         assert_eq!(
             p.get("craft").unwrap().evidence,
             EvidenceKind::InventoryDelta
@@ -719,16 +767,40 @@ mod tests {
             }]
         );
         assert!(effects.produces.iter().any(|delta| delta.item == "dirt"));
-        assert!(effects.produces.iter().any(|delta| delta.item == "cobblestone"));
+        assert!(
+            effects
+                .produces
+                .iter()
+                .any(|delta| delta.item == "cobblestone")
+        );
         // The flight deadline outlasts one dig receipt window and a walk.
         assert!(dig_down.default_max_ticks >= 1000);
+    }
+
+    #[test]
+    fn branch_mine_shares_dig_down_effects_and_outlasts_its_digs() {
+        let p = Primitives::standard();
+        let branch = p.get("branch_mine").unwrap();
+        let dig_down = p.get("dig_down").unwrap();
+        assert_eq!(branch.kind, PrimitiveKind::Discrete);
+        assert_eq!(branch.evidence, EvidenceKind::BlockBecomesAir);
+        assert_eq!(branch.params, dig_down.params);
+        assert_eq!(branch.effects, dig_down.effects);
+        assert!(branch.default_max_ticks > dig_down.default_max_ticks);
+        // The deadline covers the worst start the budget is sized for: a
+        // descent from y 150 (402 digs) plus the 160-dig tunnel reserve, at
+        // the ~26 ticks per dig the record's comment assumes.
+        assert!(branch.default_max_ticks >= 562 * 26);
     }
 
     #[test]
     fn standard_facts() {
         let f = Facts::standard();
         assert_eq!(f.get("count").unwrap().ret, ValueType::Int);
-        assert_eq!(f.get("near").unwrap().params, vec![ValueType::Block, ValueType::Int]);
+        assert_eq!(
+            f.get("near").unwrap().params,
+            vec![ValueType::Block, ValueType::Int]
+        );
         assert!(f.get("nope").is_none());
     }
 
@@ -791,7 +863,10 @@ mod tests {
         let craft = p.get("craft").unwrap();
         let planks = craft.effects_for(&[ArgValue::Item("#planks".into())]);
         assert!(
-            planks.produces.iter().any(|delta| delta.item == "birch_planks"),
+            planks
+                .produces
+                .iter()
+                .any(|delta| delta.item == "birch_planks"),
             "craft(#planks) declares birch planks: {:?}",
             planks.produces
         );

@@ -1,4 +1,8 @@
-//! `dig_down`: dig a walkable one-wide staircase toward a ground block.
+//! `dig_down` and `branch_mine`: dig a walkable one-wide passage toward a
+//! block that no ray can see. Both run on the [`Digger`] state machine and the
+//! [`plan_step`] planner; they differ only in their route (see [`Route`]).
+//!
+//! # `dig_down`
 //!
 //! Stone lies three to six blocks under the dirt of flat terrain and no ray
 //! ever reaches it from the surface, so `explore` cannot find it and, by
@@ -7,17 +11,28 @@
 //! within mining reach, then returns `confirmed` so the caller's next rule
 //! (`mine`) takes over.
 //!
+//! # `branch_mine`
+//!
+//! Ores sit inside rock, so a surface search never sees them. `branch_mine`
+//! first cuts the same staircase down to the ore's best height, then tunnels
+//! level, in legs that turn at right angles, until the ore is in sight.
+//!
+//! # One step
+//!
 //! One step goes from the feet cell `F = (x, y, z)` to the next column
 //! `(x + dx, ., z + dz)`:
 //!
 //! ```text
 //!   y+1   .  [A]     A: clearance, so the body fits while it walks in
 //!   y     F  [B]     B: head room of the new stair
-//!   y-1  [S] [T]     T: the new feet cell, one lower
+//!   y-1  [S] [T]     T: the new feet cell, one lower (Slope::Down)
 //!   y-2  [S] [floor] floor: must be solid, so the fall is one block
 //! ```
 //!
-//! The cells A, B, T are dug top-down (a gravity block above A then drains
+//! A level step (`Slope::Level`) has no S and T row: B is the new feet cell and
+//! the floor is the block under it.
+//!
+//! The cells (A, B and T, or A and B) are dug top-down (a gravity block above A then drains
 //! into the open cells one dig at a time, never onto a cell still closed
 //! below it), then the body walks onto T. The block under the body is never
 //! dug. Every dug block gets exactly one dig intent and receipt, like `mine`.
@@ -29,6 +44,7 @@ use praxion_perception::exposes_fluid;
 use praxion_planner::{blocks, center};
 use praxion_world::BlockState;
 
+use crate::branch_mine::{Branch, Candidates};
 use crate::common::{HandSelect, ToolStep, aim_precise, hold_tool, idle};
 use crate::frontier::nearest_known_block;
 use crate::mine::{block_gone, pickup_frame};
@@ -37,8 +53,18 @@ use crate::runner::{Ctx, IntentSpec};
 /// How deep the staircase may go below where the call started.
 pub(crate) const MAX_DEPTH: i32 = 12;
 
-/// How many blocks one call may dig, refills of falling sand included.
+/// How many blocks one `dig_down` call may dig, refills of falling sand
+/// included.
 pub(crate) const MAX_DUGS: u32 = 40;
+
+/// Level steps a `branch_mine` call may walk without digging one block. In an
+/// open cave the branch route can cycle through open cells forever: every
+/// candidate is a walk, so the dig budget never grows. The cap turns that loop
+/// into a bounded `stuck` failure. It is four tunnel legs (see
+/// [`crate::branch_mine::LEG_STEPS`]), far more than any real cave crossing;
+/// `dig_down` always descends, so it never takes a level step and the counter
+/// stays at zero for it.
+pub(crate) const MAX_DRY_LEVEL_STEPS: u32 = 64;
 
 /// The window of each dig receipt, as in `mine`.
 const DIG_WINDOW: u64 = 160;
@@ -121,49 +147,68 @@ fn offset(pos: BlockPos, dx: i32, dy: i32, dz: i32) -> BlockPos {
     BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
 }
 
+/// How a step changes the feet height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slope {
+    /// The new feet cell is one lower: a stair going down.
+    Down,
+    /// The new feet cell is at the same height: a tunnel.
+    Level,
+}
+
+impl Slope {
+    /// How many blocks lower the new feet cell is.
+    fn drop(self) -> i32 {
+        match self {
+            Self::Down => 1,
+            Self::Level => 0,
+        }
+    }
+}
+
 /// The next move from the feet cell `feet` along `dir`. Pure over a block
-/// lookup, so the safety rules are tested without a world. `start_y` is the
-/// feet height where the call began.
+/// lookup, so the safety rules are tested without a world. A step whose new
+/// feet cell would lie below `min_y` is refused as too deep.
 ///
 /// Refusals are decided before the first dig of a step, so a step that cannot
 /// be finished is never started.
 pub(crate) fn plan_step(
     feet: BlockPos,
     dir: Dir,
-    start_y: i32,
+    slope: Slope,
+    min_y: i32,
     lookup: &impl Fn(BlockPos) -> Option<BlockState>,
 ) -> StairStep {
     let (dx, dz) = dir;
-    // Top-down: clearance, head room, the new feet cell.
-    let cells = [
-        offset(feet, dx, 1, dz),
-        offset(feet, dx, 0, dz),
-        offset(feet, dx, -1, dz),
-    ];
-    let tread = cells[2];
-    let floor = offset(feet, dx, -2, dz);
-    if tread.y < start_y - MAX_DEPTH {
+    let drop = slope.drop();
+    let tread = offset(feet, dx, -drop, dz);
+    let floor = offset(feet, dx, -drop - 1, dz);
+    if tread.y < min_y {
         return StairStep::Refuse(Refusal::TooDeep);
     }
 
-    let mut states = [None; 3];
-    for (state, cell) in states.iter_mut().zip(cells) {
-        *state = lookup(cell);
-    }
     let Some(floor_state) = lookup(floor) else {
         return StairStep::Refuse(Refusal::UnsafeDrop);
     };
     if blocks::fluid(floor_state).is_some() {
         return StairStep::Refuse(Refusal::Fluid);
     }
-    // The fall onto the new stair is one block: its floor must hold.
+    // The fall onto the new feet cell is at most one block: its floor must hold.
     if !blocks::is_solid(floor_state) || blocks::is_hazard(floor_state) {
         return StairStep::Refuse(Refusal::UnsafeDrop);
     }
 
+    // Top-down: clearance, head room, and for a stair the new feet cell. Three
+    // cells at most, so a fixed array keeps the per-tick path allocation-free.
+    let mut cells = [feet; 3];
+    let mut count = 0;
+    for dy in (-drop..=1).rev() {
+        cells[count] = offset(feet, dx, dy, dz);
+        count += 1;
+    }
     let mut first_closed = None;
-    for (state, cell) in states.into_iter().zip(cells) {
-        let Some(state) = state else {
+    for &cell in &cells[..count] {
+        let Some(state) = lookup(cell) else {
             return StairStep::Refuse(Refusal::UnsafeDrop);
         };
         if blocks::fluid(state).is_some() {
@@ -208,7 +253,7 @@ fn facing(yaw: f32) -> Dir {
 }
 
 /// The four axes, the facing one first.
-fn axis_order(first: Dir) -> [Dir; 4] {
+pub(crate) fn axis_order(first: Dir) -> [Dir; 4] {
     let (dx, dz) = first;
     [(dx, dz), (-dz, dx), (-dx, -dz), (dz, -dx)]
 }
@@ -227,15 +272,79 @@ struct Target {
     waited: u32,
 }
 
+/// Where the digger goes next: the one thing `dig_down` and `branch_mine`
+/// differ in.
 #[derive(Debug)]
-pub(crate) struct DigDown {
+enum Route {
+    /// `dig_down`: one axis, always down, at most [`MAX_DEPTH`] below the
+    /// start. The axis is fixed once a step has been accepted.
+    Staircase(Option<Dir>),
+    /// `branch_mine`: down to the ore's height, then level legs.
+    Branch(Branch),
+}
+
+impl Route {
+    /// Which way the next step slopes from feet height `feet_y`.
+    fn slope(&self, feet_y: i32) -> Slope {
+        match self {
+            Self::Staircase(_) => Slope::Down,
+            Self::Branch(branch) => branch.slope(feet_y),
+        }
+    }
+
+    /// The lowest feet height a step may reach.
+    fn min_y(&self, start_y: i32) -> i32 {
+        match self {
+            Self::Staircase(_) => start_y - MAX_DEPTH,
+            Self::Branch(_) => i32::MIN,
+        }
+    }
+
+    /// The axes to try for the next step, best first.
+    fn candidates(&self, facing: Dir) -> Candidates {
+        match self {
+            Self::Staircase(Some(dir)) => Candidates::single(*dir),
+            Self::Staircase(None) => Candidates::from_axes(axis_order(facing), None),
+            Self::Branch(branch) => branch.candidates(facing),
+        }
+    }
+
+    /// A step along `dir` was accepted.
+    fn accept(&mut self, dir: Dir) {
+        match self {
+            Self::Staircase(fixed) => *fixed = Some(dir),
+            Self::Branch(branch) => branch.accept(dir),
+        }
+    }
+
+    /// The body is about to walk onto the new feet cell of a `slope` step.
+    fn walked(&mut self, slope: Slope) {
+        if let Self::Branch(branch) = self {
+            branch.walked(slope);
+        }
+    }
+
+    /// How many blocks a call that started at `start_y` may dig, and the
+    /// failure when it runs out.
+    fn dig_budget(&self, start_y: i32) -> (u32, &'static str) {
+        match self {
+            Self::Staircase(_) => (MAX_DUGS, "no_block"),
+            Self::Branch(branch) => (branch.dig_budget(start_y), "not_found"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Digger {
     /// The wanted block, as in `mine(block)`.
     wanted: String,
-    /// Feet height at the first tick; the depth cap counts from it.
+    /// Feet height at the first tick.
     start_y: Option<i32>,
-    /// The axis, once a step has been accepted.
-    dir: Option<Dir>,
+    route: Route,
     dug: u32,
+    /// Level steps walked since the last accepted dig, of the branch route.
+    /// Reset by every dig; see [`MAX_DRY_LEVEL_STEPS`].
+    dry_level_steps: u32,
     target: Option<Target>,
     /// The feet cell the body is walking onto, and the ticks spent.
     walking: Option<(BlockPos, u32)>,
@@ -246,13 +355,25 @@ pub(crate) struct DigDown {
     airborne: u32,
 }
 
-impl DigDown {
-    pub(crate) fn new(wanted: String) -> Self {
+impl Digger {
+    /// `dig_down(block)`.
+    pub(crate) fn dig_down(wanted: String) -> Self {
+        Self::new(wanted, Route::Staircase(None))
+    }
+
+    /// `branch_mine(block)`.
+    pub(crate) fn branch_mine(wanted: String) -> Self {
+        let branch = Branch::new(&wanted);
+        Self::new(wanted, Route::Branch(branch))
+    }
+
+    fn new(wanted: String, route: Route) -> Self {
         Self {
             wanted,
             start_y: None,
-            dir: None,
+            route,
             dug: 0,
+            dry_level_steps: 0,
             target: None,
             walking: None,
             hand: HandSelect::default(),
@@ -327,24 +448,26 @@ impl DigDown {
         let start_y = *self.start_y.get_or_insert(feet.y);
         let world = ctx.world;
         let lookup = |pos: BlockPos| world.block_state(pos);
-        let all = axis_order(facing(ctx.body.look().y_rot()));
-        let dirs: &[Dir] = match &self.dir {
-            Some(dir) => std::slice::from_ref(dir),
-            None => &all,
-        };
+        let slope = self.route.slope(feet.y);
+        let min_y = self.route.min_y(start_y);
+        let dirs = self.route.candidates(facing(ctx.body.look().y_rot()));
         let mut first_refusal = None;
-        for &dir in dirs {
-            let step = plan_step(feet, dir, start_y, &lookup);
+        for dir in dirs.iter().copied() {
+            let step = plan_step(feet, dir, slope, min_y, &lookup);
             if let StairStep::Refuse(refusal) = step {
                 first_refusal.get_or_insert(refusal);
                 continue;
             }
-            self.dir = Some(dir);
+            self.route.accept(dir);
             match step {
                 StairStep::Dig(cell) => {
-                    if self.dug >= MAX_DUGS {
-                        return (frame, None, Some(Outcome::Failed("no_block".into())));
+                    let (budget, exhausted) = self.route.dig_budget(start_y);
+                    if self.dug >= budget {
+                        return (frame, None, Some(Outcome::Failed(exhausted.into())));
                     }
+                    // A dig restarts the dry-step count: the route is making
+                    // progress through rock, not cycling through open cells.
+                    self.dry_level_steps = 0;
                     self.settle_waited = 0;
                     self.tool_waited = 0;
                     self.target = Some(Target {
@@ -363,6 +486,15 @@ impl DigDown {
                 }
                 StairStep::Walk(tread) => {
                     self.settle_waited = 0;
+                    self.route.walked(slope);
+                    // Only the branch route ever walks level (a staircase
+                    // always descends), so this cap leaves `dig_down` alone.
+                    if slope == Slope::Level {
+                        self.dry_level_steps += 1;
+                        if self.dry_level_steps >= MAX_DRY_LEVEL_STEPS {
+                            return (frame, None, Some(Outcome::Failed("stuck".into())));
+                        }
+                    }
                     self.walking = Some((tread, 0));
                 }
                 StairStep::Refuse(_) => unreachable!("refusals continue above"),
@@ -495,6 +627,8 @@ mod tests {
     }
 
     const EAST: Dir = (1, 0);
+    /// The lowest feet height of a `dig_down` that started at y=64.
+    const DOWN_FLOOR: i32 = 64 - MAX_DEPTH;
 
     /// Run the planner like the primitive does: dig every `Dig`, walk every
     /// `Walk`, stop on a refusal, or when `stop` holds for the feet cell.
@@ -510,7 +644,7 @@ mod tests {
             if stop(feet) {
                 return (feet, dug, None);
             }
-            let step = plan_step(feet, dir, start_y, &map.lookup());
+            let step = plan_step(feet, dir, Slope::Down, start_y - MAX_DEPTH, &map.lookup());
             match step {
                 StairStep::Dig(cell) => {
                     dug.push(cell);
@@ -554,7 +688,7 @@ mod tests {
     fn the_first_step_digs_three_cells_top_down() {
         let map = Map::flat(63, 59);
         let feet = BlockPos::new(0, 64, 0);
-        let step = plan_step(feet, EAST, 64, &map.lookup());
+        let step = plan_step(feet, EAST, Slope::Down, DOWN_FLOOR, &map.lookup());
         // Surface terrain: the clearance (y=65) and head (y=64) cells are air,
         // so the first dig is the dirt at the new feet cell.
         assert_eq!(step, StairStep::Dig(BlockPos::new(1, 63, 0)));
@@ -564,7 +698,13 @@ mod tests {
     fn water_next_to_a_cell_refuses_the_step() {
         let mut map = Map::flat(63, 59);
         map.set(BlockPos::new(1, 63, 1), BlockKind::Water);
-        let step = plan_step(BlockPos::new(0, 64, 0), EAST, 64, &map.lookup());
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Down,
+            DOWN_FLOOR,
+            &map.lookup(),
+        );
         assert_eq!(step, StairStep::Refuse(Refusal::Fluid));
     }
 
@@ -572,7 +712,13 @@ mod tests {
     fn water_above_the_stair_refuses_the_step() {
         let mut map = Map::flat(63, 59);
         map.set(BlockPos::new(1, 64, 0), BlockKind::Water);
-        let step = plan_step(BlockPos::new(0, 64, 0), EAST, 64, &map.lookup());
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Down,
+            DOWN_FLOOR,
+            &map.lookup(),
+        );
         assert_eq!(step, StairStep::Refuse(Refusal::Fluid), "a water cell");
     }
 
@@ -580,7 +726,13 @@ mod tests {
     fn lava_below_the_new_stair_refuses_the_step() {
         let mut map = Map::flat(63, 59);
         map.set(BlockPos::new(1, 62, 0), BlockKind::Lava);
-        let step = plan_step(BlockPos::new(0, 64, 0), EAST, 64, &map.lookup());
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Down,
+            DOWN_FLOOR,
+            &map.lookup(),
+        );
         assert_eq!(step, StairStep::Refuse(Refusal::Fluid), "lava is the floor");
     }
 
@@ -591,7 +743,13 @@ mod tests {
         for y in 61..=63 {
             map.set(BlockPos::new(1, y, 0), BlockKind::Air);
         }
-        let step = plan_step(BlockPos::new(0, 64, 0), EAST, 64, &map.lookup());
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Down,
+            DOWN_FLOOR,
+            &map.lookup(),
+        );
         assert_eq!(step, StairStep::Refuse(Refusal::UnsafeDrop));
     }
 
@@ -599,7 +757,13 @@ mod tests {
     fn an_unloaded_cell_is_an_unsafe_drop() {
         let map = Map::flat(63, 59);
         let lookup = |pos: BlockPos| (pos.x != 1).then(|| BlockState::from(map.kind(pos)));
-        let step = plan_step(BlockPos::new(0, 64, 0), EAST, 64, &lookup);
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Down,
+            DOWN_FLOOR,
+            &lookup,
+        );
         assert_eq!(step, StairStep::Refuse(Refusal::UnsafeDrop));
     }
 
@@ -607,7 +771,13 @@ mod tests {
     fn bedrock_cannot_be_dug() {
         let mut map = Map::flat(63, 59);
         map.set(BlockPos::new(1, 63, 0), BlockKind::Bedrock);
-        let step = plan_step(BlockPos::new(0, 64, 0), EAST, 64, &map.lookup());
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Down,
+            DOWN_FLOOR,
+            &map.lookup(),
+        );
         assert_eq!(step, StairStep::Refuse(Refusal::NoBlock));
     }
 
@@ -634,7 +804,7 @@ mod tests {
         // The top of the stair is dug first, so the sand above cannot fall
         // into a cell that is still closed below it.
         assert_eq!(
-            plan_step(feet, EAST, 64, &map.lookup()),
+            plan_step(feet, EAST, Slope::Down, DOWN_FLOOR, &map.lookup()),
             StairStep::Dig(BlockPos::new(1, 65, 0))
         );
         // After the sand at y=65 is dug, the one at y=66 drops into it: the
@@ -643,19 +813,147 @@ mod tests {
         map.set(BlockPos::new(1, 63, 0), BlockKind::Air);
         map.set(BlockPos::new(1, 64, 0), BlockKind::Air);
         // Everything is open but the sand still hangs over the column.
-        assert_eq!(plan_step(feet, EAST, 64, &map.lookup()), StairStep::Settle);
+        assert_eq!(
+            plan_step(feet, EAST, Slope::Down, DOWN_FLOOR, &map.lookup()),
+            StairStep::Settle
+        );
         map.set(BlockPos::new(1, 66, 0), BlockKind::Air);
         map.set(BlockPos::new(1, 65, 0), BlockKind::Sand);
         assert_eq!(
-            plan_step(feet, EAST, 64, &map.lookup()),
+            plan_step(feet, EAST, Slope::Down, DOWN_FLOOR, &map.lookup()),
             StairStep::Dig(BlockPos::new(1, 65, 0)),
             "the refill is dug again"
         );
         map.set(BlockPos::new(1, 65, 0), BlockKind::Air);
         assert_eq!(
-            plan_step(feet, EAST, 64, &map.lookup()),
+            plan_step(feet, EAST, Slope::Down, DOWN_FLOOR, &map.lookup()),
             StairStep::Walk(BlockPos::new(1, 63, 0))
         );
+    }
+
+    /// Stone from y=63 down with a one-wide, two-high tunnel along +x at y=64
+    /// and y=65 (feet y=64) from x=1 to `end`.
+    fn tunnel_map(end: i32) -> Map {
+        let mut map = Map::flat(70, 70);
+        for x in 1..=end {
+            map.set(BlockPos::new(x, 64, 0), BlockKind::Air);
+            map.set(BlockPos::new(x, 65, 0), BlockKind::Air);
+        }
+        map
+    }
+
+    fn level(map: &Map, feet: BlockPos) -> StairStep {
+        plan_step(feet, EAST, Slope::Level, i32::MIN, &map.lookup())
+    }
+
+    #[test]
+    fn a_level_step_digs_the_head_cell_then_the_feet_cell() {
+        let map = Map::flat(70, 70);
+        let feet = BlockPos::new(0, 64, 0);
+        assert_eq!(
+            level(&map, feet),
+            StairStep::Dig(BlockPos::new(1, 65, 0)),
+            "top-down: head first"
+        );
+        let mut map = map;
+        map.set(BlockPos::new(1, 65, 0), BlockKind::Air);
+        assert_eq!(level(&map, feet), StairStep::Dig(BlockPos::new(1, 64, 0)));
+        map.set(BlockPos::new(1, 64, 0), BlockKind::Air);
+        assert_eq!(level(&map, feet), StairStep::Walk(BlockPos::new(1, 64, 0)));
+    }
+
+    #[test]
+    fn a_level_step_never_digs_the_floor() {
+        let mut map = Map::flat(70, 70);
+        let feet = BlockPos::new(0, 64, 0);
+        let mut dug = Vec::new();
+        for _ in 0..4 {
+            match level(&map, feet) {
+                StairStep::Dig(cell) => {
+                    dug.push(cell);
+                    map.set(cell, BlockKind::Air);
+                }
+                StairStep::Walk(_) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(dug.len(), 2, "only head room and the feet cell");
+        assert!(dug.iter().all(|cell| cell.y >= 64));
+    }
+
+    #[test]
+    fn an_open_tunnel_is_walked_without_digging() {
+        let map = tunnel_map(3);
+        assert_eq!(
+            level(&map, BlockPos::new(0, 64, 0)),
+            StairStep::Walk(BlockPos::new(1, 64, 0))
+        );
+        assert_eq!(
+            level(&map, BlockPos::new(2, 64, 0)),
+            StairStep::Walk(BlockPos::new(3, 64, 0))
+        );
+    }
+
+    #[test]
+    fn a_level_step_needs_a_solid_floor() {
+        let mut map = tunnel_map(1);
+        // A hole under the next tread: a pit, not a floor.
+        map.set(BlockPos::new(2, 64, 0), BlockKind::Air);
+        map.set(BlockPos::new(2, 65, 0), BlockKind::Air);
+        map.set(BlockPos::new(2, 63, 0), BlockKind::Air);
+        assert_eq!(
+            level(&map, BlockPos::new(1, 64, 0)),
+            StairStep::Refuse(Refusal::UnsafeDrop)
+        );
+    }
+
+    #[test]
+    fn a_level_step_refuses_fluid() {
+        let feet = BlockPos::new(0, 64, 0);
+        // Lava is the floor.
+        let mut map = Map::flat(70, 70);
+        map.set(BlockPos::new(1, 63, 0), BlockKind::Lava);
+        assert_eq!(level(&map, feet), StairStep::Refuse(Refusal::Fluid));
+        // Water sits beside the feet cell and would flood it once dug.
+        let mut map = Map::flat(70, 70);
+        map.set(BlockPos::new(1, 64, 1), BlockKind::Water);
+        assert_eq!(level(&map, feet), StairStep::Refuse(Refusal::Fluid));
+        // Water above the head cell.
+        let mut map = Map::flat(70, 70);
+        map.set(BlockPos::new(1, 66, 0), BlockKind::Water);
+        assert_eq!(level(&map, feet), StairStep::Refuse(Refusal::Fluid));
+    }
+
+    #[test]
+    fn a_level_step_into_bedrock_is_refused() {
+        let mut map = Map::flat(70, 70);
+        map.set(BlockPos::new(1, 64, 0), BlockKind::Bedrock);
+        assert_eq!(
+            level(&map, BlockPos::new(0, 64, 0)),
+            StairStep::Refuse(Refusal::NoBlock)
+        );
+    }
+
+    #[test]
+    fn gravel_over_a_level_step_is_waited_for() {
+        let mut map = tunnel_map(1);
+        map.set(BlockPos::new(2, 64, 0), BlockKind::Air);
+        map.set(BlockPos::new(2, 65, 0), BlockKind::Air);
+        map.set(BlockPos::new(2, 66, 0), BlockKind::Gravel);
+        assert_eq!(level(&map, BlockPos::new(1, 64, 0)), StairStep::Settle);
+    }
+
+    #[test]
+    fn the_floor_height_bounds_a_step() {
+        let map = Map::flat(70, 70);
+        let step = plan_step(
+            BlockPos::new(0, 64, 0),
+            EAST,
+            Slope::Level,
+            65,
+            &map.lookup(),
+        );
+        assert_eq!(step, StairStep::Refuse(Refusal::TooDeep));
     }
 
     #[test]

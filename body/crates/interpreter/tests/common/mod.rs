@@ -8,8 +8,10 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::PathBuf;
 
-use praxion_rules::{ArgValue, FactCall, Program};
+use praxion_rules::{ArgValue, CORE_COMPOSITION_DEPTH, FactCall, Program, load_files_with_depth};
 
 use super::{Actuator, Decision, Facts, IntValue, Outcome, StartAction, Truth};
 
@@ -148,4 +150,24 @@ pub fn wait_ticks(decision: &Decision) -> i64 {
         }
         other => panic!("expected a wait run, got {other:?}"),
     }
+}
+
+/// The core skills as shipped in `body/skills`.
+pub fn core_program() -> Program {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+    let files: Vec<(String, String)> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "skill"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    load_files_with_depth(&files, CORE_COMPOSITION_DEPTH).unwrap_or_else(|errors| {
+        panic!(
+            "{:?}",
+            errors.iter().map(ToString::to_string).collect::<Vec<_>>()
+        )
+    })
 }

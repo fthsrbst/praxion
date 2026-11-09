@@ -2,38 +2,14 @@
 //! a staircase when exploring finds none, mine once stone is near. The skill
 //! files are loaded as shipped, so a change to them is covered here.
 
-use std::fs;
-use std::path::PathBuf;
-
 // `common` reaches these through `super`.
 #[allow(unused_imports)]
 use praxion_interpreter::{
     Actuator, Decision, Facts, IntValue, Interpreter, Outcome, StartAction, Truth,
 };
-use praxion_rules::{CORE_COMPOSITION_DEPTH, Program, load_files_with_depth};
-
 mod common;
 
-use common::Mock;
-
-fn core_program() -> Program {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills");
-    let files: Vec<(String, String)> = fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|e| e == "skill"))
-        .map(|path| {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            (name, fs::read_to_string(&path).unwrap())
-        })
-        .collect();
-    load_files_with_depth(&files, CORE_COMPOSITION_DEPTH).unwrap_or_else(|errors| {
-        panic!(
-            "{:?}",
-            errors.iter().map(ToString::to_string).collect::<Vec<_>>()
-        )
-    })
-}
+use common::{Mock, core_program};
 
 #[test]
 fn explore_fails_into_a_dig_without_oscillating_or_failing_the_skill() {
