@@ -356,10 +356,12 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Atomic,
-            // Walk to the table (up to 80 ticks, decision 2026-11-09), open it
-            // (40), place the clicks, wait for the result (80) and take it
-            // (140); the primitive owns those waits.
-            default_max_ticks: 400,
+            // Clear the 2x2 grid (<= 21), walk to the table (<= 80, decision
+            // 2026-11-09) and open it (<= 60), wait for the content (40), place
+            // up to 27 clicks two ticks apart (54), wait for the result (80)
+            // and take it (140): about 480 in the worst case, which the
+            // primitive owns.
+            default_max_ticks: 500,
             effects: craft_summary(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::InventoryDelta,

@@ -2,9 +2,6 @@
   "body/crates/facts/src/lib.rs": {
     "block_state": 1
   },
-  "body/crates/primitives/src/craft.rs": {
-    "block_state": 1
-  },
   "body/crates/primitives/src/dig_down.rs": {
     "block_state": 3
   },
@@ -23,5 +20,8 @@
   },
   "body/crates/primitives/src/small.rs": {
     "entity": 1
+  },
+  "body/crates/primitives/src/station.rs": {
+    "block_state": 1
   }
 }

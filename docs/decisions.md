@@ -23,7 +23,7 @@ All four approved by the user (macOS session), each the recommended option; desi
 - **`craft` walks to the station it was promised (user).** `near(crafting_table, 4)` stays a cheap rayless fact. A
   shared `Station` helper (used by `craft` and `smelt`) resolves the block within 5 of the eye, walks in a straight
   line until the eye is within reach and the pick hits the cell (at most 80 ticks, then `needs_table` /
-  `needs_furnace`), then sends the Use clicks. `craft`'s flight budget goes from 300 to 400 ticks. Reason: autonomous
+  `needs_furnace`), then sends the Use clicks. `craft`'s flight budget goes from 300 to 500 ticks (the review summed the worst case to about 480: grid clear, walk, open, content, 27 clicks, result, take). Reason: autonomous
   run 2 (seed 202) fired craft on `near` true and failed `needs_table`; same lesson as the wet-stone fix (the fact stays
   cheap, the primitive delivers what it promised). Rules out for now: a planner-based approach (upgrade only if live
   runs show tables behind walls), a reach check inside `near`.

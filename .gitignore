@@ -41,3 +41,7 @@ spikes/round0/*.log
 # Python caches
 __pycache__/
 .pytest_cache/
+
+# Python virtual environments (machine-local)
+.venv/
+*.egg-info/
