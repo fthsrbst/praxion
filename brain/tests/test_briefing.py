@@ -215,3 +215,13 @@ def test_the_background_writing_line_names_the_skill() -> None:
     )
     assert "skill being written: get_furnace" in capped
     assert estimate_tokens(capped) <= 120
+
+
+def test_the_needs_line_is_its_own_section_before_the_budget() -> None:
+    line = "furnace: 0 of 1; needs cobblestone 8 (have 96) -> covered"
+    text = build(SNAPSHOT, LADDER, RECENT, CATALOG, LEDGER, now=1041.0, needs=line)
+    lines = text.splitlines()
+    header = lines.index("## Needs  [recipes + inventory]")
+    assert lines[header + 1] == line
+    assert lines[header + 2].startswith("## Budget"), lines[header + 2]
+    assert "## Needs" not in build(SNAPSHOT, LADDER, RECENT, CATALOG, LEDGER, now=1041.0)

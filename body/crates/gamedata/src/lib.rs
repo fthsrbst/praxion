@@ -20,6 +20,10 @@ include!(concat!(env!("OUT_DIR"), "/loot.rs"));
 include!(concat!(env!("OUT_DIR"), "/tags.rs"));
 include!(concat!(env!("OUT_DIR"), "/recipes.rs"));
 include!(concat!(env!("OUT_DIR"), "/smelting.rs"));
+include!(concat!(env!("OUT_DIR"), "/meta.rs"));
+
+mod export;
+pub use export::export_json;
 
 /// One possible item drop from a loot table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

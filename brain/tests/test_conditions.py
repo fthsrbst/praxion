@@ -9,6 +9,7 @@ from praxion_brain.conditions import (
     evaluate,
     is_verifiable,
     item_of_condition,
+    items_of_condition,
     parse,
 )
 
@@ -135,6 +136,24 @@ def test_minecraft_tag_namespace_is_normalized() -> None:
     assert evaluate("has(#minecraft:logs)", INVENTORY) is True
     assert is_verifiable("count(#minecraft:logs) >= 1") is True
     assert item_of_condition("count(#minecraft:logs) >= 1") == "#logs"
+
+
+def test_items_of_a_compound_condition_are_listed_in_text_order() -> None:
+    assert items_of_condition(
+        "count(#minecraft:logs) >= 4 and count(stick) >= 12"
+    ) == ["#logs", "stick"]
+    assert items_of_condition("has(furnace)") == ["furnace"]
+    assert items_of_condition("has(a) and (not has(b) or count(c) >= 3)") == [
+        "a",
+        "b",
+        "c",
+    ]
+    # Repeated names appear once; a bare name or a string names no item.
+    assert items_of_condition("has(oak_log) and has(oak_log)") == ["oak_log"]
+    assert items_of_condition("near(oak_log, 4)") == []
+    assert items_of_condition('has("oak_log")') == []
+    with pytest.raises(ConditionError):
+        items_of_condition("has(x) and")
 
 
 def test_identifiers_match_the_body_lexer() -> None:

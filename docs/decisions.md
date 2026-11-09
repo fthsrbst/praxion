@@ -25,6 +25,17 @@ All four approved by the user (macOS session), each the recommended option; desi
   - **Persona:** the user writes `local/persona/active.toml`; code only appends what it built to a separate history.
   Technical picks taken as the drafts recommended unless a critique corrected them; each lands with its own entry.
 
+- **Smarter play slice 1: the need gate and the `nothing_to_do` wait (design A5/A6, implemented 2026-11-09).** A proposal
+  is judged against the next ladder rung from the recipe export (`local/gamedata/26.3.json`): gathering an input the rung
+  already covers, repeating one of the last two items while it is covered, and (with the drift brake on) proposing
+  anything that does not serve the rung are the typed rejections `not_needed`/`repeat_item`. A typed rejection ends the
+  pick at once, without a second paid proposal or an escalation. While a covered rung's skill is being written the pick
+  ends as one visible `nothing_to_do` with a bounded, doubling back-off (600 -> 2400 ticks, lifted by an admitted skill or
+  a changed world); the drift brake measures from a fresh snapshot, not the settle-time ladder reading (design §7). Reason:
+  run 6 played eighteen cobblestone/log goals (10,389 ticks) while `get_furnace` was being written. Rules out: a second
+  model call after a code rejection, and unbounded re-picking while waiting. Open: the waiting window also refuses
+  survival proposals (night, mobs) until the survival slice adds a health/food exemption (`backlog.md`).
+
 - **`smelt(item)` cooks one item per call (user).** `item` is the output, as in `craft(item)`. The body reaches a
   `furnace` known within 4 (same walk as craft, below), loads one input and one fuel with the craft click triple
   (no shift-click: Azalea predicts a shift-clicked fuel into the input slot), waits for the output slot (cook time +

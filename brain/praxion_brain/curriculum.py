@@ -9,10 +9,22 @@ proposal's order:
 4. the goal is not blocked by failure memory and is not the same as the last
    goal;
 5. a simple ``has(X)`` / ``count(X) OP n`` shape implies the skill name
-   ``get_<X>``; other shapes get no name and the writer picks one.
+   ``get_<X>``; other shapes get no name and the writer picks one;
+6. ``not_needed``: the goal gathers an input the next rung already holds enough
+   of (or, with the drift brake on, does not serve the next rung);
+7. ``repeat_item``: the item of either of the last two goals again while the
+   next rung is covered.
 
-Check 2 (items exist in game data) is deliberately skipped for now: no game-data
-reader exists in the brain, and unknown items simply count as zero.
+Checks 6 and 7 need the game data export (:mod:`praxion_brain.needs`); without
+a ``gate`` they are skipped and the verdict is today's. They are typed
+rejections: the loop does not pay for another proposal after one (critique
+finding 1 of ``logs/mac1109/design/smarter.crit.out.md``). A typed verdict also
+wins over check 3 (``already_met``): stocking a covered input is the same waste
+whether or not the condition already holds, and only the typed reason ends the
+pick.
+
+Check 2 (items exist in game data) stays skipped: unknown items simply count as
+zero.
 
 The LLM proposal call itself is not here.
 
@@ -35,6 +47,7 @@ from .conditions import (
 )
 from .goal import Goal
 from .memory import normalize_condition
+from .needs import Gate, check as check_needs
 
 _SKILL_ITEM = re.compile(r"[A-Za-z0-9_]+")
 
@@ -81,16 +94,37 @@ def validate(
     inventory: Mapping[str, int],
     memory: Any,
     last: Any = None,
+    gate: Optional[Gate] = None,
 ) -> Validation:
-    """Run checks 1, 3, 4 and 5 from section 4.2."""
+    """Run checks 1, 3, 4 and 5 from section 4.2, and 6 and 7 with ``gate``.
+
+    Checks 6 and 7 are asked early too, so their typed verdict can replace
+    check 3's untyped ``already_met``.
+    """
     try:
         met = evaluate(proposal.condition, inventory)
         verifiable = is_verifiable(proposal.condition)
     except ConditionError as error:
         return Validation(ok=False, reason="malformed_condition", detail=str(error))
 
+    # Checks 6 and 7: the next rung's needs (typed rejections, no model call is
+    # paid for another try). Computed once here because their verdict also wins
+    # over check 3: a stock goal whose condition is already true is the same
+    # waste, and a typed rejection ends the pick while ``already_met`` pays for
+    # another proposal (review finding 5).
+    rejection = check_needs(gate, proposal.condition) if gate is not None else None
+
     # Check 3: a condition already true needs no goal.
     if met is True:
+        if rejection is not None:
+            return Validation(
+                ok=False,
+                reason=rejection.reason,
+                detail=rejection.detail,
+                skill_name=None,
+                unverifiable=not verifiable,
+                met=True,
+            )
         return Validation(
             ok=False,
             reason="already_met",
@@ -114,6 +148,17 @@ def validate(
         return Validation(
             ok=False,
             reason="same_as_last",
+            skill_name=None,
+            unverifiable=not verifiable,
+            met=met,
+        )
+
+    # Checks 6 and 7 (computed above): the next rung's needs.
+    if rejection is not None:
+        return Validation(
+            ok=False,
+            reason=rejection.reason,
+            detail=rejection.detail,
             skill_name=None,
             unverifiable=not verifiable,
             met=met,
@@ -151,4 +196,7 @@ def goal_of(proposal: GoalProposal, validation: Optional[Validation] = None) -> 
     )
 
 
-__all__ = ["GoalProposal", "Validation", "goal_of", "validate"]
+TYPED_REJECTIONS = frozenset({"not_needed", "repeat_item"})
+"""Reasons the loop ends the pick on instead of asking the model again."""
+
+__all__ = ["GoalProposal", "TYPED_REJECTIONS", "Validation", "goal_of", "validate"]

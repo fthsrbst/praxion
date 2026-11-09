@@ -108,8 +108,10 @@ class GoalRecords:
         *,
         inventory: Callable[[], dict[str, int]],
         on_finished: Optional[Callable[[GoalRecord], None]] = None,
+        on_drift: Optional[Callable[[GoalRecord, int], None]] = None,
     ) -> None:
         self.memory = memory
+        self._on_drift = on_drift
         self.evidence = evidence
         self._inventory = inventory
         self._on_finished = on_finished
@@ -197,7 +199,14 @@ class GoalRecords:
                 )
             )
         progress = ladder_progress(self._inventory())
-        self.memory.note_rung_progress(progress.met, stored.goal_id)
+        # Five goals without a new rung: tell the owner, which brakes the pick.
+        # ``progress.met`` is the settle-time reading; the design (§7) saw it lag
+        # the world, so the owner logs it and measures the brake from a fresh
+        # snapshot of its own rather than trusting this number.
+        if self.memory.note_rung_progress(progress.met, stored.goal_id) and (
+            self._on_drift is not None
+        ):
+            self._on_drift(stored, progress.met)
         self.evidence.write(
             "goal_finished",
             goal_id=stored.goal_id,

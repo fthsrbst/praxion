@@ -5,6 +5,9 @@ from pydantic import ValidationError
 
 from praxion_brain.curriculum import GoalProposal, goal_of, validate
 from praxion_brain.memory import GoalRecord, Memory
+from praxion_brain.needs import Gate, rung_need as rung_need_of
+
+from gamedata_fixture import gamedata
 
 
 class FakeClock:
@@ -89,6 +92,33 @@ def test_already_met_is_rejected(tmp_path) -> None:
     assert result.ok is False
     assert result.reason == "already_met"
     assert result.met is True
+
+
+def test_an_already_met_stock_goal_is_a_typed_rejection(tmp_path) -> None:
+    """Finding 5: holding 96 while the rung needs 8 must not buy another call.
+
+    ``already_met`` is untyped, so the loop asks the model again; the same
+    situation as a typed ``not_needed`` is the same waste.
+    """
+    inventory = {"cobblestone": 96, "dirt": 24}
+    data = gamedata()
+    gate = Gate(
+        data=data,
+        need=rung_need_of("furnace", "has(furnace)", inventory, data),
+    )
+    memory = Memory("w", root=tmp_path, clock=FakeClock())
+    result = validate(
+        proposal("count(cobblestone) >= 64"), inventory, memory, None, gate=gate
+    )
+    assert result.ok is False
+    assert result.reason == "not_needed"
+    assert result.met is True
+    # Without the export the verdict stays today's: check 3 owns it.
+    untyped = validate(proposal("count(cobblestone) >= 64"), inventory, memory, None)
+    assert untyped.reason == "already_met"
+    # An already met goal that is not stock keeps its own reason.
+    met = validate(proposal("count(dirt) >= 10"), inventory, memory, None, gate=gate)
+    assert met.reason == "already_met"
 
 
 def test_malformed_condition_is_rejected_with_the_parser_error(tmp_path) -> None:

@@ -806,3 +806,26 @@ def test_loop_publishes_a_state_the_console_can_read(tmp_path) -> None:
             json.dumps(state)  # the server must be able to serialise it
         finally:
             loop.close()
+
+
+def test_metrics_report_useful_ticks_and_stock_goals(server, console) -> None:
+    memory = console.memory
+    goals = (
+        ("g-0001", "has(stone_sword)", "done", 400, 6),
+        ("g-0002", "count(cobblestone) >= 24", "done", 300, 6),
+        ("g-0003", "count(#logs) >= 8", "done", 300, 6),
+        ("g-0004", "has(furnace)", "failed", 100, 6),
+        ("g-0005", "has(furnace)", "done", 200, 7),
+    )
+    for goal_id, condition, status, ticks, met in goals:
+        memory.append_goal(
+            GoalRecord(goal_id=goal_id, text="t", condition=condition, status=status, ticks=ticks)
+        )
+        console.evidence.write(
+            "goal_finished", goal_id=goal_id, status=status, ticks=ticks, rungs_met=met
+        )
+    _, found = call(server, "GET", "/api/metrics")
+    # g-0001 set the first high (6) and g-0005 the next (7); the failed furnace
+    # attempt and the two gathers moved nothing.
+    assert found["useful_goal_ticks"] == {"useful": 600, "total": 1300, "ratio": 0.462}
+    assert found["stock_goals"] == 2

@@ -20,7 +20,7 @@ use praxion_rules::{
     check_candidates, freeze_with_depth, parse,
 };
 
-pub use cli::{Args, BlueprintCheckArgs, CheckArgs, resolve_goal_args};
+pub use cli::{Args, BlueprintCheckArgs, CheckArgs, ExportArgs, resolve_goal_args};
 pub use driver::{BodyDriver, BodyOptions};
 pub use praxion_eventlog::Versions;
 

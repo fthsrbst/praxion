@@ -49,6 +49,7 @@ Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` sections 3.1-3.7.
 from __future__ import annotations
 
 import time
+from collections import deque
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional
 
@@ -61,16 +62,17 @@ from .admission import (
 from .admission_job import AdmissionJob
 from .briefing import build as build_briefing
 from .cancel import CancelToken
-from .conditions import ConditionError, count_of_condition
+from .conditions import ConditionError, count_of_condition, item_of_condition
 from .console.hub import Console
 from .briefing import heartbeat_change
-from .curriculum import GoalProposal, Validation, goal_of, validate
+from .curriculum import TYPED_REJECTIONS, GoalProposal, Validation, goal_of, validate
 from .evidence import Evidence
 from .goal import Goal
 from .governor import CallTimeout, Governor
-from .ladder import code_only_goal, progress as ladder_progress
+from .ladder import RUNGS, code_only_goal, first_unmet, progress as ladder_progress
 from .ledger import Ledger, estimate_cost
 from .memory import GoalRecord, Memory, normalize_condition
+from .needs import Gamedata, Gate, need_line, rung_need
 from .port import EventMessage, PortClient, PortError, Snapshot
 from .proposer import DEFAULT_MODEL, estimate as propose_estimate, propose
 from .records import GoalRecords, OpenGoal, PendingGoal, settled_status
@@ -96,6 +98,13 @@ FAILURE_GAP_TICKS = 100
 FAILURE_STREAK_GAP_TICKS = 600
 #: Consecutive failed goals after which the longer gap applies.
 FAILURE_STREAK = 3
+#: Body ticks the pick waits after ending as ``nothing_to_do`` (30 s at 20 TPS).
+#: It doubles with each consecutive one up to :data:`NOTHING_TO_DO_MAX_GAP_TICKS`
+#: and is lifted at once by an admitted skill or a changed world (critique
+#: finding 12), so waiting is quiet but not deaf.
+NOTHING_TO_DO_GAP_TICKS = 600
+#: The longest back-off after repeated ``nothing_to_do`` picks (2 min).
+NOTHING_TO_DO_MAX_GAP_TICKS = 2400
 #: The console state is republished at most this often (seconds).
 PUBLISH_SECONDS = 0.25
 
@@ -126,6 +135,10 @@ class WakeCause(str, Enum):
 class Loop:
     """One autonomous brain loop against one body port."""
 
+    #: Whether the pick gap is a ``nothing_to_do`` back-off (a class default so
+    #: a partially built loop in a test reads False).
+    _nothing_gap = False
+
     def __init__(
         self,
         port: PortClient,
@@ -149,6 +162,7 @@ class Loop:
         max_proposals: int = MAX_PROPOSALS,
         writer_model: str = DEFAULT_MODEL,
         console: Console | None = None,
+        gamedata: Gamedata | None = None,
     ) -> None:
         self.world_id = world_id
         self.memory = memory
@@ -180,6 +194,17 @@ class Loop:
         self._pending: Optional[PendingGoal] = None
         self._open_goal: Optional[OpenGoal] = None
         self._last_proposal: Optional[GoalProposal] = None
+        #: Items of the last two accepted proposals, newest first (check 7).
+        self._recent_items: deque[str] = deque(maxlen=2)
+        #: The recipe export; ``None`` switches checks 6 and 7 and the brake off.
+        self.gamedata = gamedata
+        #: The drift brake: armed by the first five flat goals; only goals that
+        #: serve the next rung pass until a rung is met past its baseline.
+        self._brake_armed = False
+        self._brake_met: Optional[int] = None
+        #: Consecutive ``nothing_to_do`` picks, and whether the gap is theirs.
+        self._nothing_streak = 0
+        self._nothing_gap = False
         self._invalid_proposals = 0
         self._last_heartbeat = self._clock()
         self._heartbeat_facts: Optional[dict[str, Any]] = None
@@ -214,6 +239,7 @@ class Loop:
             self.evidence,
             inventory=self._inventory,
             on_finished=self._goal_finished,
+            on_drift=self._drift_brake,
         )
 
     # -- lifecycle ------------------------------------------------------ #
@@ -389,6 +415,9 @@ class Loop:
         self._blocked_goals = blocked_now
         if reasons:
             self.evidence.write("heartbeat_change", reasons=reasons, tick=tick)
+            if self._nothing_gap:
+                # The world moved: a waiting pick may find work now.
+                self._next_pick_tick = 0
             if self.state == LoopState.IDLE:
                 self._set_wake(WakeCause.HEARTBEAT)
         elif heartbeat_pending:
@@ -403,7 +432,7 @@ class Loop:
             keep=self._job_goal_ids(),
         )
         if recovery.adopted is not None:
-            self._last_proposal = recovery.adopted.proposal
+            self._remember_proposal(recovery.adopted.proposal)
             self._open_goal = recovery.adopted
             self._transition(LoopState.PLAYING, reason=f"recover:{cause.value}")
             return
@@ -541,6 +570,15 @@ class Loop:
 
     # -- state machine -------------------------------------------------- #
     def _advance(self) -> None:
+        if (
+            self.state == LoopState.IDLE
+            and self._wake is None
+            and self._nothing_gap
+            and not self._paused
+            and self._pick_ready()
+        ):
+            # The back-off after a nothing_to_do pick is over: look again.
+            self._set_wake(WakeCause.HEARTBEAT)
         if self.state == LoopState.IDLE and self._wake is not None:
             if self._paused:
                 return
@@ -550,6 +588,7 @@ class Loop:
                 return
             wake = self._wake
             self._wake = None
+            self._nothing_gap = False
             self._transition(LoopState.PICKING, reason=wake.value)
         elif self.state == LoopState.PICKING:
             self._pick()
@@ -588,6 +627,7 @@ class Loop:
         else:
             self._consecutive_failures = 0
             self._next_pick_tick = 0
+        self._nothing_streak = 0
         self._set_wake(
             WakeCause.GOAL_SETTLED if record.status == "done" else WakeCause.GOAL_FAILED
         )
@@ -642,7 +682,10 @@ class Loop:
             self._pick_code_only("governor_code_only")
             return
 
-        briefing = self._briefing()
+        gate = self._needs_gate(inventory)
+        briefing = self._briefing(
+            need_line(gate.need, inventory, gate.data) if gate is not None else None
+        )
         excluded = False
         for _ in range(max(1, self.max_proposals)):
             denied = self._gate("propose", propose_estimate(self._invalid_proposals))
@@ -654,7 +697,9 @@ class Loop:
                 self._pick_code_only(failure)
                 return
 
-            result = validate(proposal, inventory, self.memory, self._last_proposal)
+            result = validate(
+                proposal, inventory, self.memory, self._last_proposal, gate=gate
+            )
             if self._excluded_by_job(proposal):
                 # The skill being written is not ready: ask for another goal.
                 # Not counted invalid, so the repeat of the goal that started
@@ -667,6 +712,15 @@ class Loop:
                     validation_reason=result.reason,
                     writing=self._writing_skill(),
                 )
+                if gate is not None and gate.need is not None and gate.need.covered:
+                    # The rung's goal is the one being written and everything it
+                    # needs is held: another proposal can only be a stock goal.
+                    # Wait instead of paying for it (critique finding 1).
+                    self._end_pick_without_goal(
+                        "writing_covered",
+                        f"{gate.need.goal} is being written and its needs are covered",
+                    )
+                    return
                 continue
             self.evidence.write(
                 "proposal_result",
@@ -680,9 +734,21 @@ class Loop:
                     validation=result,
                     goal=goal_of(proposal, result),
                 )
-                self._last_proposal = proposal
+                self._remember_proposal(proposal)
                 self._invalid_proposals = 0
                 self._transition(LoopState.ROUTING, reason="proposal")
+                return
+
+            if result.reason in TYPED_REJECTIONS:
+                # A code-rejected proposal is a verdict about the world, not a
+                # model mistake: no re-ask, no escalation to the dearer model.
+                self._end_pick_without_goal(str(result.reason), result.detail)
+                return
+
+            if self._rung_goal_unplayable(gate, proposal, result):
+                # The next rung's own goal is refused and its needs are held:
+                # another proposal can only be stock (design A6 step 3).
+                self._end_pick_without_goal(str(result.reason), result.detail)
                 return
 
             self._invalid_proposals += 1
@@ -694,6 +760,156 @@ class Loop:
             )
 
         self._pick_code_only("proposals_excluded" if excluded else "proposals_invalid")
+
+    def _rung_goal_unplayable(
+        self, gate: Optional[Gate], proposal: GoalProposal, result: Validation
+    ) -> bool:
+        """Whether the code refused the next rung's own goal (design A6 step 3).
+
+        Failure memory blocks it, or it is the goal just played, and the rung's
+        needs are covered: the rung cannot be played now and every other goal is
+        stock, so the pick ends instead of buying a second proposal. When the
+        needs are *not* covered the model still has the missing input to name
+        (the ``## Needs`` line), so the pick goes on and counts the refusal.
+        """
+        if gate is None or gate.need is None or not gate.need.covered:
+            return False
+        if result.reason not in {"blocked", "same_as_last"}:
+            return False
+        try:
+            item = item_of_condition(proposal.condition)
+        except Exception:  # noqa: BLE001 - a compound condition names no item
+            return False
+        return item == gate.need.goal
+
+    def _remember_proposal(self, proposal: GoalProposal) -> None:
+        """The newest accepted proposal; its item joins the last-two list (check 7)."""
+        self._last_proposal = proposal
+        try:
+            item = item_of_condition(proposal.condition)
+        except Exception:  # noqa: BLE001 - a compound or odd condition names no item
+            item = None
+        if item is not None and (
+            not self._recent_items or self._recent_items[0] != item
+        ):
+            self._recent_items.appendleft(item)
+
+    def _drift_brake(self, record: GoalRecord, rungs_met: int) -> None:
+        """Five goals moved no rung: only goals that serve the next rung pass.
+
+        The brake lasts until a rung is met beyond the count it started from
+        (decision 2026-11-09 "Five next areas": drift is acted on, not just
+        logged). ``rungs_met`` comes from the settle-time inventory, which the
+        design (§7, "a stale ladder reading") saw report a count two rungs
+        behind; it is logged as the reading it is, never used as the baseline.
+        """
+        self._brake_armed = True
+        self._brake_met = None
+        self.evidence.write(
+            "drift_brake",
+            goal_id=record.goal_id,
+            rungs_met=rungs_met,
+        )
+
+    def _brake_active(self, inventory: dict[str, int]) -> bool:
+        """Whether the brake blocks this pick; it measures from a fresh read.
+
+        The baseline is the ladder count of the first pick after the brake went
+        on. ``_needs_gate`` calls this after ``_pick`` refreshed the snapshot, so
+        a stale settle-time count cannot release the brake before it ever bit.
+        """
+        if not self._brake_armed:
+            return False
+        met = ladder_progress(inventory).met
+        if self._brake_met is None:
+            self._brake_met = met
+            self.evidence.write("drift_brake_armed", rungs_met=met)
+            return True
+        if met > self._brake_met:
+            self.evidence.write(
+                "drift_brake_released", rungs_met=met, was=self._brake_met
+            )
+            self._brake_armed = False
+            self._brake_met = None
+            return False
+        return True
+
+    def _needs_gate(self, inventory: dict[str, int]) -> Optional[Gate]:
+        """Checks 6 and 7 for this pick; ``None`` without the recipe export.
+
+        Writes one ``needs_gate`` line per pick naming the mode the next rung
+        took (``recipe``, ``smelting``, ``inert`` or ``unknown``), so an inert
+        gate is visible rather than silent (critique finding 7).
+        """
+        if self.gamedata is None:
+            return None
+        rung = first_unmet(inventory)
+        need = (
+            rung_need(rung.id, rung.condition, inventory, self.gamedata)
+            if rung is not None
+            else None
+        )
+        brake = self._brake_active(inventory)
+        waiting = False
+        later: set[str] = set()
+        if rung is not None and need is not None:
+            # A covered rung whose own goal is being written cannot be played:
+            # the rest of the pick may only name a later rung's goal.
+            waiting = need.covered and self._excluded_by_job(
+                GoalProposal(text=rung.id, condition=rung.condition)
+            )
+            for later_rung in RUNGS[RUNGS.index(rung) + 1 :]:
+                item = item_of_condition(later_rung.condition)
+                if item is not None:
+                    later.add(item)
+        self.evidence.write(
+            "needs_gate",
+            rung=rung.id if rung is not None else None,
+            mode=need.mode if need is not None else None,
+            covered=need.covered if need is not None else None,
+            unmet=(
+                [row.model_dump() for row in need.plan.unmet]
+                if need is not None
+                else []
+            ),
+            brake=brake,
+            waiting=waiting,
+        )
+        return Gate(
+            data=self.gamedata,
+            need=need,
+            recent_items=tuple(self._recent_items),
+            brake=brake,
+            waiting=waiting,
+            later_items=frozenset(later),
+        )
+
+    def _end_pick_without_goal(self, reason: str, detail: Optional[str]) -> None:
+        """A code verdict ended the pick: play the rung's known skill, else wait.
+
+        This is the existing code-only path, so a skill that already serves the
+        next rung is still played. When it finds nothing, the pick ends as one
+        visible ``nothing_to_do`` and the next pick waits a bounded, doubling
+        gap (a skill admission or a changed world lifts it at once).
+        """
+        if self._pick_code_only(reason):
+            return
+        gap = min(
+            NOTHING_TO_DO_GAP_TICKS * (2**self._nothing_streak),
+            NOTHING_TO_DO_MAX_GAP_TICKS,
+        )
+        self._nothing_streak += 1
+        now = int(self.session.tick or 0)
+        self._next_pick_tick = now + gap
+        self._nothing_gap = True
+        self.evidence.write(
+            "nothing_to_do",
+            reason=reason,
+            detail=detail,
+            writing=self._writing_skill(),
+            gap_ticks=gap,
+            next_pick_tick=self._next_pick_tick,
+        )
 
     def _pick_written_goal(self, inventory: dict[str, int]) -> bool:
         """Play the goal whose skill the background admission just admitted."""
@@ -707,7 +923,7 @@ class Loop:
             pending.validation = result
             pending.goal = goal_of(pending.proposal, result)
             self._pending = pending
-            self._last_proposal = pending.proposal
+            self._remember_proposal(pending.proposal)
             self._invalid_proposals = 0
             self._play()
             return True
@@ -751,7 +967,7 @@ class Loop:
                     goal=goal_of(proposal, result),
                     origin="user",
                 )
-                self._last_proposal = proposal
+                self._remember_proposal(proposal)
                 self._transition(LoopState.ROUTING, reason="user_goal")
                 return True
         return False
@@ -829,7 +1045,7 @@ class Loop:
             self._transition(LoopState.IDLE, reason="code_only_blocked")
             return False
         validation = Validation(ok=True, skill_name=fallback.skill)
-        self._last_proposal = proposal
+        self._remember_proposal(proposal)
         self._pending = PendingGoal(
             proposal=proposal,
             validation=validation,
@@ -846,7 +1062,7 @@ class Loop:
         self._transition(LoopState.ROUTING, reason=f"code_only:{reason}")
         return True
 
-    def _briefing(self) -> str:
+    def _briefing(self, needs: Optional[str] = None) -> str:
         snapshot = self.session.snapshot or {"facts": {"inventory": {}}}
         failures = self.memory.failures()
         records = []
@@ -865,6 +1081,7 @@ class Loop:
             self.governor.budget_snapshot(),
             now=self._wall_clock(),
             writing=self._writing_skill(),
+            needs=needs,
         )
 
     # -- ROUTING -------------------------------------------------------- #
@@ -1081,6 +1298,8 @@ class Loop:
         pending.source = "written"
         pending.record = job.record
         self._written = pending
+        if self._nothing_gap:
+            self._next_pick_tick = 0
         self.evidence.write(
             "admission_admitted",
             goal_id=job.record.goal_id,
@@ -1565,6 +1784,8 @@ __all__ = [
     "HEARTBEAT_SECONDS",
     "MAX_PROPOSALS",
     "MAX_STEP_ERRORS",
+    "NOTHING_TO_DO_GAP_TICKS",
+    "NOTHING_TO_DO_MAX_GAP_TICKS",
     "Loop",
     "LoopState",
     "WakeCause",

@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import config
+from . import config, needs
 from .admission import admit
 from .console.hub import Console
 from .console.server import DEFAULT_PORT, ConsoleServer
@@ -106,6 +106,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
     world_id = args.world or "default"
     memory = Memory(world_id, evidence=evidence)
     catalog = load_catalog()
+    # The recipe export keeps the proposer from stocking what it already holds.
+    # Absent: today's behaviour. From another jar: a startup error (regenerate
+    # it with `praxion-body export-gamedata`).
+    gamedata = needs.load()
+    print(
+        "gamedata: "
+        + (f"jar {gamedata.jar_sha256[:12]}" if gamedata else "no export (need checks off)"),
+        flush=True,
+    )
     governor = Governor(ledger, evidence=evidence)
     port = PortClient(args.port, host=args.host)
     console = Console(evidence=evidence, ledger=ledger, memory=memory, world_id=world_id)
@@ -122,6 +131,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         evidence=evidence,
         governor=governor,
         console=console,
+        gamedata=gamedata,
     )
     print(
         f"loop: world {world_id}, port {args.host}:{args.port}, "
