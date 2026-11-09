@@ -152,6 +152,20 @@ const OFF_LEVEL_BELOW: i64 = 8;
 /// lies ahead.
 const ON_LEVEL_BELOW: i64 = 2;
 
+/// How far from the start a lookout may lie, horizontally, in blocks. Part of
+/// the decision "Explore may climb once per call for a view" (2026-11-09): the
+/// climb is a short detour, not a trek.
+pub(crate) const LOOKOUT_RADIUS: i32 = 20;
+
+/// The least a lookout must rise above the start feet, in blocks. Below this
+/// the view over the terrain does not change (decision 2026-11-09).
+pub(crate) const LOOKOUT_MIN_RISE: i32 = 3;
+
+/// The most a lookout may rise above the start feet, in blocks. Higher is a
+/// mountain, and explore does not climb a mountain looking for wood
+/// (decision 2026-11-09, `uphill` tier unchanged).
+pub(crate) const LOOKOUT_MAX_RISE: i32 = 12;
+
 /// A frontier cell of a scan with its quality tier (avoided, off level, wet,
 /// uphill) and its squared distance from the start.
 type ScanCell = (BlockPos, (bool, bool, bool, bool), i64);
@@ -162,6 +176,11 @@ type ScanCell = (BlockPos, (bool, bool, bool, bool), i64);
 pub(crate) struct FrontierScan {
     start: BlockPos,
     cells: Vec<ScanCell>,
+    /// Reachable, standable, dry cells inside the lookout window (see
+    /// [`LOOKOUT_RADIUS`], [`LOOKOUT_MIN_RISE`], [`LOOKOUT_MAX_RISE`]),
+    /// explored and rejected cells already dropped. Kept from the flood the
+    /// scan runs anyway, so [`FrontierScan::lookout`] reads no world.
+    lookouts: Vec<BlockPos>,
 }
 
 /// Scans the known walkable frontier cells reachable from `start`. `keep`
@@ -220,8 +239,21 @@ pub(crate) fn scan_frontiers(
     let explored_set: HashSet<BlockPos> = explored.iter().copied().collect();
     let rejected_set: HashSet<BlockPos> = rejected.iter().copied().collect();
     let mut cells = Vec::new();
+    let mut lookouts = Vec::new();
     for pos in &reachable {
         let pos = *pos;
+        if !explored_set.contains(&pos) && !rejected_set.contains(&pos) {
+            let rise = pos.y - start.y;
+            let dx = i64::from(pos.x) - i64::from(start.x);
+            let dz = i64::from(pos.z) - i64::from(start.z);
+            let radius = i64::from(LOOKOUT_RADIUS);
+            if (LOOKOUT_MIN_RISE..=LOOKOUT_MAX_RISE).contains(&rise)
+                && dx * dx + dz * dz <= radius * radius
+                && known(pos).is_some_and(|state| !praxion_planner::blocks::is_water(state))
+            {
+                lookouts.push(pos);
+            }
+        }
         // The cell the body stands in is never a frontier to walk to. Its head
         // or a side cell can stay unknown (the view scan skips the eye cell),
         // so it does touch the unknown map, and distance zero plus the best
@@ -274,7 +306,11 @@ pub(crate) fn scan_frontiers(
             dx * dx + dy * dy + dz * dz,
         ));
     }
-    FrontierScan { start, cells }
+    FrontierScan {
+        start,
+        cells,
+        lookouts,
+    }
 }
 
 impl FrontierScan {
@@ -319,6 +355,42 @@ impl FrontierScan {
         ranked.sort_by_key(|(key, _)| *key);
         ranked.truncate(MAX_CHOICES);
         ranked.into_iter().map(|(_, choice)| choice).collect()
+    }
+
+    /// Squared distance to the nearest cell of the best quality tier
+    /// (the tier `rank` puts first). `None` when the scan found no frontier.
+    pub(crate) fn nearest_best_distance_sq(&self) -> Option<i64> {
+        let best = self.cells.iter().map(|&(_, tier, _)| tier).min()?;
+        self.cells
+            .iter()
+            .filter(|&&(_, tier, _)| tier == best)
+            .map(|&(_, _, distance_sq)| distance_sq)
+            .min()
+    }
+
+    /// The viewpoint for one climb: the highest reachable standable dry cell
+    /// within [`LOOKOUT_RADIUS`] blocks horizontally that lies
+    /// [`LOOKOUT_MIN_RISE`] to [`LOOKOUT_MAX_RISE`] blocks above the start
+    /// feet; the nearest wins a tie in height, then the position. Explored and
+    /// rejected cells were dropped by the scan. `None` on flat ground or when
+    /// every rise is out of the window. Pure: it reads only the scan.
+    pub(crate) fn lookout(&self) -> Option<FrontierChoice> {
+        let candidates = u32::try_from(self.lookouts.len()).unwrap_or(u32::MAX);
+        self.lookouts
+            .iter()
+            .map(|&pos| {
+                let dx = i64::from(pos.x) - i64::from(self.start.x);
+                let dy = i64::from(pos.y) - i64::from(self.start.y);
+                let dz = i64::from(pos.z) - i64::from(self.start.z);
+                (pos, dx * dx + dy * dy + dz * dz)
+            })
+            .min_by_key(|&(pos, distance_sq)| (-pos.y, distance_sq, pos.x, pos.z))
+            .map(|(cell, score)| FrontierChoice {
+                cell,
+                score,
+                candidates,
+                tier: (false, false, false, true),
+            })
     }
 
     /// Forward progress of `pos` along `dir` less the lateral drift, in half
@@ -820,5 +892,130 @@ mod tests {
         let mut turns = sectors.clone();
         turns.dedup();
         assert_eq!(turns.len(), 1, "one heading held all the way: {sectors:?}");
+    }
+
+    /// Known terrain over a box: each column stands at `height(x, z)`, with
+    /// the platform's floor below, two air cells and a ceiling above.
+    fn terrain(
+        map: &mut HashMap<BlockPos, BlockState>,
+        x0: i32,
+        x1: i32,
+        z0: i32,
+        z1: i32,
+        height: impl Fn(i32, i32) -> i32,
+    ) {
+        for x in x0..=x1 {
+            for z in z0..=z1 {
+                platform(map, x, x, z, z, height(x, z));
+            }
+        }
+    }
+
+    /// A mound of stairs one block per ring, `rise` blocks above y = 64,
+    /// centred on `(cx, 0)`.
+    fn mound(cx: i32, rise: i32) -> impl Fn(i32, i32) -> i32 {
+        move |x, z| 64 + (rise - (x - cx).abs().max(z.abs())).clamp(0, rise)
+    }
+
+    #[test]
+    fn the_lookout_is_the_top_of_a_reachable_mound_within_the_window() {
+        let mut map = HashMap::new();
+        terrain(&mut map, -14, 20, -14, 14, mound(10, 6));
+        let scan = scan(&map, at(0, 64, 0), 32);
+        let lookout = scan.lookout().expect("a +6 mound ten blocks away");
+        assert_eq!(lookout.cell, at(10, 70, 0));
+        assert_eq!(lookout.tier, (false, false, false, true), "an uphill cell");
+    }
+
+    #[test]
+    fn flat_ground_has_no_lookout() {
+        let mut map = HashMap::new();
+        terrain(&mut map, -14, 14, -14, 14, |_, _| 64);
+        assert_eq!(scan(&map, at(0, 64, 0), 32).lookout(), None);
+        // A rise under the minimum is not worth the climb either.
+        let mut low = HashMap::new();
+        terrain(&mut low, -14, 20, -14, 14, mound(10, LOOKOUT_MIN_RISE - 1));
+        assert_eq!(scan(&low, at(0, 64, 0), 32).lookout(), None);
+    }
+
+    #[test]
+    fn a_mound_too_far_or_too_steep_to_reach_is_no_lookout() {
+        // 25 blocks away: past the lookout radius, though inside the scan.
+        let mut far = HashMap::new();
+        terrain(&mut far, -14, 30, -14, 14, mound(25, 6));
+        let far_scan = scan(&far, at(0, 64, 0), 32);
+        assert_eq!(far_scan.lookout(), None, "outside {LOOKOUT_RADIUS} blocks");
+        // The same mound is a lookout once it is inside the radius, so the
+        // refusal above is the distance and nothing else.
+        let mut near = HashMap::new();
+        terrain(&mut near, -14, 30, -14, 14, mound(20, 6));
+        assert!(scan(&near, at(0, 64, 0), 32).lookout().is_some());
+
+        // A sheer 15-block pillar cannot be climbed: one block up per move.
+        let mut pillar = HashMap::new();
+        terrain(&mut pillar, -14, 20, -14, 14, |x, z| {
+            if (x, z) == (10, 0) { 79 } else { 64 }
+        });
+        assert_eq!(scan(&pillar, at(0, 64, 0), 32).lookout(), None);
+    }
+
+    #[test]
+    fn a_tall_slope_gives_its_highest_cell_inside_the_rise_window() {
+        // A ramp climbing one block per column to +15. The window caps the
+        // climb at +12; it does not refuse the slope.
+        let mut map = HashMap::new();
+        terrain(&mut map, -3, 20, -3, 3, |x, _| 64 + x.clamp(0, 15));
+        let lookout = scan(&map, at(0, 64, 0), 32).lookout().expect("a slope");
+        assert_eq!(lookout.cell, at(LOOKOUT_MAX_RISE, 64 + LOOKOUT_MAX_RISE, 0));
+    }
+
+    #[test]
+    fn explored_and_rejected_cells_are_never_a_lookout() {
+        let mut map = HashMap::new();
+        terrain(&mut map, -14, 20, -14, 14, mound(10, 6));
+        let top = at(10, 70, 0);
+        let scan_with = |explored: &[BlockPos], rejected: &[BlockPos]| {
+            scan_frontiers(
+                at(0, 64, 0),
+                32,
+                12,
+                explored,
+                rejected,
+                known(&map),
+                true,
+                |_| true,
+            )
+            .lookout()
+            .expect("a lookout remains")
+        };
+        assert_eq!(scan_with(&[], &[]).cell, top);
+        let after_explored = scan_with(&[top], &[]);
+        assert_ne!(after_explored.cell, top);
+        assert_eq!(after_explored.cell.y, 69, "the next ring down");
+        assert_eq!(after_explored.cell, at(9, 69, 0), "the nearest of the ring");
+        let after_rejected = scan_with(&[], &[top]);
+        assert_eq!(after_rejected.cell, at(9, 69, 0));
+    }
+
+    #[test]
+    fn a_wet_cell_is_never_a_lookout() {
+        // A water-topped mound reachable only by swimming: dry cells only.
+        let mut map = HashMap::new();
+        terrain(&mut map, -14, 20, -14, 14, mound(10, 6));
+        map.insert(at(10, 70, 0), water());
+        let lookout = scan(&map, at(0, 64, 0), 32).lookout().expect("dry ring");
+        assert_ne!(lookout.cell, at(10, 70, 0));
+    }
+
+    #[test]
+    fn the_nearest_best_tier_frontier_distance_is_exposed() {
+        let mut map = HashMap::new();
+        platform(&mut map, -30, 30, -2, 2, 64);
+        let found = scan(&map, at(0, 64, 0), 32);
+        let nearest = found.rank(None)[0].score;
+        assert_eq!(found.nearest_best_distance_sq(), Some(nearest));
+        // An empty map has no frontier at all.
+        let empty = scan(&HashMap::new(), at(0, 64, 0), 8);
+        assert_eq!(empty.nearest_best_distance_sq(), None);
     }
 }
