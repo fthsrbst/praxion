@@ -447,7 +447,7 @@ fn check_tag(
 /// `entity_kind`, and slip past the hand-written callers (review finding 4).
 fn check_huntable(name: &str, skill: &Skill, span: Span) -> Result<(), Error> {
     let name = praxion_gamedata::normalize(name);
-    if praxion_gamedata::entity_drops(name).is_some() {
+    if praxion_gamedata::huntable(name) {
         Ok(())
     } else {
         Err(err(

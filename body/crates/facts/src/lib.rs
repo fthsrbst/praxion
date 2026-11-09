@@ -96,6 +96,12 @@ pub fn bool_fact(perception: &mut Perception, world: &World, call: &FactCall) ->
             Some(day_time) => truth(is_night(*day_time)),
             None => Truth::Unknown(call.clone()),
         },
+        // Static allowlist, no perception needed: `hunt` asks it before it
+        // walks to a mob (decision 2026-11-09 "Five next areas").
+        "huntable" => match first_name(call) {
+            Some(kind) => truth(praxion_gamedata::huntable(kind)),
+            None => Truth::Unknown(call.clone()),
+        },
         _ => Truth::Unknown(call.clone()),
     }
 }

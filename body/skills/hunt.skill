@@ -11,7 +11,10 @@
 # beats approach, so a mob within reach is hit before anything else; approach
 # beats pickup, so a drop on the ground cannot pull the body out of a fight;
 # pickup beats the end, so the meat is collected once nothing is left to hit.
-# The last rule ends the call. `near_entity` answers unknown when no mob of the
+# The first rule is the allowlist (`huntable`): a creeper, an Enderman or any
+# other kind not listed in gamedata fails `not_huntable` before the body moves,
+# so a skill that calls hunt cannot send the body after them; `attack` refuses
+# them too. The last rule ends the call. `near_entity` answers unknown when no mob of the
 # kind is in sight (never false), and an unknown guard never fires, so with no
 # mob and no drop the rules above stay silent and `true` ends the hunt; the
 # caller decides whether to look for another mob.
@@ -32,6 +35,7 @@
 skill hunt(mob: entity_kind, drop: item)
   doc "Approach and kill one mob in sight, then pick up its drop; ends when no mob or drop is in sight; fails health_low at eight health or less."
   rules:
+    not huntable($mob) -> fail(not_huntable)
     health() <= 8 -> fail(health_low)
     near_entity($mob, 3) -> attack($mob)
     near_entity($mob, 24) -> move_to($mob)

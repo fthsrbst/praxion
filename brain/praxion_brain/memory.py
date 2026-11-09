@@ -62,8 +62,10 @@ class GoalRecord(BaseModel):
     condition: str
     unverifiable: bool = False
     rung: Optional[str] = None
-    #: ``user`` for a goal given through the console.
-    origin: Optional[Literal["user"]] = None
+    #: ``user`` for a goal given through the console, ``survival`` for one the
+    #: loop started from the body facts (a survival goal keeps its exemption
+    #: from the interrupt check across a reconnect).
+    origin: Optional[Literal["user", "survival"]] = None
     status: Literal[
         "open", "done", "unverified", "interrupted", "failed", "blocked"
     ] = "open"

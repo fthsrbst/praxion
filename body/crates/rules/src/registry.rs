@@ -79,6 +79,12 @@ impl Facts {
             params: vec![ValueType::EntityKind, ValueType::Int],
             ret: ValueType::Bool,
         });
+        // The hunt allowlist: `not huntable($mob) -> fail(not_huntable)`.
+        facts.add(FactSig {
+            name: "huntable",
+            params: vec![ValueType::EntityKind],
+            ret: ValueType::Bool,
+        });
         // Own-state and clock facts (decision 2026-11-09 "Five next areas":
         // survival skills need hunger and night). The answers live in
         // `praxion_facts`; a skill writes them with parentheses, `food() <= 6`.

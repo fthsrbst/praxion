@@ -87,6 +87,7 @@ def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
         "food",
         "has",
         "health",
+        "huntable",
         "is_night",
         "near",
         "near_entity",

@@ -40,4 +40,5 @@ serde_json = "1.0"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }

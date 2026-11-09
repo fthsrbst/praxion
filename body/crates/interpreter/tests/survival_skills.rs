@@ -45,6 +45,9 @@ impl Facts for Scripted {
             Some(true) => Truth::True,
             Some(false) => Truth::False,
             None if call.name == "near_entity" => Truth::Unknown(call.clone()),
+            // The allowlist itself is pinned in praxion-facts and gamedata; here
+            // an unscripted `huntable` is the allowed case the tests play.
+            None if call.name == "huntable" => Truth::True,
             None => Truth::False,
         }
     }

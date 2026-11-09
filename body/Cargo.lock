@@ -2140,6 +2140,7 @@ dependencies = [
 name = "praxion-body"
 version = "0.0.0"
 dependencies = [
+ "azalea-protocol",
  "azalea-registry",
  "env_logger",
  "log",

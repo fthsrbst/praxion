@@ -313,7 +313,7 @@ impl Explore {
         // hunted (decision 2026-11-09 "Five next areas"). `explore(creeper)`
         // cannot be told from a block at load time, so it is refused when the
         // call starts (review finding 4).
-        if entity.is_some() && gamedata::entity_drops(gamedata::normalize(&target)).is_none() {
+        if entity.is_some() && !gamedata::huntable(&target) {
             return Err(format!(
                 "`{target}` is not hunted; explore may only seek mobs on the hunt allowlist"
             ));

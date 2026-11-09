@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use praxion_arbiter::{Arbiter, CommandError, FrameSource, IntentState, Needs, Owner};
+use praxion_arbiter::{Arbiter, CommandError, FrameSource, IntentState, Needs, Owner, Tier};
 use praxion_eventlog::{Event, EventKind, Outcome as ReceiptOutcome, Versions, Writer};
 use praxion_headless::{AppliedReport, Body, ControlFrame, Driver, Held, Look, TickView};
 use praxion_interpreter::{
@@ -68,6 +68,19 @@ pub const SNAPSHOT_INTERVAL_TICKS: u64 = 20;
 /// The default silence limit before the body notes `brain_silent` (proposal
 /// §2.5). A body option so a unit test need not wait three seconds.
 pub const DEFAULT_BRAIN_SILENCE: Duration = Duration::from_secs(3);
+
+/// Idle ticks at night after which the body hides on its own when the brain is
+/// silent or gone (5 s at 20 TPS). Architecture §5.4: the night fallback must
+/// not depend on the brain (decision 2026-11-09 "Five next areas").
+const NIGHT_FALLBACK_SILENT_TICKS: u32 = 100;
+
+/// Idle ticks at night after which the body hides even with a live brain that
+/// has sent no command (30 s): a brain that is thinking gets time to pick its
+/// own night goal, which then suspends the fallback like any command.
+const NIGHT_FALLBACK_TICKS: u32 = 600;
+
+/// The skill the night fallback runs; it ends at morning by its own rule.
+const NIGHT_FALLBACK_SKILL: &str = "night_watch";
 
 /// The synthetic root skill a condition is parsed and evaluated in, so the
 /// rules parser is the only guard language (no second evaluator).
@@ -177,6 +190,10 @@ pub struct BodyDriver {
     /// The last `rule_selected` written, so a steady rule costs no events.
     last_rule_logged: Option<(String, usize)>,
     desync_logged: bool,
+    /// Consecutive ticks the body was idle at night (no intent, no owner).
+    night_idle_ticks: u32,
+    /// Fallback goals the body started itself, for their command ids.
+    night_fallbacks: u64,
 }
 
 /// One primitive execution as the log sees it.
@@ -308,6 +325,8 @@ impl BodyDriver {
             outcome_delivered: false,
             last_rule_logged: None,
             desync_logged: false,
+            night_idle_ticks: 0,
+            night_fallbacks: 0,
         };
         let versions = driver.options.versions.clone();
         driver.record(0, now_ns(), EventKind::RunStarted { versions });
@@ -386,6 +405,76 @@ impl BodyDriver {
 
     /// One command from `pending` to `accepted`, `expired` or `rejected`.
     fn accept_command(&mut self, command: PortCommand, tick: u64, ts_ns: u64, world: &World) {
+        self.accept_command_in(Tier::Command, command, tick, ts_ns, world);
+    }
+
+    /// The night fallback (architecture §5.4): when nobody has asked the body to
+    /// do anything for a while at night, it pushes `night_watch` itself, at the
+    /// survival tier, through the same accept path as a brain command (one
+    /// goal-start path, proposal §2.6). A brain or user command that arrives
+    /// later suspends it like any running intent, so it yields and resumes
+    /// when that goal settles; at morning the skill ends by its own rule.
+    ///
+    /// Idle means no live intent and no owner: a body that is busy, eating or
+    /// running from a reflex is not idle. A CLI run has no port and keeps
+    /// exactly the goal it was given. With a silent or disconnected brain the
+    /// wait is [`NIGHT_FALLBACK_SILENT_TICKS`], else [`NIGHT_FALLBACK_TICKS`].
+    fn night_fallback(&mut self, tick: u64, ts_ns: u64, world: &World) {
+        let Some(port) = self.port.clone() else {
+            return;
+        };
+        let night = praxion_facts::is_night(world.day_time());
+        let idle = self.arbiter.owner() == &Owner::Idle
+            && self
+                .arbiter
+                .stack()
+                .entries()
+                .iter()
+                .all(|entry| entry.state == IntentState::Done);
+        if !night || !idle {
+            self.night_idle_ticks = 0;
+            return;
+        }
+        self.night_idle_ticks += 1;
+        let silent = self.brain_silent || port.connection_state() != ConnectionState::Connected;
+        let limit = if silent {
+            NIGHT_FALLBACK_SILENT_TICKS
+        } else {
+            NIGHT_FALLBACK_TICKS
+        };
+        if self.night_idle_ticks < limit {
+            return;
+        }
+        self.night_idle_ticks = 0;
+        self.night_fallbacks += 1;
+        self.record(
+            tick,
+            ts_ns,
+            EventKind::Note {
+                text: format!("night_fallback silent={silent}"),
+            },
+        );
+        let command = PortCommand {
+            id: format!("body-night-{:04}", self.night_fallbacks),
+            skill: NIGHT_FALLBACK_SKILL.to_owned(),
+            args: Vec::new(),
+            tier: Tier::Survival.name().to_owned(),
+            expires_at_tick: u64::MAX,
+            based_on_generation: self.arbiter.generation(),
+            condition: Some("not is_night()".to_owned()),
+            budget_ticks: None,
+        };
+        self.accept_command_in(Tier::Survival, command, tick, ts_ns, world);
+    }
+
+    fn accept_command_in(
+        &mut self,
+        tier: Tier,
+        command: PortCommand,
+        tick: u64,
+        ts_ns: u64,
+        world: &World,
+    ) {
         self.receipt(tick, ts_ns, Receipt::new(&command.id, "pending"));
         if tick > command.expires_at_tick {
             self.receipt(tick, ts_ns, Receipt::new(&command.id, "expired"));
@@ -423,7 +512,8 @@ impl BodyDriver {
         }
 
         let record_args = args.clone();
-        match self.arbiter.command(
+        match self.arbiter.command_in(
+            tier,
             &mut self.interpreter,
             &mut self.mirror,
             tick,
@@ -1471,6 +1561,7 @@ impl Driver for BodyDriver {
             self.inject_cli(view.tick, ts_ns, world);
         }
         self.poll_port(view.tick, ts_ns, world);
+        self.night_fallback(view.tick, ts_ns, world);
 
         // The previous tick's primitive outcome goes to the interpreter, once.
         if !self.outcome_delivered
@@ -2021,8 +2112,17 @@ skill stall()
         silence: Duration,
         watch: Option<SkillsWatch>,
     ) -> Harness {
+        harness_program(INSTA, port, silence, watch)
+    }
+
+    fn harness_program(
+        source: &str,
+        port: Option<Arc<PortServer>>,
+        silence: Duration,
+        watch: Option<SkillsWatch>,
+    ) -> Harness {
         let run_dir = run_dir();
-        let program = praxion_rules::load(INSTA).expect("the test program must load");
+        let program = praxion_rules::load(source).expect("the test program must load");
         let shared = Arc::new(Mutex::new(Shared::new("test", "", vec![])));
         let driver = BodyDriver::new(
             options(silence),
@@ -3375,6 +3475,194 @@ skill stall()
         }
         assert!(saw_dropped, "the port must report the dropped events");
         assert!(saw_snapshot, "a fresh snapshot must follow the drop");
+    }
+
+    const NIGHT_PROGRAM: &str = "\
+skill night_watch()
+  rules:
+    not is_night() -> done
+    true -> wait(20)
+skill short()
+  rules:
+    true -> done
+skill stall()
+  rules:
+    true -> wait(100)
+";
+
+    fn set_day_time(world: &mut World, day_time: u64) {
+        use azalea_protocol::packets::game::{
+            ClientboundGamePacket, ClientboundSetTime, c_set_time::ClockState,
+        };
+        use azalea_registry::{DataRegistry, data::WorldClock};
+        let clocks = [(
+            WorldClock::new_raw(0),
+            ClockState {
+                total_ticks: day_time,
+                partial_tick: 0.0,
+                rate: 1.0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        world.follow(0);
+        world.apply_clientbound_play(
+            0,
+            &ClientboundGamePacket::SetTime(ClientboundSetTime {
+                game_time: day_time,
+                clock_updates: clocks,
+            }),
+        );
+    }
+
+    fn night_port() -> Arc<PortServer> {
+        Arc::new(
+            PortServer::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                praxion_port::PortConfig {
+                    body: "test".to_owned(),
+                    run_id: "run-1".to_owned(),
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    fn night_harness(port: Option<Arc<PortServer>>) -> Harness {
+        let mut harness = harness_program(NIGHT_PROGRAM, port, DEFAULT_BRAIN_SILENCE, None);
+        set_day_time(&mut harness.world, 14_000);
+        assert!(praxion_facts::is_night(harness.world.day_time()), "the test world is at night");
+        harness
+    }
+
+    /// The `(skill, tier, state)` of every live stack entry.
+    fn stack_of(harness: &Harness) -> Vec<(String, String, String)> {
+        harness
+            .driver
+            .arbiter
+            .stack()
+            .entries()
+            .iter()
+            .filter(|entry| entry.state != IntentState::Done)
+            .map(|entry| {
+                (
+                    entry.skill_ref.clone(),
+                    entry.tier.name().to_owned(),
+                    entry.state.name().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn at_night_a_gone_brain_gets_a_night_watch_at_the_survival_tier() {
+        // The port is bound but no brain ever connected: not connected counts
+        // as silent, so the short wait applies.
+        let mut harness = night_harness(Some(night_port()));
+        harness.run(u64::from(NIGHT_FALLBACK_SILENT_TICKS) - 5);
+        assert!(stack_of(&harness).is_empty(), "not before the wait is over");
+        harness.run(10);
+        assert_eq!(
+            stack_of(&harness),
+            vec![("night_watch".to_owned(), "survival".to_owned(), "running".to_owned())]
+        );
+        flush(&mut harness);
+        assert_eq!(harness.receipts("accepted").len(), 1);
+        // Morning ends it by its own rule, and the body goes idle again.
+        set_day_time(&mut harness.world, 1_000);
+        harness.run(40);
+        assert!(stack_of(&harness).is_empty(), "{:?}", stack_of(&harness));
+        flush(&mut harness);
+        assert_eq!(harness.receipts("settled").len(), 1);
+    }
+
+    #[test]
+    fn a_brain_command_suspends_the_night_watch_and_it_resumes_after() {
+        let mut harness = night_harness(Some(night_port()));
+        harness.run(u64::from(NIGHT_FALLBACK_SILENT_TICKS) + 5);
+        assert_eq!(stack_of(&harness).len(), 1, "the fallback runs");
+        harness.inject(command("c-1", "stall"));
+        let stack = stack_of(&harness);
+        assert!(stack.contains(&("night_watch".to_owned(), "survival".to_owned(), "suspended".to_owned())), "{stack:?}");
+        assert!(stack.contains(&("stall".to_owned(), "command".to_owned(), "running".to_owned())), "{stack:?}");
+        // The user's goal ends (a pop); the night watch gets the body back.
+        let intent = harness
+            .driver
+            .arbiter
+            .stack()
+            .running()
+            .map(|entry| entry.intent_id)
+            .expect("the command runs");
+        let (tick, world) = (harness.tick, &harness.world);
+        harness.driver.pop_intent(intent, tick, now_ns(), world);
+        harness.run(5);
+        let stack = stack_of(&harness);
+        assert_eq!(
+            stack,
+            vec![("night_watch".to_owned(), "survival".to_owned(), "running".to_owned())],
+            "it resumes after the user's goal"
+        );
+    }
+
+    #[test]
+    fn a_night_watch_suspended_until_morning_ends_by_its_own_rule_when_it_resumes() {
+        // The fallback is parked behind a command that runs into the morning.
+        // When the body gets it back the skill's own `not is_night()` rule ends
+        // it at once: no shelter work in the day and no goal left behind
+        // (review of slice 3, finding 4: the widened resume must not carry a
+        // night goal into the day).
+        let mut harness = night_harness(Some(night_port()));
+        harness.run(u64::from(NIGHT_FALLBACK_SILENT_TICKS) + 5);
+        assert_eq!(stack_of(&harness).len(), 1, "the fallback runs");
+        harness.inject(command("c-1", "stall"));
+        let stack = stack_of(&harness);
+        assert!(stack.contains(&("night_watch".to_owned(), "survival".to_owned(), "suspended".to_owned())), "{stack:?}");
+
+        // Dawn comes while the fallback is suspended; then the command ends.
+        set_day_time(&mut harness.world, 1_000);
+        assert!(!praxion_facts::is_night(harness.world.day_time()));
+        let intent = harness
+            .driver
+            .arbiter
+            .stack()
+            .running()
+            .map(|entry| entry.intent_id)
+            .expect("the command runs");
+        let (tick, world) = (harness.tick, &harness.world);
+        harness.driver.pop_intent(intent, tick, now_ns(), world);
+        harness.run(10);
+        assert!(stack_of(&harness).is_empty(), "{:?}", stack_of(&harness));
+        flush(&mut harness);
+
+        let settled = harness.receipts("settled");
+        let fallback = settled
+            .iter()
+            .find(|(command_id, ..)| command_id.starts_with("body-night-"))
+            .unwrap_or_else(|| panic!("the fallback settles too: {settled:?}"));
+        assert_eq!(fallback.3.as_deref(), Some("done"), "{settled:?}");
+    }
+
+    #[test]
+    fn a_live_brain_gets_the_long_wait_and_the_day_and_a_cli_run_get_none() {
+        // A brain that is connected and not silent has time to pick its own goal.
+        let server = night_port();
+        let _brain = connect(&server);
+        let mut harness = night_harness(Some(Arc::clone(&server)));
+        harness.run(u64::from(NIGHT_FALLBACK_SILENT_TICKS) * 3);
+        assert!(stack_of(&harness).is_empty(), "300 idle ticks with a live brain");
+        harness.run(u64::from(NIGHT_FALLBACK_TICKS));
+        assert_eq!(stack_of(&harness).len(), 1, "after the long wait it hides anyway");
+
+        // Daytime: never.
+        let mut day = harness_program(NIGHT_PROGRAM, Some(night_port()), DEFAULT_BRAIN_SILENCE, None);
+        set_day_time(&mut day.world, 1_000);
+        day.run(u64::from(NIGHT_FALLBACK_TICKS) + 50);
+        assert!(stack_of(&day).is_empty());
+
+        // No port (a `--goal` run): the body keeps exactly what it was given.
+        let mut cli = night_harness(None);
+        cli.run(u64::from(NIGHT_FALLBACK_TICKS) + 50);
+        assert!(stack_of(&cli).is_empty());
     }
 
     #[test]

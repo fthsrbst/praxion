@@ -53,8 +53,11 @@ class PendingGoal:
     goal: Goal
     source: str = "llm"
     forced_skill: Optional[str] = None
-    #: ``"user"`` for a goal the console gave; ``None`` otherwise.
+    #: ``"user"`` for a goal the console gave, ``"survival"`` for one the loop
+    #: started from the body facts; ``None`` otherwise.
     origin: Optional[str] = None
+    #: Per-goal body ticks; ``None`` keeps the loop's default budget.
+    budget_ticks: Optional[int] = None
     #: The record a background admission opened; the play reuses it.
     record: Optional[GoalRecord] = None
 
@@ -70,8 +73,20 @@ class OpenGoal:
     intent_id: Optional[int] = None
     sent_tick: int = 0
     retried: bool = False
-    #: The user pressed Stop before the body accepted the command: pop it on accept.
+    #: A stop has been asked for and the body's receipt has not confirmed it yet:
+    #: the pop waits for the accepted receipt, or it is already out. Either way
+    #: one goal gets one stop, never one per step.
     stop_pending: bool = False
+    #: Who asked for the stop: ``console`` (the user), ``survival`` (a due food
+    #: or night goal) or ``user`` (a queued user goal outranking survival). The
+    #: receipt closes the record with it, so no user stop is ever invented.
+    stop_source: str = "console"
+    #: A survival goal (food, night) the loop started from code; a ladder or
+    #: user goal is interrupted for it, never the other way round.
+    survival: bool = False
+    #: The per-goal body ticks the command was sent with; ``None`` was the
+    #: loop's default. A stale-generation retry resends with the same budget.
+    budget_ticks: Optional[int] = None
 
     def ticks_since(self, tick: Optional[int]) -> Optional[int]:
         """Body ticks since the command was sent; ``None`` without a snapshot."""
@@ -314,6 +329,11 @@ class GoalRecords:
                 intent_id=entry.intent_id,
                 sent_tick=tick,
                 retried=True,
+                # A survival goal keeps its exemption after a restart: without
+                # this the loop would pop the night goal it just adopted and
+                # send the very same goal again, all night long (review of
+                # slice 3, finding 7).
+                survival=adopted.origin == "survival",
             )
             self.evidence.write(
                 "loop_recovered",

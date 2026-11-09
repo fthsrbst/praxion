@@ -217,7 +217,7 @@ impl Runner {
                 // Enderman). A skill started with a mob argument at run time
                 // bypasses the checker, so the action itself refuses one
                 // (review finding 4).
-                if praxion_gamedata::entity_drops(praxion_gamedata::normalize(&arg)).is_none() {
+                if !praxion_gamedata::huntable(&arg) {
                     return Err(format!(
                         "`{arg}` is not hunted: the mob allowlist is cow, pig, sheep, chicken, zombie, skeleton and spider"
                     ));

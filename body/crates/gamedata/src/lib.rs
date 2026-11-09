@@ -274,6 +274,20 @@ pub fn needs_pickaxe(block: &str) -> bool {
     )
 }
 
+/// The mobs the body may hunt: the passive animals for meat and the three
+/// hostile kinds the night skill fights (decision 2026-11-09 "Five next
+/// areas"). Never a creeper (the reflex keeps its distance) or an Enderman (the
+/// look guard); `attack` and the `hunt` skill refuse everything else with
+/// `not_huntable`, so a learned skill cannot go after them.
+pub const HUNTABLE_MOBS: &[&str] = &[
+    "cow", "pig", "sheep", "chicken", "zombie", "skeleton", "spider",
+];
+
+/// Whether `mob` (with or without the `minecraft:` namespace) may be hunted.
+pub fn huntable(mob: &str) -> bool {
+    HUNTABLE_MOBS.contains(&normalize(mob))
+}
+
 /// Strips an optional `minecraft:` namespace.
 pub fn normalize(name: &str) -> &str {
     name.strip_prefix("minecraft:").unwrap_or(name)
@@ -362,6 +376,16 @@ mod tests {
         assert!(weapon_rank("stone_sword") > weapon_rank("stone_axe"));
         assert_eq!(weapon_rank("stone_pickaxe"), None);
         assert_eq!(weapon_rank("bread"), None);
+    }
+
+    #[test]
+    fn only_the_allowlisted_mobs_are_huntable() {
+        for mob in ["cow", "minecraft:pig", "sheep", "chicken", "zombie", "skeleton", "spider"] {
+            assert!(huntable(mob), "{mob}");
+        }
+        for mob in ["creeper", "enderman", "minecraft:creeper", "player", "wolf", "iron_golem", ""] {
+            assert!(!huntable(mob), "{mob}");
+        }
     }
 
     #[test]
