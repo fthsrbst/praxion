@@ -16,6 +16,7 @@ mod move_to;
 mod place;
 mod runner;
 mod small;
+mod smelt;
 mod station;
 #[cfg(test)]
 mod test_world;

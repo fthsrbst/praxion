@@ -383,10 +383,11 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            // Walk to the furnace and open it (<= 100), load the content
-            // (<= 40), the clicks (~20), cook one item (200 + 60 for the menu
-            // round trip) and take it out (<= 140).
-            default_max_ticks: 600,
+            // Walk to the furnace (<= 80) and open it (<= 60), wait for the
+            // content (<= 41), the clicks (~14), cook one item (200 + 60 for
+            // the menu round trip) and take it out (<= 141): about 600 in the
+            // worst case, plus room for one server-side window close.
+            default_max_ticks: 700,
             effects: smelting_summary(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::InventoryDelta,
@@ -910,7 +911,7 @@ mod tests {
         let smelt = p.get("smelt").unwrap();
         assert_eq!(smelt.kind, PrimitiveKind::Discrete);
         assert_eq!(smelt.evidence, EvidenceKind::InventoryDelta);
-        assert_eq!(smelt.default_max_ticks, 600);
+        assert_eq!(smelt.default_max_ticks, 700);
 
         // Raw iron and both iron ores produce one ingot; the merge rule keeps
         // every distinct input once.
