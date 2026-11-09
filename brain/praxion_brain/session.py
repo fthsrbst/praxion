@@ -240,12 +240,21 @@ class BodySession:
         return True
 
     # -- sending -------------------------------------------------------- #
-    def send_goal(self, skill: str, condition: str, args: list[str] | None = None) -> str:
+    def send_goal(
+        self,
+        skill: str,
+        condition: str,
+        args: list[str] | None = None,
+        *,
+        budget_ticks: int | None = None,
+    ) -> str:
         """Send one command against the current snapshot and return its id.
 
         Only a condition the brain can verify (inventory facts) goes to the body:
         the body rejected others as `bad_condition` and the goal never ran. An
         unverifiable goal still runs and is recorded unverifiable (session 10).
+        ``budget_ticks`` overrides the session default (a night goal outlasts the
+        night; every other goal keeps the default).
         """
         if self.port.tick is None or self.port.generation is None:
             raise PortError("no snapshot yet")
@@ -253,7 +262,9 @@ class BodySession:
             skill,
             args=list(args or []),
             condition=condition if is_verifiable(condition) else None,
-            budget_ticks=self.command_budget_ticks,
+            budget_ticks=(
+                self.command_budget_ticks if budget_ticks is None else int(budget_ticks)
+            ),
             expires_at_tick=int(self.port.tick) + self.port.command_ttl_ticks,
             based_on_generation=int(self.port.generation),
         )

@@ -27,6 +27,13 @@ unknown tag, a bare identifier, a ``$parameter``, or a string argument). A
 *malformed* condition raises :class:`ConditionError` instead, so a bad proposal
 is rejected rather than silently treated as unknown.
 
+Survival facts (decision 2026-11-09 "Five next areas", survival slice 3): the
+zero-argument calls ``count_food()``, ``health()``, ``food()`` (ints) and
+``is_night()`` (bool) are decidable when :func:`evaluate` is given the snapshot
+``facts`` next to the inventory, so a food or night goal is *verifiable* and
+its settlement is ``done`` or ``failed``, not ``unverified``. They mirror
+``body/crates/facts/src/lib.rs``; without ``facts`` they stay unknown.
+
 Tags: ``#logs`` counts every inventory key ending in ``_log`` and ``#planks``
 every key ending in ``_planks``; these two come from ``body/skills``. Any other
 tag is unverifiable. This small table must be joined to the gamedata tag tables
@@ -45,6 +52,32 @@ COMPARISONS = frozenset({"<", "<=", "==", "!=", ">=", ">"})
 #: Tag -> inventory key suffix. Only tags used by ``body/skills`` are listed.
 #: The body's ``gamedata`` tag tables are the eventual source (see module doc).
 TAGS: dict[str, str] = {"#logs": "_log", "#planks": "_planks"}
+
+#: The survival facts a condition may call without arguments, and their type.
+FACT_CALLS: dict[str, str] = {
+    "count_food": "int",
+    "health": "int",
+    "food": "int",
+    "is_night": "bool",
+}
+
+#: Items that count as food for ``count_food()``: the vanilla edible items a
+#: first-night body can hold, raw or cooked. The body counts every stack with
+#: the `Food` component (``praxion_facts::count_food``); this list is its brain
+#: mirror and may lag it for rare items (unknown items count as zero, which
+#: only ever asks for food a little early).
+FOOD_ITEMS = frozenset(
+    {
+        "apple", "baked_potato", "beef", "beetroot", "bread", "carrot", "chicken",
+        "cod", "cooked_beef", "cooked_chicken", "cooked_cod", "cooked_mutton",
+        "cooked_porkchop", "cooked_rabbit", "cooked_salmon", "cookie",
+        "dried_kelp", "golden_apple", "golden_carrot", "melon_slice", "mutton",
+        "porkchop", "potato", "pumpkin_pie", "rabbit", "salmon", "sweet_berries",
+        "glow_berries", "mushroom_stew", "rabbit_stew", "beetroot_soup",
+        "tropical_fish", "pufferfish", "rotten_flesh", "spider_eye",
+        "poisonous_potato", "chorus_fruit", "enchanted_golden_apple",
+    }
+)
 
 #: The only namespace the body's ``normalize_id`` strips.
 _MINECRAFT = "minecraft:"
@@ -541,6 +574,32 @@ def _amount(value: Any) -> int:
         return 0
 
 
+def _fact_call(node: Node) -> Optional[str]:
+    """The name of a zero-argument survival fact call, else ``None``."""
+    if isinstance(node, Call) and not node.args and node.name in FACT_CALLS:
+        return node.name
+    return None
+
+
+def _fact_value(
+    name: str, inventory: Mapping[str, int], facts: Optional[Mapping[str, Any]]
+) -> Optional[Union[int, bool]]:
+    """One survival fact from the snapshot ``facts``; ``None`` when unknown."""
+    if name == "count_food":
+        if facts is None:
+            return None
+        return sum(amount for key, amount in inventory.items() if key in FOOD_ITEMS)
+    if facts is None:
+        return None
+    if name == "is_night":
+        value = facts.get("is_night")
+        return value if isinstance(value, bool) else None
+    value = facts.get("health" if name == "health" else "food")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value // 1)
+
+
 def _call_item(node: Node, name: str) -> Optional[str]:
     if not isinstance(node, Call) or node.name != name or len(node.args) != 1:
         return None
@@ -575,11 +634,16 @@ def _verifiable(node: Node) -> bool:
     if isinstance(node, And):
         return _verifiable(node.left) and _verifiable(node.right)
     if isinstance(node, Call):
+        if _fact_call(node) is not None:
+            return FACT_CALLS[node.name] == "bool"
         item = _call_item(node, "has")
         return item is not None and _item_known(item)
     if isinstance(node, Compare):
         if node.operator not in COMPARISONS or not isinstance(node.right, Number):
             return False
+        fact = _fact_call(node.left)
+        if fact is not None:
+            return FACT_CALLS[fact] == "int"
         item = _call_item(node.left, "count")
         return item is not None and _item_known(item)
     # Name, Number, String, Param, Or and unknown calls are outside the subset.
@@ -599,29 +663,45 @@ def is_verifiable(text: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Three-valued evaluation
 # --------------------------------------------------------------------------- #
-def _evaluate(node: Node, inventory: Mapping[str, int]) -> Optional[bool]:
+def _evaluate(
+    node: Node,
+    inventory: Mapping[str, int],
+    facts: Optional[Mapping[str, Any]] = None,
+) -> Optional[bool]:
     if isinstance(node, Literal):
         return node.value
     if isinstance(node, Not):
-        value = _evaluate(node.child, inventory)
+        value = _evaluate(node.child, inventory, facts)
         return None if value is None else not value
     if isinstance(node, And):
-        left = _evaluate(node.left, inventory)
+        left = _evaluate(node.left, inventory, facts)
         if left is False:
             return False
-        right = _evaluate(node.right, inventory)
+        right = _evaluate(node.right, inventory, facts)
         if right is False:
             return False
         if left is True and right is True:
             return True
         return None
     if isinstance(node, Call):
+        fact = _fact_call(node)
+        if fact is not None:
+            value = _fact_value(fact, inventory, facts)
+            return value if FACT_CALLS[fact] == "bool" and isinstance(value, bool) else None
         item = _call_item(node, "has")
         if item is None or not _item_known(item):
             return None
         count = _count(inventory, item)
         return None if count is None else count > 0
     if isinstance(node, Compare):
+        fact = _fact_call(node.left)
+        if fact is not None:
+            if FACT_CALLS[fact] != "int" or node.operator not in COMPARISONS or not isinstance(node.right, Number):
+                return None
+            value = _fact_value(fact, inventory, facts)
+            if value is None or isinstance(value, bool):
+                return None
+            return _compare(node.operator, value, node.right.value)
         item = _call_item(node.left, "count")
         if (
             item is None
@@ -636,9 +716,17 @@ def _evaluate(node: Node, inventory: Mapping[str, int]) -> Optional[bool]:
     return None
 
 
-def evaluate(text: str, inventory: Mapping[str, Any]) -> Optional[bool]:
-    """Evaluate guard text against an inventory; ``None`` means unknown."""
-    return _evaluate(parse(text), _normalized_inventory(inventory))
+def evaluate(
+    text: str,
+    inventory: Mapping[str, Any],
+    facts: Optional[Mapping[str, Any]] = None,
+) -> Optional[bool]:
+    """Evaluate guard text against an inventory; ``None`` means unknown.
+
+    ``facts`` is the snapshot's body facts (``health``, ``food``, ``is_night``);
+    without it a survival fact call such as ``is_night()`` is unknown.
+    """
+    return _evaluate(parse(text), _normalized_inventory(inventory), facts)
 
 
 def item_of_condition(text: str) -> Optional[str]:
@@ -676,6 +764,8 @@ __all__ = [
     "Call",
     "Compare",
     "COMPARISONS",
+    "FACT_CALLS",
+    "FOOD_ITEMS",
     "ConditionError",
     "Literal",
     "Name",

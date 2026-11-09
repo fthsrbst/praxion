@@ -96,6 +96,12 @@ impl Attack {
         started: bool,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let mut frame = idle(ctx);
+        // Only the allowlisted mobs are ever attacked: a creeper or an
+        // Enderman is refused before any approach (decision 2026-11-09 "Five
+        // next areas"; the reflex and the look guard own those two).
+        if !praxion_gamedata::huntable(&self.kind) {
+            return (frame, None, Some(Outcome::Failed("not_huntable".into())));
+        }
         if let Some(id) = self.entity
             && ctx.world.entity(id).is_none()
         {
@@ -390,6 +396,20 @@ mod attack_tests {
             }
         }
         assert_eq!(failed_at, Some(10), "the 11th tick fails, not the 41st");
+    }
+
+    #[test]
+    fn attack_refuses_a_creeper_and_an_enderman_even_in_reach() {
+        for kind in ["creeper", "enderman", "wolf"] {
+            let mut world = world();
+            add_entity(&mut world, 3, EntityKind::Creeper, Vec3::new(0.5, 64.0, 2.5));
+            let mut perception = swept(&world);
+            let mut body = Body::new(feet());
+            let mut attack = attack_for(kind);
+            let (frame, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+            assert_eq!(outcome, Some(Outcome::Failed("not_huntable".into())), "{kind}");
+            assert!(frame.clicks.is_empty(), "no click at a {kind}");
+        }
     }
 
     #[test]

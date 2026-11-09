@@ -220,6 +220,22 @@ impl Arbiter {
         skill: &str,
         args: Vec<ArgValue>,
     ) -> Result<CommandAccepted, CommandError> {
+        self.command_in(Tier::Command, interpreter, body, tick, skill, args)
+    }
+
+    /// [`Arbiter::command`] with the tier named. The body's own night fallback
+    /// pushes `night_watch` at [`Tier::Survival`] (architecture §5.4); any later
+    /// command suspends it like any running intent, so it yields to the brain
+    /// and the user and resumes when their goal settles.
+    pub fn command_in(
+        &mut self,
+        tier: Tier,
+        interpreter: &mut Interpreter,
+        body: &mut Body,
+        tick: u64,
+        skill: &str,
+        args: Vec<ArgValue>,
+    ) -> Result<CommandAccepted, CommandError> {
         let strings: Vec<String> = args.iter().map(arg_to_string).collect();
         // A command during a meal ends the meal: its skill would otherwise
         // run under the meal's ownership once the interpreter holds the
@@ -230,7 +246,7 @@ impl Arbiter {
         }
         let pushed = self
             .stack
-            .push(Tier::Command, skill, strings.clone())
+            .push(tier, skill, strings.clone())
             .map_err(|_| CommandError::StackFull)?;
         if let Err(refusal) = interpreter.start_skill(skill, args) {
             self.stack.rollback(pushed);
@@ -251,7 +267,7 @@ impl Arbiter {
         }
         events.push(EventKind::IntentPushed {
             intent_id: pushed.intent_id,
-            tier: Tier::Command.name().to_owned(),
+            tier: tier.name().to_owned(),
             skill: skill.to_owned(),
             args: strings,
         });
@@ -277,7 +293,7 @@ impl Arbiter {
             self.owner = owner.clone();
             self.owner_since = tick;
             self.wake_emitted = false;
-            self.record_switch(Tier::Command, tick);
+            self.record_switch(tier, tick);
             events.push(EventKind::OwnerChanged {
                 generation: self.generation,
                 owner: owner.name(),
@@ -697,7 +713,16 @@ impl Arbiter {
             .iter()
             .rev()
             .find(|entry| {
-                entry.tier == Tier::Command
+                // A command, or the body's own night fallback (a command pushed
+                // at the survival tier). A meal is also survival tier but it is
+                // served by its `MealRun`, never resumed as a command.
+                let resumable_tier = entry.tier == Tier::Command
+                    || (entry.tier == Tier::Survival
+                        && self
+                            .meal
+                            .as_ref()
+                            .is_none_or(|meal| meal.intent_id != entry.intent_id));
+                resumable_tier
                     && matches!(entry.state, IntentState::Suspended | IntentState::Running)
             })?
             .intent_id;

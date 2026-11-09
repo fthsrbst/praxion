@@ -64,6 +64,7 @@ from .cancel import CancelToken
 from .conditions import ConditionError, count_of_condition
 from .console.hub import Console
 from .briefing import heartbeat_change
+from . import survival
 from .curriculum import GoalProposal, Validation, goal_of, validate
 from .evidence import Evidence
 from .goal import Goal
@@ -289,6 +290,7 @@ class Loop:
 
         self._reap_job()
         self._advance()
+        self._survival_check()
         if self.session.terminated:
             # A terminal bye can also arrive inside a snapshot refresh.
             self._stopped = True
@@ -432,6 +434,10 @@ class Loop:
             self._on_body_wake(event)
 
     def _on_body_wake(self, event: Mapping[str, Any]) -> None:
+        if event.get("cause") == "hunger_no_food" and self.state == LoopState.IDLE:
+            # The body is hungry and holds nothing: the pick starts get_food
+            # (survival.choose) without waiting for a heartbeat.
+            self._set_wake(WakeCause.BODY_WAKE)
         now = self._clock()
         if now - self._last_body_wake < self.body_wake_limit_seconds:
             return
@@ -491,16 +497,22 @@ class Loop:
         if state == "settled":
             outcome = event.get("outcome")
             if outcome in ("cancelled", "popped"):
-                # The body confirmed the console's stop: a pop of a running
+                # The body confirmed the stop of this goal: a pop of a running
                 # intent settles `cancelled`, a pop of a done or suspended one
                 # settles `popped`. Only now is the goal recorded: a pop on its
-                # own is a request, not proof the skill stopped (§5.4).
+                # own is a request, not proof the skill stopped (§5.4). The
+                # cause is the one that asked for the stop, never the console by
+                # default: an interrupt by survival or by a queued user goal is
+                # not something the user did (review of slice 3, finding 1).
+                cause = open_goal.stop_source
                 self.records.finish(
                     open_goal.record,
                     status="interrupted",
-                    failure_kind="stopped_by_user",
+                    failure_kind=(
+                        "stopped_by_user" if cause == "console" else f"preempted_by_{cause}"
+                    ),
                     ticks=open_goal.ticks_since(self.session.tick),
-                    source="console",
+                    source="survival" if cause == "survival" else "console",
                 )
                 return
             condition = event.get("condition")
@@ -521,7 +533,7 @@ class Loop:
     def _retry_stale(self, open_goal: OpenGoal) -> None:
         try:
             command_id = self._send_goal(
-                open_goal.skill, open_goal.proposal.condition
+                open_goal.skill, open_goal.proposal.condition, open_goal.budget_ticks
             )
         except PortError as error:
             self.records.finish(
@@ -634,7 +646,12 @@ class Loop:
         # while the brain was writing; read them before proposing or validating.
         self.session.refresh()
         inventory = self._inventory()
+        # The user's goal first, then survival, then the rest: the user's
+        # projects come before Praxion's own ideas (architecture §1), so a
+        # survival goal is exempt from the need gate but never above the user.
         if self._pick_user_goal(inventory):
+            return
+        if self._pick_survival(inventory):
             return
         if self._pick_written_goal(inventory):
             return
@@ -694,6 +711,110 @@ class Loop:
             )
 
         self._pick_code_only("proposals_excluded" if excluded else "proposals_invalid")
+
+    # -- survival (decision 2026-11-09 "Five next areas") ------------------ #
+    def _facts(self) -> dict[str, Any]:
+        return dict((self.session.snapshot or {}).get("facts") or {})
+
+    def _due_survival(self) -> Optional["survival.SurvivalGoal"]:
+        return survival.choose(
+            self._facts(),
+            self._inventory(),
+            self.catalog,
+            self.memory,
+            stack=(self.session.snapshot or {}).get("stack") or (),
+        )
+
+    def _pick_survival(self, inventory: dict[str, int]) -> bool:
+        """Food or night comes before every autonomous goal, decided in code.
+
+        No model call: the facts say it is due. The goal goes straight to the
+        body (a known core skill), exempt from the need gate's rules. A queued
+        user goal still goes first (``_pick``): the user's projects come before
+        Praxion's own ideas (architecture §1).
+        """
+        due = self._due_survival()
+        if due is None:
+            return False
+        validation = due.validation()
+        self._pending = PendingGoal(
+            proposal=due.proposal,
+            validation=validation,
+            goal=goal_of(due.proposal, validation),
+            source="survival",
+            origin="survival",
+            forced_skill=due.skill,
+            budget_ticks=due.budget_ticks,
+        )
+        self._last_proposal = due.proposal
+        self.evidence.write(
+            "survival_goal",
+            skill=due.skill,
+            survival=due.kind,
+            condition=due.proposal.condition,
+            reason=due.reason,
+        )
+        self._transition(LoopState.ROUTING, reason=f"survival:{due.kind}")
+        return True
+
+    def _survival_check(self) -> None:
+        """Between picks: a due survival goal interrupts an autonomous goal and
+        a queued user goal interrupts everything; an idle loop wakes.
+
+        A goal in progress that is not a survival or user goal is stopped through
+        the console's stop path (the body pops it and confirms ``cancelled``);
+        the next pick then plays the survival goal. A user's task is never
+        interrupted: the body's own arbiter still eats when it holds food and its
+        night fallback covers a silent brain. A survival goal of ours does yield
+        to a queued user goal, exactly as the body's fallback yields to a user
+        command: the user's projects come first (architecture §1) and the night
+        fallback takes the night again when their goal settles.
+        """
+        if self._paused or self.session.snapshot is None:
+            return
+        opened = self._open_goal
+        if self.state == LoopState.PLAYING and opened is not None:
+            if opened.stop_pending:
+                # A pop is already out; that stop is the only one this goal gets
+                # (a second pop per step would fight the first, review of
+                # slice 3). The receipt settles it.
+                return
+            if opened.record.origin == "user":
+                return
+            if self._user_goals:
+                # The user outranks our own survival goal (architecture §1).
+                self._interrupt_goal("user", reason="user goal waiting")
+                return
+            if opened.survival:
+                # A survival goal is never interrupted by another survival goal.
+                return
+            due = self._due_survival()
+            if due is not None:
+                self._interrupt_goal("survival", survival=due.kind, reason=due.reason)
+        elif self.state == LoopState.IDLE and self._wake is None and self._job is None:
+            if self._due_survival() is not None:
+                self._set_wake(WakeCause.BODY_WAKE)
+
+    def _interrupt_goal(self, cause: str, **fields: Any) -> None:
+        """Stop the open goal with the reason it was stopped.
+
+        The stop cause travels on the open goal, so the receipt that confirms
+        the pop closes the record with ``preempted_by_<cause>`` and the matching
+        source instead of the console's ``stopped_by_user``: nothing the user
+        did must be written to the ledger as though they had (review of slice 3,
+        finding 1). ``_stop_goal`` marks the pop as sent before the next step
+        looks at the goal again, so one interrupt is one pop (finding 2).
+        """
+        opened = self._open_goal
+        if opened is None or opened.stop_pending:
+            return
+        opened.stop_source = cause
+        self.evidence.write(
+            f"{cause}_interrupt",
+            goal_id=opened.record.goal_id,
+            **fields,
+        )
+        self._stop_goal()
 
     def _pick_written_goal(self, inventory: dict[str, int]) -> bool:
         """Play the goal whose skill the background admission just admitted."""
@@ -874,7 +995,7 @@ class Loop:
             self._transition(LoopState.IDLE, reason="route_without_goal")
             return
 
-        if pending.source == "code_only" and pending.forced_skill:
+        if pending.source in ("code_only", "survival") and pending.forced_skill:
             self.evidence.write(
                 "route_code_only",
                 skill=pending.forced_skill,
@@ -885,7 +1006,7 @@ class Loop:
                 "skill": pending.forced_skill,
                 "scores": None,
                 "condition": pending.proposal.condition,
-                "source": "code_only",
+                "source": pending.source,
             }
             self._play()
             return
@@ -1234,7 +1355,9 @@ class Loop:
             return
 
         try:
-            command_id = self._send_goal(skill, pending.proposal.condition)
+            command_id = self._send_goal(
+                skill, pending.proposal.condition, pending.budget_ticks
+            )
         except PortError as error:
             self.evidence.write("command_send_failed", error=str(error), skill=skill)
             self._drop_unplayed(pending, "send_failed")
@@ -1268,6 +1391,8 @@ class Loop:
             skill=skill,
             command_id=command_id,
             sent_tick=int(self.session.tick or 0),
+            survival=pending.source == "survival",
+            budget_ticks=pending.budget_ticks,
         )
         self.evidence.write(
             "command_sent",
@@ -1277,7 +1402,11 @@ class Loop:
             condition=pending.proposal.condition,
             expires_at_tick=int(self.session.tick or 0) + self.session.command_ttl_ticks,
             based_on_generation=self.session.generation,
-            budget_ticks=self.command_budget_ticks,
+            budget_ticks=(
+                self.command_budget_ticks
+                if pending.budget_ticks is None
+                else pending.budget_ticks
+            ),
         )
         self._pending = None
         self._transition(LoopState.PLAYING, reason="command_sent")
@@ -1320,28 +1449,43 @@ class Loop:
         running goal closes as interrupted only when the body's ``settled
         outcome=cancelled`` receipt arrives (see :meth:`_on_receipt`), so the
         console shows the stop as confirmed then. The intent state is reported
-        too, for evidence.
+        too, for evidence. Once the pop is out the goal carries ``stop_pending``
+        until its receipt, so no second stop path (a console stop, a survival or
+        user interrupt) sends another pop for the same goal.
 
         While no goal is open, a stop cancels the pick, route or admission in
         flight and drops the goals waiting behind it. An admitted skill waiting
         for the next pick is dropped too. A running admission job cannot be
         stopped safely mid-practice, so it is *marked*: when it ends, its goal is
-        recorded ``interrupted``/``stopped_by_user`` and is never played, even
-        if the admission succeeded (the skill may still go active).
+        recorded ``interrupted`` with the cause that asked for the stop and is
+        never played, even if the admission succeeded (the skill may still go
+        active).
         """
+        opened = self._open_goal
+        # Whoever asked for the stop: the open goal carries it (``console`` by
+        # default). A survival or user interrupt closes the waiting write with
+        # the same cause instead of inventing the user's stop (review of slice 3,
+        # finding 1).
+        cause = opened.stop_source if opened is not None else "console"
         written, self._written = self._written, None
         written_condition = written.proposal.condition if written is not None else None
         if written is not None and written.record is not None:
             self.records.finish(
                 written.record,
                 status="interrupted",
-                failure_kind="stopped_by_user",
-                source="console",
+                failure_kind=(
+                    "stopped_by_user" if cause == "console" else f"preempted_by_{cause}"
+                ),
+                source="survival" if cause == "survival" else "console",
                 wake=False,
             )
 
-        opened = self._open_goal
         if opened is not None:
+            if opened.stop_pending and opened.intent_id is not None:
+                # The pop is already out; its receipt has not arrived yet. A
+                # second stop (the console's Stop, another interrupt) must not
+                # pop the same goal twice (review of slice 3, finding 2).
+                return "pop_sent", {"goal_id": opened.record.goal_id, "already_sent": True}
             if opened.intent_id is None:
                 # Sent but not yet accepted: the body has no intent to pop. Keep
                 # the stop and pop on the accepted receipt, or it would be lost.
@@ -1360,6 +1504,9 @@ class Loop:
                 self.session.port.pop(opened.intent_id)
             except PortError as error:
                 return f"pop_failed: {error}", extra
+            # One goal, one stop: until the receipt confirms it, every other
+            # stop path (the console, a survival interrupt) leaves it alone.
+            opened.stop_pending = True
             return "pop_sent", extra
 
         pending = self._pending
@@ -1469,16 +1616,21 @@ class Loop:
         )
 
     # -- helpers -------------------------------------------------------- #
-    def _send_goal(self, skill: str, condition: str) -> str:
+    def _send_goal(
+        self, skill: str, condition: str, budget_ticks: Optional[int] = None
+    ) -> str:
         """Send one command; the one send path, so the count always travels.
 
-        Code-only, proposal and stale-retry sends all come through here, which
-        is why :meth:`_goal_args` cannot be forgotten on one of them.
+        Code-only, proposal, survival and stale-retry sends all come through
+        here, which is why :meth:`_goal_args` cannot be forgotten on one of
+        them. ``budget_ticks`` overrides the default per-goal budget: a night
+        goal needs longer than the default or the body fails it mid-night.
         """
         return self.session.send_goal(
             skill,
             condition,
             self._goal_args(skill, condition),
+            budget_ticks=budget_ticks,
         )
 
     def _goal_args(self, skill: str, condition: str) -> list[str]:
