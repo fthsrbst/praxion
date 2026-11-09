@@ -5,6 +5,8 @@
 //!
 //! * `RECIPES` holds every shaped and shapeless crafting recipe, with its
 //!   pattern, its keys and its tag-aware ingredients;
+//! * `SMELTING` holds every `minecraft:smelting` recipe, with its output, its
+//!   ingredient and its cooking time;
 //! * `ITEM_TAGS` and `BLOCK_TAGS` hold every item and block tag with tag
 //!   references resolved to concrete names;
 //! * `BLOCKS` and `ENTITIES` hold the loot tables of the blocks and mobs the
@@ -17,6 +19,7 @@
 include!(concat!(env!("OUT_DIR"), "/loot.rs"));
 include!(concat!(env!("OUT_DIR"), "/tags.rs"));
 include!(concat!(env!("OUT_DIR"), "/recipes.rs"));
+include!(concat!(env!("OUT_DIR"), "/smelting.rs"));
 
 /// One possible item drop from a loot table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +76,19 @@ impl Ingredient {
             None => self.items.first().copied().unwrap_or_default().to_owned(),
         }
     }
+}
+
+/// One furnace smelting recipe from the 26.3 data pack. Only
+/// `minecraft:smelting` recipes are here: blasting, smoking and campfire
+/// cooking are different recipe types and different primitives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmeltingRecipe {
+    /// The item one call produces.
+    pub output: &'static str,
+    /// The item (or list of alternative items) the recipe cooks.
+    pub ingredient: Ingredient,
+    /// Cooking time in ticks.
+    pub cooking_time: u32,
 }
 
 /// The shape of a crafting recipe.
@@ -204,6 +220,13 @@ pub fn recipe(item: &str) -> Option<&'static Recipe> {
 pub fn recipes_for(item: &str) -> impl Iterator<Item = &'static Recipe> {
     let item = normalize_tag(item);
     RECIPES.iter().filter(move |recipe| recipe.output == item)
+}
+
+/// Every smelting recipe producing `item` (normalized). A raw form and its ore
+/// forms share one output, so one output may have several recipes.
+pub fn smelting_recipes_for(item: &str) -> impl Iterator<Item = &'static SmeltingRecipe> {
+    let item = normalize_tag(item);
+    SMELTING.iter().filter(move |recipe| recipe.output == item)
 }
 
 /// The recipes whose output is in the item tag `name`.
@@ -347,6 +370,34 @@ mod tests {
         assert!(outputs.contains(&"oak_planks"));
         assert!(outputs.contains(&"birch_planks"));
         assert!(outputs.len() >= 10, "every planks recipe: {outputs:?}");
+    }
+
+    #[test]
+    fn smelting_recipes_come_from_the_smelting_type_only() {
+        // Iron has three smelting recipes and three blasting twins; only the
+        // furnace recipes belong here.
+        let iron: Vec<&SmeltingRecipe> = smelting_recipes_for("iron_ingot").collect();
+        assert_eq!(
+            iron.len(),
+            3,
+            "raw iron and both ores, no blasting twin: {iron:?}"
+        );
+        let mut inputs: Vec<&str> = iron
+            .iter()
+            .map(|recipe| recipe.ingredient.items[0])
+            .collect();
+        inputs.sort();
+        assert_eq!(inputs, ["deepslate_iron_ore", "iron_ore", "raw_iron"]);
+        assert!(iron.iter().all(|recipe| recipe.cooking_time == 200));
+        assert!(iron.iter().all(|recipe| recipe.ingredient.tag.is_none()));
+
+        // A list ingredient keeps every alternative.
+        let nugget: Vec<&SmeltingRecipe> = smelting_recipes_for("copper_nugget").collect();
+        assert_eq!(nugget.len(), 1);
+        assert_eq!(nugget[0].cooking_time, 200);
+        assert!(nugget[0].ingredient.tag.is_none());
+        assert_eq!(nugget[0].ingredient.items.len(), 12);
+        assert!(nugget[0].ingredient.matches("copper_boots"));
     }
 
     #[test]

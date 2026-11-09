@@ -1,18 +1,21 @@
 //! Build-time reader for the pinned 26.3 server jar.
 //!
-//! It reads three things from the jar and writes `loot.rs`, `tags.rs` and
-//! `recipes.rs` into `OUT_DIR`:
+//! It reads four things from the jar and writes `loot.rs`, `tags.rs`,
+//! `recipes.rs` and `smelting.rs` into `OUT_DIR`:
 //!
 //! * the loot tables for the blocks and mobs the core skills use (the existing
 //!   generator);
 //! * every item and block tag, with tag references resolved recursively;
 //! * every shaped and shapeless crafting recipe, with its pattern, its keys and
-//!   its tag-aware ingredients.
+//!   its tag-aware ingredients;
+//! * every `minecraft:smelting` recipe, with its output, its ingredient and its
+//!   cooking time.
 //!
 //! The jar is the single source. Nothing is hand-copied: a recipe the skills
 //! need either exists in the jar or the skill cannot use it. Other recipe types
-//! (`crafting_special_*`, smelting, stonecutting, smithing) are not crafting
-//! recipes the `craft` primitive can perform and are skipped.
+//! (`crafting_special_*`, stonecutting, smithing, blasting, smoking and
+//! campfire cooking) are not what the `craft` or `smelt` primitive performs and
+//! are skipped.
 //!
 //! The server jar is a zip holding a versioned zip; the `zip` crate reads both.
 //! The loot reader only knows the loot-table shapes those tables use: pools with
@@ -72,6 +75,8 @@ fn main() {
         .unwrap_or_else(|e| panic!("gamedata: block tags: {e}"));
     let recipes = load_recipes(&mut inner, &item_tags)
         .unwrap_or_else(|e| panic!("gamedata: recipes: {e}"));
+    let smelting = load_smelting(&mut inner, &item_tags)
+        .unwrap_or_else(|e| panic!("gamedata: smelting: {e}"));
 
     // Every log-like block gets a loot table: the `logs` tag holds all of them
     // (overworld logs, nether stems and the wood/hyphae variants).
@@ -101,11 +106,13 @@ fn main() {
 
     let tags = render_tags(&item_tags, &block_tags);
     let recipes = render_recipes(&recipes);
+    let smelting = render_smelting(&smelting);
 
     let dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     fs::write(dir.join("loot.rs"), loot).expect("gamedata: write loot.rs");
     fs::write(dir.join("tags.rs"), tags).expect("gamedata: write tags.rs");
     fs::write(dir.join("recipes.rs"), recipes).expect("gamedata: write recipes.rs");
+    fs::write(dir.join("smelting.rs"), smelting).expect("gamedata: write smelting.rs");
 }
 
 /// The repository root, three levels above the crate directory
@@ -303,8 +310,9 @@ fn load_recipes(
             kind,
             "minecraft:crafting_shaped" | "minecraft:crafting_shapeless"
         ) {
-            // Special, smelting, stonecutting and smithing recipes are not
-            // crafting recipes the `craft` primitive can run.
+            // Special, stonecutting and smithing recipes are not crafting
+            // recipes the `craft` primitive can run; `minecraft:smelting` is a
+            // furnace recipe and is read by `load_smelting` instead.
             continue;
         }
         let Some((output, output_count)) = result_of(&json, &name)? else {
@@ -404,6 +412,82 @@ fn load_recipes(
         a.output == b.output
             && a.output_count == b.output_count
             && format!("{:?}", a.shape) == format!("{:?}", b.shape)
+    });
+    Ok(recipes)
+}
+
+/// The vanilla `SmeltingRecipe` default when a recipe omits `cookingtime`.
+const DEFAULT_COOKING_TIME: u32 = 200;
+
+/// One generated `minecraft:smelting` recipe.
+#[derive(Clone, Debug)]
+struct SmeltingDef {
+    output: String,
+    ingredient: IngredientDef,
+    cooking_time: u32,
+}
+
+/// Loads every `minecraft:smelting` recipe. Blasting, smoking and campfire
+/// cooking are separate recipe types with their own timing and are not what a
+/// furnace's `smelt` does.
+fn load_smelting(
+    jar: &mut Jar,
+    item_tags: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<Vec<SmeltingDef>, String> {
+    let prefix = "data/minecraft/recipe/";
+    let names: Vec<String> = jar
+        .file_names()
+        .filter_map(Result::ok)
+        .filter(|name| name.starts_with(prefix) && name.ends_with(".json"))
+        .map(|name| name.into_owned())
+        .collect();
+
+    let mut recipes = Vec::new();
+    for name in names {
+        let bytes = read_entry(jar, &name)?;
+        let json: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("{name}: invalid JSON: {e}"))?;
+        let Some(kind) = json.get("type").and_then(Value::as_str) else {
+            return Err(format!("{name}: missing `type`"));
+        };
+        if kind != "minecraft:smelting" {
+            continue;
+        }
+        let Some((output, output_count)) = result_of(&json, &name)? else {
+            continue;
+        };
+        if output_count != 1 {
+            // The `smelt` primitive cooks one item per call.
+            return Err(format!(
+                "{name}: a smelting result yields {output_count} items, expected 1"
+            ));
+        }
+        let ingredient = match json.get("ingredient") {
+            Some(value) => ingredient(value, item_tags, &name)?,
+            None => return Err(format!("{name}: missing `ingredient`")),
+        };
+        let cooking_time = match json.get("cookingtime") {
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| format!("{name}: `cookingtime` is not a non-negative integer"))?,
+            None => DEFAULT_COOKING_TIME.into(),
+        };
+        let cooking_time = u32::try_from(cooking_time)
+            .map_err(|_| format!("{name}: `cookingtime` is too large"))?;
+        recipes.push(SmeltingDef {
+            output,
+            ingredient,
+            cooking_time,
+        });
+    }
+
+    // Deterministic order: by output, then the cooking time and the ingredient
+    // (several raw forms share one output, e.g. raw iron and both iron ores).
+    recipes.sort_by(|a, b| {
+        a.output
+            .cmp(&b.output)
+            .then_with(|| a.cooking_time.cmp(&b.cooking_time))
+            .then_with(|| format!("{:?}", a.ingredient).cmp(&format!("{:?}", b.ingredient)))
     });
     Ok(recipes)
 }
@@ -565,6 +649,21 @@ fn render_ingredient(out: &mut String, ingredient: &IngredientDef) {
         out.push_str(&format!("{item:?}, "));
     }
     out.push_str("] }");
+}
+
+fn render_smelting(recipes: &[SmeltingDef]) -> String {
+    let mut out = String::from("// Generated by build.rs from the 26.3 server jar. Do not edit.\n\n");
+    out.push_str("pub const SMELTING: &[SmeltingRecipe] = &[\n");
+    for recipe in recipes {
+        out.push_str(&format!(
+            "    SmeltingRecipe {{ output: {:?}, ingredient: ",
+            recipe.output
+        ));
+        render_ingredient(&mut out, &recipe.ingredient);
+        out.push_str(&format!(", cooking_time: {} }},\n", recipe.cooking_time));
+    }
+    out.push_str("];\n");
+    out
 }
 
 // ----------------------------------------------------------------------

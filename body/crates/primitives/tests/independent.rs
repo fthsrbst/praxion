@@ -76,7 +76,8 @@ fn flight_deadlines_cover_internal_waits() {
     let p = Primitives::standard();
     assert!(p.get("mine").unwrap().default_max_ticks >= 180);
     assert!(p.get("place").unwrap().default_max_ticks >= 80);
-    assert!(p.get("craft").unwrap().default_max_ticks >= 300);
+    assert!(p.get("craft").unwrap().default_max_ticks >= 400);
+    assert!(p.get("smelt").unwrap().default_max_ticks >= 600);
     assert!(p.get("eat").unwrap().default_max_ticks >= 180);
     assert!(p.get("attack").unwrap().default_max_ticks >= 420);
     assert!(p.get("equip").unwrap().default_max_ticks >= 80);
