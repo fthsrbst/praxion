@@ -18,6 +18,7 @@ from praxion_brain.skills import (
 )
 
 CORE_NAMES = {
+    "eat_food",
     "get_cobblestone",
     "get_crafting_table",
     "get_iron_ingot",
@@ -65,12 +66,13 @@ def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
         "branch_mine",
         "craft",
         "dig_down",
+        "eat",
         "explore",
         "mine",
         "place",
         "smelt",
     ]
-    assert fact_names(catalog) == ["count", "has", "near"]
+    assert fact_names(catalog) == ["count", "food", "has", "near"]
 
 
 def test_parser_handles_multiple_skills_and_comments(tmp_path) -> None:
