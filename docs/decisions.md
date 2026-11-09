@@ -3,6 +3,45 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-09
+
+All four approved by the user (macOS session), each the recommended option; designs from the code scout in
+`logs/mac1109/design-scout.json` (ignored).
+
+- **`smelt(item)` cooks one item per call (user).** `item` is the output, as in `craft(item)`. The body reaches a
+  `furnace` known within 4 (same walk as craft, below), loads one input and one fuel with the craft click triple
+  (no shift-click: Azalea predicts a shift-clicked fuel into the input slot), waits for the output slot (cook time +
+  60 ticks), shift-clicks it out under a `StorageInventory` receipt and always closes the menu. Fuel by fixed priority:
+  coal, charcoal, `#planks`, `#logs` (each burns at least one item; no burn-time table). A preempted call leaves its
+  items in the furnace; the next call reads the menu and continues (output already there -> take; input already there
+  -> skip loading; a different input -> `furnace_busy`). Effects come from a generated `gamedata::SMELTING` table (the
+  jar's `minecraft:smelting` recipes); fuel is not a declared effect. Failure kinds: `no_recipe`, `nothing_to_smelt`,
+  `no_fuel`, `needs_furnace`, `no_menu`, `furnace_busy`, `not_cooking`, `no_result`. A hand-written core skill
+  `get_iron_ingot` uses it. Reason: registry effects are per first argument with fixed counts, so `n` cannot be
+  declared; one item bounds what a preemption strands. Rules out: `smelt(item, n)`, a burn-time table, blast furnace
+  and smoker for now. Known gap: an input stranded in the furnace is invisible to `count()`.
+- **`craft` walks to the station it was promised (user).** `near(crafting_table, 4)` stays a cheap rayless fact. A
+  shared `Station` helper (used by `craft` and `smelt`) resolves the block within 5 of the eye, walks in a straight
+  line until the eye is within reach and the pick hits the cell (at most 80 ticks, then `needs_table` /
+  `needs_furnace`), then sends the Use clicks. `craft`'s flight budget goes from 300 to 400 ticks. Reason: autonomous
+  run 2 (seed 202) fired craft on `near` true and failed `needs_table`; same lesson as the wet-stone fix (the fact stays
+  cheap, the primitive delivers what it promised). Rules out for now: a planner-based approach (upgrade only if live
+  runs show tables behind walls), a reach check inside `near`.
+- **Explore may climb once per call for a view (user).** When the look-around found nothing and the nearest best-tier
+  frontier is closer than about 32 blocks (terrain, not sight range, ends the known map), explore walks once to the
+  highest reachable standable dry cell within 20 blocks horizontally and 3 to 12 blocks up, re-arms the look-around
+  there, then returns to the normal heading ranking. The `uphill` tier stays as it is. Reason: on seed 303 a hill
+  hides the trees and explore fails about 2 runs in 5; a person climbs to look. Amends the "do not climb a mountain
+  looking for wood" rule for this one gated leg. Rules out: a global height or sky-area score in the frontier rank.
+- **The raw-store / perception boundary is the rule the code keeps, checked by a scan test (user).** Decision-making
+  code gets world facts (blocks, entities, columns) only from `Perception`. Allowed direct `World` reads: the headless
+  actuator (physics), receipts and the driver (server evidence), and own-state reads (inventory, held slot, open
+  container, own pose). Any other peek is a `Perception` query with `Provenance::Privileged` and a ledger entry; explore's
+  sky-openness check becomes such a query. A test scans the body crates for direct store reads and fails on any call
+  site outside the allowlist and a committed baseline that may only shrink. Architecture §4, §5.1 and §7 are updated to
+  this rule. Rules out for now: removing `praxion-world` from the primitives, facts and reflexes crates (type-level
+  enforcement).
+
 ## 2026-11-08
 
 - **A brain `pop` of the running intent cancels it (Claude).** Stop and cancel always work (architecture §5.4):
