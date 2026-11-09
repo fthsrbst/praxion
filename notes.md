@@ -6,6 +6,18 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-09, Claude Opus 5.5: autonomous run 5 and find_ore
+- Run 5, fresh seed 505, commit 0c27a5f: wood -> crafting table -> wooden pickaxe -> cobblestone (x8) -> stone pickaxe
+  -> stone sword -> furnace, all done, about 4 minutes; the furnace again by the self-written `get_furnace`.
+- Coal: route `write`, `gpt-6-luna` wrote `get_coal` (mine if near, else explore(coal_ore)); practice failed
+  `not_found` on every seed -> `inconclusive_body`. Ore is underground; explore only walks the surface.
+- Two loop bugs seen live, fixed: (1) while the skill was written, the proposer repeated the learning goal, code
+  rejected it as `same_as_last`, escalated to gpt-6.1-terra and idled (c1b7405: exclusion checked before validation,
+  prompt asks for a side goal); (2) after the failure it repeated the failed goal (rule missing from the prompt, f1be00e).
+- Body: `branch_mine(ore)` + core skills `find_ore(ore)`, `search_surface(block)` (7ab0ef5, Sonnet writer, GLM review,
+  DeepSeek fixes). Not yet run live.
+- Lesson: a worker's `cargo fmt` reformatted ~105 unrelated files; never put `cargo fmt` in a brief here.
+
 ## 2026-11-08, OpenCode (DeepSeek V4.1 Flash): a pop cancels a running goal
 - The body's `pop` now cancels the running intent instead of ignoring it: the in-flight primitive is abandoned,
   the command settles `settled outcome=cancelled`, the stack entry is `done` and a suspended goal underneath

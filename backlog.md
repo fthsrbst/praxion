@@ -51,14 +51,22 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   removed as tautological. The same fixture is needed for tests of the walk-back cap (`EXPLORE_MAX_WALK_BACKS`),
   the empty walk-back/frontier plan skips, the look-around ending when a target is found mid-turn, and
   `open_to_sky` against a real heightmap (GLM review `logs/review/r1108/r-explore-fixes.answer.txt` Q6).
-- NEXT (body): finding ores. Run 4: the self-written `get_coal` (explore(coal_ore) -> mine) failed admission
-  `inconclusive_body` on 3 seeds: explore searches the surface only (open-to-sky rule), while ores show on cliff faces,
-  in caves and underground. Needs a core `find_ore` behaviour: look at exposed stone faces in view, else staircase down
-  (`dig_down` to the ore's usual depth) and branch-mine with safety rules. Gates coal and iron (ladder rungs 8-10).
-- NEXT (loop): admission blocks the body for 30+ minutes (autonomous run 3, `get_coal`: the body stood still while
-  practice runs played on test servers). Session 8 says a safe fallback goal runs after 3-5 s. Make admission a
-  background job; the loop keeps playing known-skill goals (never the goal being written); on admission the skill is
-  hot-loaded and the goal retried. After the console agent's `loop.py` change lands.
+- NEXT (live): run 6 to verify `find_ore`/`branch_mine` (commit 7ab0ef5) and the two loop fixes (c1b7405 side goals
+  while a skill is written, f1be00e no repeat of the newest goal) on a fresh seed; target coal and raw iron. Run 5
+  (seed 505) reached the furnace with the self-written `get_furnace`, then stopped at coal (`inconclusive_body`, no
+  ore on the surface) and idled (the two loop bugs). Command: `cd harness && python -m praxion_harness.autonomy
+  --seed 606 --minutes 45` (Windows; body release build from HEAD first).
+- branch_mine leftovers (GLM review `logs/oc-review-ore/brief.answer.txt` finding 5): no Digger-level test of the
+  real route (stone world descends then tunnels; ore ahead -> Confirmed before the next dig; dig cap -> not_found;
+  dry-step limit -> stuck). The DeepSeek worker was cut off before it wrote them. Use the `primitives/tests/
+  independent.rs` harness.
+- `cargo test --workspace` not run to completion after the dig_down rewrite: the decoder `corpus.rs` and reflexes
+  `matrix.rs` tests take 30+ minutes; primitives, rules, interpreter (228 tests) and clippy pass.
+- The repo is not rustfmt-clean: `cargo fmt` touches ~105 unrelated files. Those changes sit in
+  `git stash@{0}` ("cargo fmt noise ...") on the Windows machine only. Decide: one dedicated fmt commit, or drop
+  the stash. Until then, never run `cargo fmt` in a worker brief.
+- NEXT (body, after run 6): a `smelt` primitive (furnace menu: input, fuel, wait, take output); gates the
+  iron_ingot rung. Menu clicks already exist (`craft.rs`, `MenuAction`).
 - `craft` vs `near(crafting_table, 4)` disagree (autonomous run 2, seed 202,
   `runs/test-body-774ebe1d772149d8b028db880afe62eb`): `get_stone_sword` chose its craft rule (near true) and `craft`
   failed `needs_table` after 195 ticks. Same class as wet stone (near vs mine): give craft and near one predicate
