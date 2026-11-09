@@ -79,10 +79,18 @@ pub(crate) struct Attack {
     pub(crate) hand: HandSelect,
     /// Ticks spent waiting for that swap before fighting as we are.
     pub(crate) weapon_waited: u32,
+    /// Ticks the locked mob has been in its death animation.
+    pub(crate) dying: u32,
 }
 
 /// Ticks `attack` waits for a mob within reach before it fails `no_target`.
 const NO_TARGET_TICKS: u32 = 10;
+
+/// Ticks a killed mob is held before the kill is confirmed, unless the server
+/// removes it first (it does after about 20). The drop spawns a tick or two
+/// after the death; confirming on the death tick let `hunt` look for it too
+/// early, end `done` and walk away from the meat (live run 2026-11-09).
+const DEATH_SETTLE_TICKS: u32 = 10;
 
 /// How far the eye may be from the mob's feet and still click it. The same
 /// metric and radius as the `near_entity(mob, 3)` guard that selects `attack`,
@@ -137,13 +145,20 @@ impl Attack {
                 .map(|entity| (entity.position(), entity.is_dying()))
         });
         if self.entity.is_some() {
-            // Gone from the store, or dead and playing its death animation (the
-            // server keeps a killed mob about 20 ticks before removing it, and
-            // knockback can carry it out of reach meanwhile): the kill
-            // registered either way.
-            let Some((position, false)) = current else {
+            // Gone from the store: the kill registered. Dead and playing its
+            // death animation (the server keeps a killed mob about 20 ticks, and
+            // knockback can carry it out of reach meanwhile): never swing at it,
+            // and confirm once it is removed or the drop has had time to spawn.
+            let Some((position, dying)) = current else {
                 return (frame, None, Some(Outcome::Confirmed));
             };
+            if dying {
+                self.dying += 1;
+                if self.dying >= DEATH_SETTLE_TICKS {
+                    return (frame, None, Some(Outcome::Confirmed));
+                }
+                return (frame, None, None);
+            }
             if ctx.body.eye_position().distance_to(position) > ATTACK_REACH {
                 // Out of reach: nothing to click. Give the mob the same ten
                 // ticks the search allows, then hand control back so the
@@ -438,6 +453,7 @@ mod attack_tests {
             out_of_reach: 0,
             hand: HandSelect::default(),
             weapon_waited: 0,
+            dying: 0,
         }
     }
 
@@ -532,9 +548,33 @@ mod attack_tests {
         assert!(outcome.is_none(), "the mob is locked");
         crate::test_world::set_dying(&mut world, 3);
         crate::test_world::teleport_entity(&mut world, 3, Vec3::new(0.5, 64.0, 9.5));
-        let (frame, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 21);
+        // Held, not confirmed on the death tick: the drop spawns a tick or two
+        // later and `hunt` must be able to see it when the call ends.
+        for n in 0..DEATH_SETTLE_TICKS - 1 {
+            let (frame, _, outcome) =
+                tick(&mut attack, &world, &mut perception, &mut body, 21 + u64::from(n));
+            assert_eq!(outcome, None, "tick {n}: a corpse is held while its drop spawns");
+            assert!(!frame.clicks.contains(&praxion_headless::Click::Attack), "no swing at a corpse");
+        }
+        let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 40);
+        assert_eq!(outcome, Some(Outcome::Confirmed), "the settle window ends in a kill");
+    }
+
+    #[test]
+    fn a_corpse_removed_by_the_server_is_confirmed_at_once() {
+        let mut world = world();
+        add_entity(&mut world, 3, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+        assert!(outcome.is_none(), "the mob is locked");
+        crate::test_world::set_dying(&mut world, 3);
+        let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 21);
+        assert_eq!(outcome, None);
+        crate::test_world::remove_entity(&mut world, 3);
+        let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 22);
         assert_eq!(outcome, Some(Outcome::Confirmed));
-        assert!(!frame.clicks.contains(&praxion_headless::Click::Attack), "no swing at a corpse");
     }
 
     #[test]

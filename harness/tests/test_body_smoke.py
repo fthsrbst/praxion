@@ -49,6 +49,15 @@ def _feet_cell(referee) -> Tuple[int, int, int]:
     return int(x // 1), int(y // 1), int(z // 1)
 
 
+def _finished(events: Iterable[dict], primitive: str) -> List[dict]:
+    """Every ``primitive_finished`` for ``primitive``, in log order."""
+    return [
+        event
+        for event in events
+        if event.get("kind") == "primitive_finished" and event.get("primitive") == primitive
+    ]
+
+
 def _intent_starts(events: Iterable[dict], primitive: str) -> List[dict]:
     """Every ``intent_started`` for ``primitive``, in log order."""
     return [
@@ -614,11 +623,14 @@ def test_the_body_pillars_up_to_a_log_it_cannot_reach() -> None:
             [
                 f"run dir: {run.run_dir}",
                 f"log cell {cell}, feet {_feet_cell(run.referee)}",
-                f"pillar starts: {_intent_starts(events, 'pillar')}",
+                f"pillar finishes: {_finished(events, 'pillar')}",
                 f"body output tail:\n{run.output()[-2000:]}",
             ]
         )
-        assert _intent_starts(events, "pillar"), "the body never climbed\n" + context
+        # A pillar's click is logged as a `place` intent (the receipt model), so
+        # the climb is the pillar's own confirmed finish (live run 2026-11-09).
+        climbs = [e for e in _finished(events, "pillar") if e.get("outcome") == "confirmed"]
+        assert climbs, "the body never climbed\n" + context
         assert _intent_starts(events, "mine"), "nothing was mined\n" + context
         assert gone, "the log six blocks up was never broken\n" + context
         assert run.referee.player_health(BODY) > 0.0, context

@@ -234,6 +234,7 @@ impl Runner {
                     out_of_reach: 0,
                     hand: HandSelect::default(),
                     weapon_waited: 0,
+                    dying: 0,
                 })
             }
             "equip" => Active::Equip(Equip {

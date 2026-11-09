@@ -1,9 +1,12 @@
 """Live smoke test for the talking bot (talk slice 1). Written, not yet run.
 
 A fake operator (the spike's headless client in ``--operator`` mode, logged in as
-the player the body obeys) sends ``durum`` and ``p: 8 taş getir`` in game chat.
+the player the body obeys) sends ``durum`` and ``p: 16 taş getir`` in game chat.
 The body answers ``durum`` itself, the brain maps the task (its prefix stripped)
-to ``count(cobblestone) >= 8`` and the bot plays ``get_cobblestone``. Checked from
+to ``count(cobblestone) >= 16`` and the bot plays ``get_cobblestone``. Sixteen, not
+eight: the brain starts autonomous at once and its code-only fallback is
+``get_cobblestone(8)``, so an eight-stone task arrives already met and is
+rightly refused (live run 2026-11-09). Checked from
 the outside: the body's event log (`chat_received`, `chat_sent`), the brain's
 evidence and the referee's inventory.
 
@@ -68,12 +71,12 @@ def _chat_sent(session) -> list[str]:
     ]
 
 
-def _wait(predicate, what: str, timeout: float = TIMEOUT) -> None:
+def _wait(predicate, what: str, timeout: float = TIMEOUT, pause: float = 1.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
-        time.sleep(1.0)
+        time.sleep(pause)
     raise AssertionError(f"timed out waiting for {what}")
 
 
@@ -90,7 +93,7 @@ def test_the_bot_answers_durum_and_plays_a_chat_task(tmp_path) -> None:
     from praxion_brain.skills import load_catalog
 
     def no_model(*args, **kwargs):
-        # The fast path maps "8 taş getir" without a model. Anything else here
+        # The fast path maps "16 taş getir" without a model. Anything else here
         # (a free sentence, the autonomous pick after the task) would reach the
         # real router; with no model configured that path falls back to code
         # only, so nothing is paid.
@@ -122,7 +125,7 @@ def test_the_bot_answers_durum_and_plays_a_chat_task(tmp_path) -> None:
                 "--addr", f"127.0.0.1:{session.server.port}",
                 "--operator", OPERATOR,
                 "--say", "15:durum",
-                "--say", "30:p: 8 taş getir",
+                "--say", "30:p: 16 taş getir",
                 "--seconds", "400",
             ],
             stdout=subprocess.DEVNULL,
@@ -134,24 +137,30 @@ def test_the_bot_answers_durum_and_plays_a_chat_task(tmp_path) -> None:
 
             def stepping(predicate):
                 def check():
-                    loop.step(0.2)
+                    # Drain the port for about a second: `step` handles one
+                    # message, and the body streams several a second, so one
+                    # step per check let the brain fall minutes behind.
+                    until = time.monotonic() + 1.0
+                    while time.monotonic() < until:
+                        loop.step(0.05)
                     return predicate()
 
                 return check
 
             # 1. The body answers `durum` with its own facts, brain or not.
-            _wait(stepping(lambda: any(t.startswith("durum:") for t in _chat_sent(session))), "the durum answer")
+            _wait(stepping(lambda: any(t.startswith("durum:") for t in _chat_sent(session))), "the durum answer", pause=0.0)
 
             # 2. The brain maps the sentence, acknowledges and plays it.
-            _wait(stepping(lambda: any(t.startswith("tamam:") for t in _chat_sent(session))), "the acknowledgement")
+            _wait(stepping(lambda: any(t.startswith("tamam:") for t in _chat_sent(session))), "the acknowledgement", pause=0.0)
             _wait(
                 stepping(
-                    lambda: session.referee.player_inventory(BODY).get("minecraft:cobblestone", 0) >= 8
+                    lambda: session.referee.player_inventory(BODY).get("minecraft:cobblestone", 0) >= 16
                 ),
-                "eight cobblestone",
+                "sixteen cobblestone",
                 timeout=max(10.0, stop_at - time.monotonic()),
+                pause=0.0,
             )
-            _wait(stepping(lambda: any(t.startswith("bitti:") for t in _chat_sent(session))), "the done line")
+            _wait(stepping(lambda: any(t.startswith("bitti:") for t in _chat_sent(session))), "the done line", pause=0.0)
 
             # 3. Every claim in chat has a closed evidence line.
             sent = [
