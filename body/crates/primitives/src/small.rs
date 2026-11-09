@@ -131,12 +131,17 @@ impl Attack {
         // (review finding 2). The read is by the id the primitive locked, on
         // the crate's one allowlisted store read; perception has no identity
         // query and would spend a ray for what is already ours.
-        let current = self
-            .entity
-            .and_then(|id| ctx.world.entity(id).map(|entity| entity.position()));
+        let current = self.entity.and_then(|id| {
+            ctx.world
+                .entity(id)
+                .map(|entity| (entity.position(), entity.is_dying()))
+        });
         if self.entity.is_some() {
-            let Some(position) = current else {
-                // Gone from the store: the kill registered.
+            // Gone from the store, or dead and playing its death animation (the
+            // server keeps a killed mob about 20 ticks before removing it, and
+            // knockback can carry it out of reach meanwhile): the kill
+            // registered either way.
+            let Some((position, false)) = current else {
                 return (frame, None, Some(Outcome::Confirmed));
             };
             if ctx.body.eye_position().distance_to(position) > ATTACK_REACH {
@@ -511,6 +516,25 @@ mod attack_tests {
         let mut attack = attack_for("zombie");
         let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 20);
         assert_eq!(frame.select_slot, None);
+    }
+
+    #[test]
+    fn a_locked_mob_in_its_death_animation_is_a_kill() {
+        // Seen live on 2026-11-09: the server keeps a killed cow about 20 ticks
+        // with the `Dying` pose, knockback carried it out of reach, and the call
+        // failed `no_target` although the cow was dead.
+        let mut world = world();
+        add_entity(&mut world, 3, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+        assert!(outcome.is_none(), "the mob is locked");
+        crate::test_world::set_dying(&mut world, 3);
+        crate::test_world::teleport_entity(&mut world, 3, Vec3::new(0.5, 64.0, 9.5));
+        let (frame, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 21);
+        assert_eq!(outcome, Some(Outcome::Confirmed));
+        assert!(!frame.clicks.contains(&praxion_headless::Click::Attack), "no swing at a corpse");
     }
 
     #[test]

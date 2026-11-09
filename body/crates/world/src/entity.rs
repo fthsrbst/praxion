@@ -99,6 +99,13 @@ impl Entity {
         })
     }
 
+    /// Whether the entity is dead and playing its death animation. A killed
+    /// mob stays in the store for about 20 ticks with the `Dying` pose before
+    /// the server removes it; it is neither a target nor a threat any more.
+    pub fn is_dying(&self) -> bool {
+        self.pose() == Some(Pose::Dying)
+    }
+
     pub(crate) fn set_position(&mut self, pos: Vec3) {
         self.pos = pos;
     }

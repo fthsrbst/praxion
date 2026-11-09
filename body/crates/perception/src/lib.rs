@@ -725,7 +725,7 @@ impl Perception {
         let mut found = Vec::new();
         let entities: Vec<Entity> = world.entities().cloned().collect();
         for entity in &entities {
-            if !filter.matches(entity.kind()) {
+            if !filter.matches(entity.kind()) || entity.is_dying() {
                 continue;
             }
             let distance = eye.distance_to(entity.position());
@@ -765,7 +765,7 @@ impl Perception {
         let radius = f64::from(radius).min(f64::from(self.config.range));
         let mut candidates: Vec<(f64, Entity)> = world
             .entities()
-            .filter(|entity| entity.kind() == kind)
+            .filter(|entity| entity.kind() == kind && !entity.is_dying())
             .map(|entity| (eye.distance_to(entity.position()), entity.clone()))
             .filter(|(distance, _)| *distance <= radius)
             .collect();

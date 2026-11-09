@@ -1573,3 +1573,38 @@ fn a_scaffold_cell_a_query_sees_empty_is_forgotten() {
         "the query that saw it empty forgot it"
     );
 }
+
+fn set_dying(world: &mut World, id: i32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(id),
+            packed_items: azalea_entity::EntityMetadataItems(vec![azalea_entity::EntityDataItem {
+                index: 6,
+                value: azalea_entity::EntityDataValue::Pose(azalea_entity::Pose::Dying),
+            }]),
+        }),
+    );
+}
+
+/// A killed mob stays in the store about 20 ticks with the `Dying` pose. It is
+/// neither a target nor a threat: seen live on 2026-11-09, `hunt` kept the dead
+/// cow as its target, timed out `no_target` and walked off after a sheep.
+#[test]
+fn a_dying_mob_is_neither_the_nearest_nor_in_the_list() {
+    let mut world = world_with(&[]);
+    add_zombie(&mut world, 1, Vec3::new(2.5, FEET_Y, 0.5));
+    add_zombie(&mut world, 2, Vec3::new(5.5, FEET_Y, 0.5));
+    set_dying(&mut world, 1);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+
+    let nearest = p.nearest_entity(Caller::Other, &world, EntityKind::Zombie, 16);
+    assert_eq!(nearest.value().map(|fact| fact.id), Some(2), "the live one, farther off");
+    let listed: Vec<i32> = p
+        .entities_near(Caller::Other, &world, 16, EntityFilter::Any)
+        .value()
+        .map(|facts| facts.iter().map(|fact| fact.id).collect())
+        .unwrap_or_default();
+    assert_eq!(listed, vec![2]);
+}

@@ -136,10 +136,20 @@ impl Pillar {
                 if feet_y >= f64::from(cell.y) + 1.0 + CLEAR_MARGIN {
                     let support = BlockPos::new(cell.x, cell.y - 1, cell.z);
                     let pick = praxion_headless::pick(ctx.world, ctx.body);
+                    // Straight down the ray meets the support's top face, or a
+                    // replaceable plant or snow layer in the feet cell itself
+                    // (short grass has an outline): a use click on that places
+                    // the block in the cell too, replacing the plant, as in
+                    // vanilla. Seen live on 2026-11-09: a body standing in grass
+                    // never clicked and failed `no_click`.
+                    let cell_replaceable =
+                        cell_state(ctx, cell).is_some_and(blocks::is_replaceable);
                     let on_support = pick.block.as_ref().is_some_and(|hit| {
                         !hit.miss
-                            && hit.block_pos == support
-                            && hit.direction == azalea_core::direction::Direction::Up
+                            && ((hit.block_pos == support
+                                && hit.direction == azalea_core::direction::Direction::Up)
+                                || (hit.block_pos == cell
+                                    && cell_replaceable))
                     });
                     if on_support {
                         frame.clicks.push(Click::Use);
@@ -266,6 +276,11 @@ impl Pillar {
                 None => return Check::Wait,
                 Some(state) if blocks::fluid(state).is_some() => return Check::Fail("unsafe"),
                 Some(state) if !state.is_air() && !blocks::is_passable(state) => {
+                    return Check::Fail("no_headroom");
+                }
+                // The feet cell receives the block: a passable thing a click
+                // cannot replace (a flower, a torch) would take the click.
+                Some(state) if up == 0 && !blocks::is_replaceable(state) => {
                     return Check::Fail("no_headroom");
                 }
                 Some(_) => {}
@@ -521,6 +536,53 @@ mod tests {
             }
         }
         assert_eq!(outcome, Some(Outcome::Failed("too_high".into())));
+        scaffold::reset();
+    }
+
+    #[test]
+    fn standing_in_short_grass_the_body_still_clicks_and_places_in_its_feet_cell() {
+        // Seen live on 2026-11-09: the feet cell held a plant, the ray met it
+        // instead of the support's top face, and the call failed `no_click`.
+        scaffold::reset();
+        let mut world = floor_world();
+        let cell = feet().to_block_pos_floor();
+        set_block(&mut world, cell, BlockState::from(BlockKind::ShortGrass));
+        let mut rig = Rig::new(world);
+        let mut spec = None;
+        for tick in 0..40 {
+            let (frame, pending, outcome) = rig.run();
+            assert!(outcome.is_none(), "tick {tick}: {outcome:?}");
+            rig.body.step(&frame.held, &rig.world);
+            if frame.clicks.contains(&Click::Use) {
+                spec = pending;
+                break;
+            }
+        }
+        match spec {
+            Some(IntentSpec::Place { pos, .. }) => assert_eq!(pos, cell),
+            other => panic!("expected one place click into the feet cell, got {other:?}"),
+        }
+        scaffold::reset();
+    }
+
+    #[test]
+    fn a_flower_in_the_feet_cell_is_refused_before_the_jump() {
+        scaffold::reset();
+        let mut world = floor_world();
+        let cell = feet().to_block_pos_floor();
+        set_block(&mut world, cell, BlockState::from(BlockKind::Dandelion));
+        let mut rig = Rig::new(world);
+        let mut outcome = None;
+        for _ in 0..40 {
+            let (frame, _, result) = rig.run();
+            assert!(!frame.held.jump, "no jump into a cell a click cannot replace");
+            rig.body.step(&frame.held, &rig.world);
+            if result.is_some() {
+                outcome = result;
+                break;
+            }
+        }
+        assert_eq!(outcome, Some(Outcome::Failed("no_headroom".into())));
         scaffold::reset();
     }
 

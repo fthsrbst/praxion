@@ -26,6 +26,7 @@ praxion-world = { path = "../world" }
 
 [dev-dependencies]
 azalea-buf = { path = "../../../third_party/azalea/azalea-buf" }
+azalea-entity = { path = "../../../third_party/azalea/azalea-entity" }
 azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 azalea-world = { path = "../../../third_party/azalea/azalea-world" }
 uuid = "1.23.4"

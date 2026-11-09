@@ -2331,6 +2331,7 @@ dependencies = [
  "azalea-block",
  "azalea-buf",
  "azalea-core",
+ "azalea-entity",
  "azalea-inventory",
  "azalea-protocol",
  "azalea-registry",

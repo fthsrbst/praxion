@@ -347,3 +347,22 @@ pub(crate) fn remove_entity(world: &mut World, id: i32) {
         ),
     );
 }
+
+/// A server `set_entity_data` giving entity `id` the `Dying` pose, as the server
+/// does for the ~20 ticks between a kill and the removal.
+pub(crate) fn set_dying(world: &mut World, id: i32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(
+            azalea_protocol::packets::game::ClientboundSetEntityData {
+                id: azalea_core::entity_id::MinecraftEntityId(id),
+                packed_items: azalea_entity::EntityMetadataItems(vec![
+                    azalea_entity::EntityDataItem {
+                        index: 6,
+                        value: azalea_entity::EntityDataValue::Pose(azalea_entity::Pose::Dying),
+                    },
+                ]),
+            },
+        ),
+    );
+}
