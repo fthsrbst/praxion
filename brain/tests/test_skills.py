@@ -20,6 +20,7 @@ from praxion_brain.skills import (
 CORE_NAMES = {
     "get_cobblestone",
     "get_crafting_table",
+    "get_iron_ingot",
     "get_crafting_table_near",
     "get_planks",
     "get_sticks",
@@ -67,6 +68,7 @@ def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
         "explore",
         "mine",
         "place",
+        "smelt",
     ]
     assert fact_names(catalog) == ["count", "has", "near"]
 
