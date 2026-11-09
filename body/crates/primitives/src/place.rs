@@ -326,7 +326,28 @@ fn place_target(ctx: &mut Ctx<'_>, rejected: &[BlockPos]) -> Option<(BlockPos, D
         let distance = eye.distance_to(center(air));
         candidates.push((distance, fact.pos, direction));
     }
-    nearest_allowed(candidates)
+    choose_placement(candidates, eye_cell)
+}
+
+/// `near(x, 4)`'s sphere: squared integer cell delta from the eye cell at most
+/// 4 squared (`perception::known`'s eye-cell metric).
+fn inside_near_sphere(eye_cell: BlockPos, cell: BlockPos) -> bool {
+    let (dx, dy, dz) = (cell.x - eye_cell.x, cell.y - eye_cell.y, cell.z - eye_cell.z);
+    dx * dx + dy * dy + dz * dz <= 16
+}
+
+/// Prefer a candidate whose placed cell stays inside `near(x, 4)`'s sphere: a
+/// furnace placed one step beyond a far support was not "near" afterwards, and
+/// `get_iron_ingot` then failed `no_furnace` next to its own furnace. Falls back
+/// to the nearest of all when none qualifies.
+fn choose_placement(
+    candidates: Vec<(f64, BlockPos, Direction)>,
+    eye_cell: BlockPos,
+) -> Option<(BlockPos, Direction)> {
+    let (inside, outside): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|(_, support, direction)| {
+        inside_near_sphere(eye_cell, support.offset_with_direction(*direction))
+    });
+    nearest_allowed(inside).or_else(|| nearest_allowed(outside))
 }
 
 #[cfg(test)]
@@ -438,6 +459,24 @@ mod tests {
             nearest_allowed([(0.5, support, direction)]),
             Some((support, direction))
         );
+        reset_place_failures();
+    }
+
+    #[test]
+    fn a_placement_inside_the_near_sphere_beats_a_nearer_one_outside_it() {
+        reset_place_failures();
+        let eye_cell = BlockPos::new(0, 65, 0);
+        let east = Direction::East;
+        // The first support is nearer, but the cell beyond it is 5 away.
+        let outside = BlockPos::new(4, 65, 0);
+        let inside = BlockPos::new(2, 65, 0);
+        assert!(!inside_near_sphere(eye_cell, outside.offset_with_direction(east)));
+        assert!(inside_near_sphere(eye_cell, inside.offset_with_direction(east)));
+        let chosen = choose_placement(vec![(1.0, outside, east), (2.0, inside, east)], eye_cell);
+        assert_eq!(chosen, Some((inside, east)));
+        // With nothing inside, the nearest of the rest is still placed.
+        let chosen = choose_placement(vec![(1.0, outside, east)], eye_cell);
+        assert_eq!(chosen, Some((outside, east)));
         reset_place_failures();
     }
 }

@@ -3,7 +3,7 @@
 //! can still be out of reach or out of sight; the station walks to it until the
 //! crosshair can pick the cell, then sends the Use clicks.
 
-use azalea_core::position::BlockPos;
+use azalea_core::position::{BlockPos, Vec3};
 use azalea_registry::builtin::{BlockKind, MenuKind};
 use praxion_headless::{Click, ControlFrame};
 use praxion_perception::Caller;
@@ -21,6 +21,29 @@ const WALK_TICKS: u32 = 80;
 const OPEN_TICKS: u32 = 60;
 /// Ticks between two clicks while the menu has not opened.
 const CLICK_INTERVAL: u32 = 10;
+
+/// Offsets from a cell's centre to the six face points, inset 0.05 into the
+/// cell so a ray aimed there still enters it.
+const FACE_OFFSETS: [(f64, f64, f64); 6] = [
+    (-0.45, 0.0, 0.0),
+    (0.45, 0.0, 0.0),
+    (0.0, -0.45, 0.0),
+    (0.0, 0.45, 0.0),
+    (0.0, 0.0, -0.45),
+    (0.0, 0.0, 0.45),
+];
+/// How far from a cell the body stands when it backs off from a blocked view.
+const BACK_OFF_RADIUS: f64 = 2.5;
+
+/// Where the station aims this tick.
+enum Aim {
+    /// A point whose ray first hits the cell.
+    Point(Vec3),
+    /// The cell's centre, with a plant in front of it to break first.
+    Plant(Vec3),
+    /// No point of the cell can be picked from here.
+    Blocked,
+}
 
 /// What one station tick decided.
 #[derive(Debug)]
@@ -80,31 +103,23 @@ impl Station {
         if eye.distance_to(centre) > reach {
             return self.walk(ctx, cell);
         }
-        // In reach: aim at the true centre (a ray at a block's bottom edge can
-        // pass under it) and click only when the crosshair is on the cell.
+        // In reach: aim where the crosshair lands on the cell, and click only
+        // when it does.
+        let aim = self.choose_aim(ctx, cell);
+        let (point, plant) = match aim {
+            Aim::Point(point) => (point, false),
+            Aim::Plant(point) => (point, true),
+            Aim::Blocked => return self.back_off(ctx, cell),
+        };
         let mut frame = idle(ctx);
-        let (look, aligned) = aim_precise(ctx, centre);
+        let (look, aligned) = aim_precise(ctx, point);
         frame.look = look;
-        let pick = praxion_headless::pick(ctx.world, ctx.body);
-        let target = pick.block.filter(|hit| !hit.miss);
-        let on_cell = target.as_ref().is_some_and(|hit| hit.block_pos == cell);
-        // `hit.block_pos` is the cell under the crosshair, not a remembered one.
-        let plant = target.as_ref().is_some_and(|hit| {
-            hit.block_pos != cell
-                && !pick.entity_closer
-                && ctx
-                    .world
-                    .block_state(hit.block_pos)
-                    .is_some_and(|state| !state.is_air() && !place_support(state))
-        });
-        // Only ticks spent aiming or clicking count here; a solid block in the
-        // way is walked around on the walk budget instead.
-        if !aligned || on_cell || plant {
-            self.open_ticks += 1;
-            if self.open_ticks > OPEN_TICKS {
-                self.log_failure(ctx, cell);
-                return StationStep::Failed(self.failure);
-            }
+        // Only ticks spent aiming or clicking count here; getting out of the
+        // way of a blocked view is on the walk budget.
+        self.open_ticks += 1;
+        if self.open_ticks > OPEN_TICKS {
+            self.log_failure(ctx, cell);
+            return StationStep::Failed(self.failure);
         }
         if !aligned {
             return StationStep::Pending(frame);
@@ -112,31 +127,93 @@ impl Station {
         let due = self
             .last_click
             .is_none_or(|last| self.open_ticks - last >= CLICK_INTERVAL);
-        if on_cell {
-            // An entity in front of the table would take the Use click.
-            if due && !pick.entity_closer {
+        let pick = praxion_headless::pick(ctx.world, ctx.body);
+        // `hit.block_pos` is the cell under the crosshair, not a remembered one.
+        let hit = pick.block.as_ref().filter(|hit| !hit.miss);
+        let on_cell = hit.is_some_and(|hit| hit.block_pos == cell);
+        let on_other = hit.is_some_and(|hit| hit.block_pos != cell);
+        // An entity in front of the table would take the click.
+        if due && !pick.entity_closer {
+            if on_cell {
                 frame.clicks.push(Click::Use);
                 self.last_click = Some(self.open_ticks);
-            }
-            return StationStep::Pending(frame);
-        }
-        if plant {
-            // A plant in the way is broken first.
-            if due {
+            } else if plant && on_other {
+                // A plant in the way is broken first.
                 frame.clicks.push(Click::Attack);
                 self.last_click = Some(self.open_ticks);
             }
-            return StationStep::Pending(frame);
         }
-        // Something solid is in front of the cell: walk toward it, keeping the
-        // aim so the next tick is still aligned.
-        match self.walk(ctx, cell) {
-            StationStep::Pending(mut walk) => {
-                walk.look = frame.look;
-                StationStep::Pending(walk)
-            }
-            done => done,
+        StationStep::Pending(frame)
+    }
+
+    /// Where to aim. A player clicks the face they can see: try the cell's
+    /// centre, then the centre of each face (inset a little), nearest to the
+    /// eye first, and take the first whose ray first hits the cell. The centre
+    /// ray can enter the cell's column in the layer above it (a roof over a
+    /// table next to the body), which only a face point gets around.
+    fn choose_aim(&self, ctx: &Ctx<'_>, cell: BlockPos) -> Aim {
+        let eye = ctx.body.eye_position();
+        let hit_at = |point: Vec3| {
+            let (yaw, pitch) = praxion_planner::aim(eye, point);
+            praxion_headless::pick_block_looking(ctx.world, ctx.body, yaw, pitch)
+                .filter(|hit| !hit.miss)
+                .map(|hit| hit.block_pos)
+        };
+        let centre = cell_centre(cell);
+        let centre_hit = hit_at(centre);
+        if centre_hit == Some(cell) {
+            return Aim::Point(centre);
         }
+        let mut faces: Vec<Vec3> = FACE_OFFSETS
+            .iter()
+            .map(|(dx, dy, dz)| Vec3::new(centre.x + dx, centre.y + dy, centre.z + dz))
+            .collect();
+        faces.sort_by(|a, b| eye.distance_to(*a).total_cmp(&eye.distance_to(*b)));
+        if let Some(point) = faces.into_iter().find(|point| hit_at(*point) == Some(cell)) {
+            return Aim::Point(point);
+        }
+        let plant_in_the_way = centre_hit.is_some_and(|pos| {
+            ctx.world
+                .block_state(pos)
+                .is_some_and(|state| !state.is_air() && !place_support(state))
+        });
+        if plant_in_the_way {
+            Aim::Plant(centre)
+        } else {
+            Aim::Blocked
+        }
+    }
+
+    /// No point of the cell can be picked from here. Walk to a spot about
+    /// [`BACK_OFF_RADIUS`] blocks from it: straight away from it when the body
+    /// is close (a wall beside it hides the faces), else a quarter turn around
+    /// it to look from another side. `walk_ticks` is the budget.
+    fn back_off(&mut self, ctx: &Ctx<'_>, cell: BlockPos) -> StationStep {
+        self.walk_ticks += 1;
+        if self.walk_ticks > WALK_TICKS {
+            self.log_failure(ctx, cell);
+            return StationStep::Failed(self.failure);
+        }
+        let position = ctx.body.position();
+        let centre = cell_centre(cell);
+        let (dx, dz) = (position.x - centre.x, position.z - centre.z);
+        let horizontal = dx.hypot(dz);
+        let (ux, uz) = if horizontal < 1e-3 {
+            (1.0, 0.0)
+        } else {
+            (dx / horizontal, dz / horizontal)
+        };
+        let (ux, uz) = if horizontal < BACK_OFF_RADIUS - 0.5 {
+            (ux, uz)
+        } else {
+            (-uz, ux)
+        };
+        let spot = Vec3::new(
+            centre.x + ux * BACK_OFF_RADIUS,
+            position.y,
+            centre.z + uz * BACK_OFF_RADIUS,
+        );
+        StationStep::Pending(pickup_frame(ctx, spot))
     }
 
     /// Walk in a straight line toward the cell; `walk_ticks` is the budget.
@@ -187,6 +264,7 @@ impl Station {
 mod tests {
     use super::*;
     use crate::test_world::{feet, open_menu, set_block, swept, world};
+    use azalea_core::position::Vec3;
     use praxion_headless::{Body, Look};
     use praxion_perception::Perception;
     use praxion_planner::Personality;
@@ -346,6 +424,176 @@ mod tests {
         open_menu(&mut world, 1, MenuKind::Crafting);
         assert!(matches!(
             step(&mut station, &world, &mut perception, &mut body, 0),
+            StationStep::Opened
+        ));
+    }
+
+    /// Run the station until a `Use` click goes out; returns its tick.
+    fn use_tick(
+        station: &mut Station,
+        world: &World,
+        perception: &mut Perception,
+        body: &mut Body,
+        max: u64,
+    ) -> Option<u64> {
+        for tick in 0..max {
+            match step(station, world, perception, body, tick) {
+                StationStep::Pending(frame) if frame.clicks.contains(&Click::Use) => {
+                    return Some(tick);
+                }
+                StationStep::Pending(_) => {}
+                other => panic!("tick {tick}: {other:?}"),
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_table_under_a_roof_is_clicked_on_the_face_the_body_can_see() {
+        // Live failure: standing next to the table, the ray to its centre
+        // enters the table's column in the cell above it, which is dirt.
+        let mut world = world();
+        let cell = BlockPos::new(1, 64, 0);
+        set_block(&mut world, cell, table());
+        let mut perception = swept(&world);
+        set_block(&mut world, BlockPos::new(1, 65, 0), BlockState::from(BlockKind::Dirt));
+        let mut body = Body::new(feet());
+        let mut station = table_station();
+        let tick = use_tick(&mut station, &world, &mut perception, &mut body, 10);
+        assert!(tick.is_some(), "a Use click goes out");
+        let pick = praxion_headless::pick(&world, &body);
+        let hit = pick.block.expect("the crosshair is on a block");
+        assert_eq!(hit.block_pos, cell, "the click lands on the table");
+        open_menu(&mut world, 1, MenuKind::Crafting);
+        assert!(matches!(
+            step(&mut station, &world, &mut perception, &mut body, 11),
+            StationStep::Opened
+        ));
+    }
+
+    #[test]
+    fn only_the_side_face_is_open_so_that_face_is_clicked() {
+        // Roof above the table: the top and both z faces are behind the dirt,
+        // the east face is behind the table itself. Only the west face works.
+        let mut world = world();
+        let cell = BlockPos::new(1, 64, 0);
+        set_block(&mut world, cell, table());
+        let mut perception = swept(&world);
+        set_block(&mut world, BlockPos::new(1, 65, 0), BlockState::from(BlockKind::Dirt));
+        let mut body = Body::new(feet());
+        let mut station = table_station();
+        use_tick(&mut station, &world, &mut perception, &mut body, 10).expect("a Use click");
+        let hit = praxion_headless::pick(&world, &body).block.expect("a block");
+        assert_eq!(hit.block_pos, cell);
+        assert_eq!(hit.direction, azalea_core::direction::Direction::West);
+    }
+
+    #[test]
+    fn a_table_with_no_visible_face_makes_the_body_back_off() {
+        // Table one below and one beside the body; dirt over it and stone
+        // under the body hide every face from the eye.
+        let mut world = world();
+        let cell = BlockPos::new(1, 63, 0);
+        set_block(&mut world, cell, table());
+        let mut perception = swept(&world);
+        set_block(&mut world, BlockPos::new(1, 64, 0), BlockState::from(BlockKind::Dirt));
+        set_block(&mut world, BlockPos::new(0, 63, 0), BlockState::from(BlockKind::Stone));
+        let mut body = Body::new(feet());
+        let mut station = table_station();
+        let mut walked = false;
+        for tick in 0..6u64 {
+            match step(&mut station, &world, &mut perception, &mut body, tick) {
+                StationStep::Pending(frame) => {
+                    assert!(frame.clicks.is_empty(), "tick {tick}: nothing to click");
+                    walked |= frame.held.forward;
+                }
+                other => panic!("tick {tick}: {other:?}"),
+            }
+        }
+        assert!(walked, "the body walks");
+        // The table is east of the body; it walks west, away from it.
+        let yaw = body.look().y_rot().rem_euclid(360.0);
+        assert!((yaw - 90.0).abs() < 10.0, "faces west, yaw {yaw}");
+    }
+
+    #[test]
+    fn the_face_nearest_the_eye_is_chosen_when_several_work() {
+        // Table diagonally ahead with dirt over the body's side of it: the
+        // centre ray is blocked. The north (-z), east and bottom faces all
+        // take a Use; north is the nearest to the eye, and it comes last in
+        // the face list order, so only the nearest-first sort picks it.
+        let mut world = world();
+        let cell = BlockPos::new(1, 64, 1);
+        set_block(&mut world, cell, table());
+        let mut perception = swept(&world);
+        set_block(&mut world, BlockPos::new(0, 65, 1), BlockState::from(BlockKind::Dirt));
+        let mut body = Body::new(feet());
+        let mut station = table_station();
+        use_tick(&mut station, &world, &mut perception, &mut body, 10).expect("a Use click");
+        let hit = praxion_headless::pick(&world, &body).block.expect("a block");
+        assert_eq!(hit.block_pos, cell);
+        assert_eq!(hit.direction, azalea_core::direction::Direction::North);
+    }
+
+    #[test]
+    fn a_blocked_view_from_two_blocks_away_walks_around_the_table() {
+        // Wall between the body and the table, body 3 blocks from it: the
+        // back-off is a quarter turn around the table, not a step toward it.
+        let mut world = world();
+        let cell = BlockPos::new(3, 64, 0);
+        set_block(&mut world, cell, table());
+        let mut perception = swept(&world);
+        for y in 64..67 {
+            for z in -1..=1 {
+                set_block(&mut world, BlockPos::new(2, y, z), BlockState::from(BlockKind::Stone));
+            }
+        }
+        let mut body = Body::new(feet());
+        let mut station = table_station();
+        let mut forward = false;
+        for tick in 0..6u64 {
+            match step(&mut station, &world, &mut perception, &mut body, tick) {
+                StationStep::Pending(frame) => {
+                    assert!(frame.clicks.is_empty());
+                    forward |= frame.held.forward;
+                }
+                other => panic!("tick {tick}: {other:?}"),
+            }
+        }
+        assert!(forward, "the body walks");
+        // The body is west of the table; (dx, dz) = (-3, 0), so the quarter
+        // turn target is at +z / -z of the table, not along x: yaw faces
+        // south (0) or north (180), not east (270) or west (90).
+        let yaw = body.look().y_rot().rem_euclid(360.0);
+        let along_x = (yaw - 90.0).abs() < 30.0 || (yaw - 270.0).abs() < 30.0;
+        assert!(!along_x, "walks tangentially, yaw {yaw}");
+    }
+
+    #[test]
+    fn a_back_off_ends_with_a_use_click_and_opened_from_the_new_spot() {
+        let mut world = world();
+        let cell = BlockPos::new(1, 63, 0);
+        set_block(&mut world, cell, table());
+        let mut perception = swept(&world);
+        set_block(&mut world, BlockPos::new(1, 64, 0), BlockState::from(BlockKind::Dirt));
+        set_block(&mut world, BlockPos::new(0, 63, 0), BlockState::from(BlockKind::Stone));
+        let mut body = Body::new(feet());
+        let mut station = table_station();
+        for tick in 0..3u64 {
+            assert!(matches!(
+                step(&mut station, &world, &mut perception, &mut body, tick),
+                StationStep::Pending(_)
+            ));
+        }
+        // The body now stands two blocks back, clear of the stone column:
+        // rebuild it there with the view open.
+        let mut body = Body::new(Vec3::new(-1.5, 64.0, 0.5));
+        set_block(&mut world, BlockPos::new(1, 64, 0), BlockState::from(BlockKind::Air));
+        let tick = use_tick(&mut station, &world, &mut perception, &mut body, 20);
+        assert!(tick.is_some(), "a Use click from the new spot");
+        open_menu(&mut world, 1, MenuKind::Crafting);
+        assert!(matches!(
+            step(&mut station, &world, &mut perception, &mut body, 30),
             StationStep::Opened
         ));
     }

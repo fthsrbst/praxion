@@ -1,0 +1,26 @@
+# Smelt raw iron into ingots. A core skill, hand-written, for two reasons: the
+# LLM writer only learns primitives that a core skill uses (`smelt`), and a
+# learned skill that also gets the furnace would sit too deep (get_iron_ingot ->
+# get_furnace -> get_cobblestone -> get_wooden_pickaxe -> leaf is five frames;
+# the core cap is four). So this skill does not obtain the furnace: the ladder
+# is cumulative, and the furnace, coal and raw iron come first.
+#
+# Why the rules are ordered this way (highest true rule fires): the goal check
+# is on top so a finished skill ends at once. The two input guards come before
+# any action so a missing input fails with its own kind (no_raw_iron, no_fuel)
+# instead of walking to a furnace for nothing; `smelt` loads exactly one fuel
+# item, taken from coal, charcoal, planks or logs in that order, so the fuel
+# guard lists the same four. `smelt` cooks one item per call and fires again
+# while the ingot count is short (the decision of 2026-11-09). It comes before
+# `place` so a furnace that already stands is used, never duplicated; `place`
+# comes next because a furnace in the inventory is only worth anything placed;
+# the last rule is the honest failure.
+skill get_iron_ingot(n: int = 1)
+  doc "Have n iron ingots: smelt raw iron in a furnace within 4 blocks, placing the one in the inventory if none stands there."
+  rules:
+    count(iron_ingot) >= $n -> done
+    count(raw_iron) < 1 -> fail(no_raw_iron)
+    count(coal) < 1 and count(charcoal) < 1 and count(#planks) < 1 and count(#logs) < 1 -> fail(no_fuel)
+    near(furnace, 4) -> smelt(iron_ingot)
+    has(furnace) -> place(furnace)
+    true -> fail(no_furnace)

@@ -45,7 +45,7 @@ pub(crate) fn item_name(stack: &ItemStack) -> &str {
     stack.kind().to_str()
 }
 
-fn item_matches(stack: &ItemStack, wanted: &str) -> bool {
+pub(crate) fn item_matches(stack: &ItemStack, wanted: &str) -> bool {
     if let Some(tag) = wanted.strip_prefix('#') {
         gamedata::item_in_tag(item_name(stack), tag)
     } else {

@@ -281,3 +281,13 @@ pub(crate) fn set_menu_content(world: &mut World, id: i32, slots: Vec<azalea_inv
         ),
     );
 }
+
+/// The server closes menu `id` (`container_close`).
+pub(crate) fn close_menu(world: &mut World, id: i32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerClose(
+            azalea_protocol::packets::game::ClientboundContainerClose { container_id: id },
+        ),
+    );
+}

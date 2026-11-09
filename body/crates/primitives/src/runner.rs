@@ -23,6 +23,7 @@ use crate::mine::Mine;
 use crate::move_to::Move;
 use crate::place::Place;
 use crate::small::{Attack, Eat, Equip, EquipStage, Observe, Wait};
+use crate::smelt::Smelt;
 
 /// One tick of the primitive's world.
 pub struct Ctx<'a> {
@@ -124,6 +125,7 @@ enum Active {
     Dig(Digger),
     Place(Place),
     Craft(Craft),
+    Smelt(Smelt),
     Eat(Eat),
     Explore(Explore),
     Attack(Attack),
@@ -148,6 +150,7 @@ impl Active {
     fn continues_after(&self, outcome: &Outcome) -> bool {
         match self {
             Active::Craft(craft) => craft.close_outcome.is_some(),
+            Active::Smelt(smelt) => smelt.close_outcome.is_some(),
             Active::Mine(mine) => *outcome == Outcome::Confirmed && mine.pickup.is_some(),
             Active::Move(_) | Active::Explore(_) | Active::Attack(_) | Active::Dig(_) => {
                 *outcome == Outcome::Confirmed
@@ -197,6 +200,7 @@ impl Runner {
                 clear_clicks: 0,
             }),
             "craft" => Active::Craft(Craft::new(arg)?),
+            "smelt" => Active::Smelt(Smelt::new(arg)),
             "eat" => Active::Eat(Eat {
                 item: arg,
                 sent: false,
@@ -252,6 +256,7 @@ impl Runner {
         if let Some(active) = &mut self.active {
             match active {
                 Active::Craft(craft) => craft.request_close(outcome.clone()),
+                Active::Smelt(smelt) => smelt.request_close(outcome.clone()),
                 Active::Mine(mine) if outcome == Outcome::Confirmed => mine.begin_pickup(),
                 Active::Dig(dig) if outcome == Outcome::Confirmed => dig.note_settled(),
                 _ => {}
@@ -329,7 +334,10 @@ impl Runner {
         // A failed or timed-out receipt ends the primitive. See
         // [`Active::continues_after`] for the primitives that keep going.
         if let Some(receipt) = self.receipt.clone() {
-            let keep_going = receipt == Outcome::Confirmed
+            // A preemption keeps a pending close: `craft` and `smelt` send their
+            // close frame before they report `Preempted`. Every other
+            // primitive's `continues_after` is false for it, as before.
+            let keep_going = matches!(receipt, Outcome::Confirmed | Outcome::Preempted)
                 && self
                     .active
                     .as_ref()
@@ -357,6 +365,7 @@ impl Runner {
             Active::Dig(state) => state.tick(ctx),
             Active::Place(state) => state.tick(ctx, self.started),
             Active::Craft(state) => state.tick(ctx, self.started),
+            Active::Smelt(state) => state.tick(ctx, self.started),
             Active::Eat(state) => state.tick(ctx, self.started),
             Active::Explore(state) => state.tick(ctx, self.started, &mut self.explore_memory),
             Active::Attack(state) => state.tick(ctx, self.started),
@@ -412,5 +421,112 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(runner.is_continuous(), "{name}");
         }
+    }
+
+    // The real preemption path: the driver settles `Preempted`, then ticks
+    // once and merges the frame into the reflex's. The close must be in it.
+    fn preempt(runner: &mut Runner, world: &World, perception: &mut Perception, body: &Body, tick: u64) -> TickResult {
+        runner.settle(Outcome::Preempted);
+        let mut ctx = Ctx {
+            tick,
+            body,
+            world,
+            perception,
+            style: Personality::default(),
+        };
+        runner.tick(&mut ctx)
+    }
+
+    fn tick(runner: &mut Runner, world: &World, perception: &mut Perception, body: &Body, tick: u64) -> TickResult {
+        let mut ctx = Ctx {
+            tick,
+            body,
+            world,
+            perception,
+            style: Personality::default(),
+        };
+        runner.tick(&mut ctx)
+    }
+
+    #[test]
+    fn a_preempted_craft_with_the_grid_in_use_sends_its_close_frame() {
+        use crate::test_world::{feet, give, swept, world};
+        use azalea_registry::builtin::ItemKind;
+        use praxion_headless::MenuMode;
+        let mut world = world();
+        give(&mut world, 9, ItemKind::OakPlanks, 4);
+        let mut perception = swept(&world);
+        let body = Body::new(feet());
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "craft".into(),
+                args: vec![ArgValue::Name("stick".into())],
+            })
+            .unwrap();
+        let mut n = 0;
+        loop {
+            let result = tick(&mut runner, &world, &mut perception, &body, n);
+            n += 1;
+            if result.frame.menu_mode == MenuMode::Click && result.frame.menu.is_some() {
+                break;
+            }
+            assert!(n < 10, "no click planned");
+        }
+        give(&mut world, 1, ItemKind::OakPlanks, 1);
+        let result = preempt(&mut runner, &world, &mut perception, &body, n);
+        assert_eq!(result.frame.menu_mode, MenuMode::Close);
+        assert_eq!(result.frame.menu.map(|menu| menu.window), Some(0));
+        assert_eq!(result.outcome, Some(Outcome::Preempted));
+        assert!(!runner.is_active());
+    }
+
+    #[test]
+    fn a_preempted_smelt_sends_its_close_frame() {
+        use crate::test_world::{feet, open_menu, set_menu_content, swept, world};
+        use azalea_inventory::ItemStack;
+        use azalea_registry::builtin::{ItemKind, MenuKind};
+        use praxion_headless::MenuMode;
+        let mut world = world();
+        open_menu(&mut world, 4, MenuKind::Furnace);
+        let mut slots = vec![ItemStack::Empty; 39];
+        slots[3] = ItemStack::new(ItemKind::RawIron, 1);
+        slots[4] = ItemStack::new(ItemKind::Coal, 1);
+        set_menu_content(&mut world, 4, slots);
+        let mut perception = swept(&world);
+        let body = Body::new(feet());
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "smelt".into(),
+                args: vec![ArgValue::Name("iron_ingot".into())],
+            })
+            .unwrap();
+        for n in 0..6 {
+            tick(&mut runner, &world, &mut perception, &body, n);
+        }
+        let result = preempt(&mut runner, &world, &mut perception, &body, 6);
+        assert_eq!(result.frame.menu_mode, MenuMode::Close);
+        assert_eq!(result.frame.menu.map(|menu| menu.window), Some(4));
+        assert_eq!(result.outcome, Some(Outcome::Preempted));
+        assert!(!runner.is_active());
+    }
+
+    #[test]
+    fn a_preempted_wait_still_ends_at_once() {
+        use crate::test_world::{feet, swept, world};
+        let world = world();
+        let mut perception = swept(&world);
+        let body = Body::new(feet());
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "wait".into(),
+                args: vec![ArgValue::Int(50)],
+            })
+            .unwrap();
+        let result = preempt(&mut runner, &world, &mut perception, &body, 0);
+        assert_eq!(result.outcome, Some(Outcome::Preempted));
+        assert!(result.frame.menu.is_none());
     }
 }
