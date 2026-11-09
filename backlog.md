@@ -19,6 +19,23 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Live smoke round 3 leftovers (2026-11-10)
+- Source: Claude Opus 5.5, live runs `runs/test-body-36950d18...` (hunger) and `runs/test-body-e67ecdef...` (talk)
+- State: body smoke tests all pass live (eat, cow hunt with a sword, night zombie, pillar, axe), and the night
+  fallback passes. Talk works end to end live (`durum` answered by the body, `p: 16 taş getir` acknowledged with
+  `tamam:`, failures narrated with `olmadı:`). Two scenario tests still fail on gameplay, not on wiring:
+  (a) `test_a_hungry_body_with_no_food_hunts_a_cow_and_eats_the_beef`: bare-handed, each `attack` call lands one hit,
+  the panicking cow runs out of reach, `attack` fails `no_target` after 10 ticks and `move_to` restarts; after five
+  hits the cow is out of sight, `hunt` ends `done`, then `move_to cow` fails `no_path` three times and `get_food`
+  explores 3x1200 ticks `not_found`. Options to decide: let `attack` follow a fleeing mob inside the call (sprint
+  pursuit) instead of handing back after 10 ticks; craft a wooden sword before hunting; give `hunt` a last-seen
+  position to chase. Also find why `move_to cow` was `no_path` (ticks 709-789).
+  (b) `test_the_bot_answers_durum_and_plays_a_chat_task`: the 16-stone task failed `no_sight` after `explore stone`
+  ran 1200 ticks `not_found` in that world; `get_cobblestone` from a surface spawn is not robust (relates to "End-to-end
+  skills from a free spawn").
+- Pointers: `body/crates/primitives/src/small.rs` (Attack), `body/skills/hunt.skill`, `body/skills/get_food.skill`,
+  `body/skills/get_cobblestone.skill`, `harness/tests/test_survival_smoke.py`, `harness/tests/test_talk_smoke.py`.
+
 ### smarter slice 2 review leftovers (pillar, scaffolding, axe)
 - Source: review `logs/mac1109/review-smarter2.answer.txt` (OpenCode/DeepSeek V4.1 Flash fixes, 2026-11-09).
 - State: findings 1-3 and 6 fixed and pinned by tests: the scaffolding set moved to
