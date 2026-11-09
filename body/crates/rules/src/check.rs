@@ -635,3 +635,37 @@ fn err(skill: &Skill, message: impl Into<String>, span: Span) -> Error {
         None => error,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::parse;
+    use crate::registry::{Facts, Primitives};
+
+    /// Every primitive call is checked for its exact argument count; `smelt`
+    /// takes the output item and nothing else.
+    #[test]
+    fn smelt_arity_is_checked() {
+        for (source, expected) in [
+            (
+                "skill s()\n  rules:\n    true -> smelt()\n",
+                "primitive `smelt` takes 1 arguments, got 0",
+            ),
+            (
+                "skill s()\n  rules:\n    true -> smelt(iron_ingot, raw_iron)\n",
+                "primitive `smelt` takes 1 arguments, got 2",
+            ),
+        ] {
+            let skills = parse(source).expect("parse");
+            let errors = super::freeze(skills, Facts::standard(), Primitives::standard())
+                .expect_err("expected a load error");
+            assert!(
+                errors.iter().any(|error| error.message == expected),
+                "expected `{expected}`, got {:?}",
+                errors
+                    .iter()
+                    .map(|error| &error.message)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}

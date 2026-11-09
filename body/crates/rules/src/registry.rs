@@ -8,8 +8,9 @@
 //! primitive with typed parameters, discrete or continuous kind, cancellation
 //! class, default `max_ticks`, declared effects and the evidence kind that
 //! settles a receipt (§5.3). Effects come from game data, not from hand: craft
-//! effects from [`praxion_gamedata::RECIPES`] and mine/attack drops from the
-//! 26.3 loot tables in the pinned server jar. For a primitive whose effect
+//! effects from [`praxion_gamedata::RECIPES`], smelt effects from
+//! [`praxion_gamedata::SMELTING`] and mine/attack drops from the 26.3 loot
+//! tables in the pinned server jar. For a primitive whose effect
 //! depends on its first argument, [`PrimitiveRecord::effects_for`] returns the
 //! exact effect for that argument; `effects` is the union over all arguments.
 
@@ -355,9 +356,10 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Atomic,
-            // Open the table (40), place the clicks, wait for the result (80)
-            // and take it (140); the primitive owns those waits.
-            default_max_ticks: 300,
+            // Walk to the table (up to 80 ticks, decision 2026-11-09), open it
+            // (40), place the clicks, wait for the result (80) and take it
+            // (140); the primitive owns those waits.
+            default_max_ticks: 400,
             effects: craft_summary(),
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::InventoryDelta,
@@ -369,6 +371,34 @@ impl Primitives {
         }
         insert_item_tag_effects(&mut craft);
         primitives.add(craft);
+
+        let mut smelt = PrimitiveRecord {
+            name: "smelt",
+            version: 1,
+            params: vec![PrimParam {
+                name: "item",
+                ty: ArgType::Value(ValueType::Item),
+            }],
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            // Walk to the furnace and open it (<= 100), load the content
+            // (<= 40), the clicks (~20), cook one item (200 + 60 for the menu
+            // round trip) and take it out (<= 140).
+            default_max_ticks: 600,
+            effects: smelting_summary(),
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::InventoryDelta,
+        };
+        for recipe in gamedata::SMELTING {
+            merge_effects(
+                smelt
+                    .per_argument
+                    .entry(recipe.output.to_string())
+                    .or_default(),
+                &smelting_effects(recipe),
+            );
+        }
+        primitives.add(smelt);
 
         primitives.add(PrimitiveRecord {
             name: "eat",
@@ -611,6 +641,28 @@ fn craft_summary() -> Effects {
     }
 }
 
+fn smelting_effects(recipe: &gamedata::SmeltingRecipe) -> Effects {
+    Effects {
+        produces: vec![delta(recipe.output, 1)],
+        drops: Vec::new(),
+        consumes: vec![ItemDelta {
+            item: recipe.ingredient.effect_item(),
+            count: 1,
+        }],
+        changes: Vec::new(),
+    }
+}
+
+/// The union of every smelting recipe, used when a `smelt` call is inspected
+/// without its argument. `effects_for` gives the exact input and output.
+fn smelting_summary() -> Effects {
+    let mut summary = Effects::default();
+    for recipe in gamedata::SMELTING {
+        merge_effects(&mut summary, &smelting_effects(recipe));
+    }
+    summary
+}
+
 /// Adds one `#tag` entry to a primitive's per-argument effects: the union of
 /// every member the primitive already knows. `mine(#logs)` therefore declares
 /// the drops of every log type, and `craft(#planks)` the inputs of every planks
@@ -694,6 +746,7 @@ mod tests {
             "branch_mine",
             "place",
             "craft",
+            "smelt",
             "eat",
             "explore",
             "attack",
@@ -847,6 +900,28 @@ mod tests {
             vec![delta("#stone_tool_materials", 3), delta("stick", 2)]
         );
         assert_eq!(pickaxe.produces, vec![delta("stone_pickaxe", 1)]);
+    }
+
+    #[test]
+    fn smelt_effects_come_from_the_smelting_recipes() {
+        let p = Primitives::standard();
+        let smelt = p.get("smelt").unwrap();
+        assert_eq!(smelt.kind, PrimitiveKind::Discrete);
+        assert_eq!(smelt.evidence, EvidenceKind::InventoryDelta);
+        assert_eq!(smelt.default_max_ticks, 600);
+
+        // Raw iron and both iron ores produce one ingot; the merge rule keeps
+        // every distinct input once.
+        let iron = smelt.effects_for(&[ArgValue::Item("iron_ingot".into())]);
+        assert_eq!(iron.produces, vec![delta("iron_ingot", 1)]);
+        let mut inputs: Vec<&str> = iron
+            .consumes
+            .iter()
+            .map(|delta| delta.item.as_str())
+            .collect();
+        inputs.sort();
+        assert_eq!(inputs, ["deepslate_iron_ore", "iron_ore", "raw_iron"]);
+        assert!(iron.consumes.iter().all(|delta| delta.count == 1));
     }
 
     #[test]
