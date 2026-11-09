@@ -3,6 +3,9 @@
 Throwaway experiment code. Not product code. Plan and thresholds: `docs/sessions/02-body-connection.md` §2.7.
 Results go to that file, not here.
 
+Later one-question spikes that follow the same rules live here too; their result goes to the
+session doc named next to them in the table.
+
 ## Layout
 
 | Dir | What | Language |
@@ -11,7 +14,16 @@ Results go to that file, not here.
 | `proxy/` | E1: byte-forwarding TCP proxy with a tee to a capture file; `pingbench` | Rust, std only |
 | `decode/` | E2, E3, E4: offline decoder of capture files with Azalea crates (path deps into `third_party/azalea/`) | Rust |
 | `hands/` | E5–E13: Windows input injection, hooks, timer jitter | Rust, `windows-sys` |
+| `chat/` | Session 9: two headless clients on one offline server, one unsigned chat line each direction; result in `docs/sessions/09-commands.md` | Rust + Python driver |
 | `captures/` | Capture files (ignored) | — |
+
+`chat/` is host-independent (no game window, no input injection), so it runs on macOS too:
+
+```sh
+cd spikes/chat
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo build
+python3 run_chat_spike.py     # starts the harness server itself and deletes its run directory
+```
 
 The pinned third-party inputs are outside this folder: the Azalea clone at commit `8041a14` in
 `third_party/azalea/` and the server jar in `third_party/minecraft/` (both ignored, machine-local).
