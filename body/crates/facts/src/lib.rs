@@ -18,7 +18,7 @@
 
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_interpreter::{Facts as InterpreterFacts, IntValue, Truth};
-use praxion_perception::{Answer, Caller, Perception, workable};
+use praxion_perception::{Answer, Caller, Perception, scaffold, workable};
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::{ItemStack, World};
 
@@ -170,6 +170,13 @@ pub fn count_in(inventory: &[ItemStack], wanted: &str) -> u32 {
 /// `mine` then rejects with `no_block` (seed 202 live run 2026-11-08). Both
 /// sides ask the same [`workable`] rule, with the raw world as the neighbour
 /// reader; that only ever removes a candidate, it never invents one.
+///
+/// A cell the body filled itself to climb (`pillar`, see
+/// [`praxion_perception::scaffold`]) does not count either. A scaffold log is a
+/// real `#logs` block, so without this the `near(#logs, 5)` that started a chop
+/// stays true after the last real log is gone, the skill chops again and
+/// `pillar` burns a held log on a column with nothing left to reach (review
+/// finding 1: `mine`'s target search excluded the scaffolding, `near` did not).
 pub fn near_block(
     perception: &mut Perception,
     world: &World,
@@ -184,15 +191,20 @@ pub fn near_block(
     } else {
         None
     };
-    let found = perception.nearest_known(world, radius, |_| false, |pos, state| {
-        let kind = BlockKind::from(state);
-        let matches = match (tag, wanted_kind) {
-            (Some(tag), _) => praxion_gamedata::block_in_tag(kind.to_str(), tag),
-            (None, Some(wanted_kind)) => kind == wanted_kind,
-            (None, None) => false,
-        };
-        matches && workable(pos, state, |cell| world.block_state(cell))
-    });
+    let found = perception.nearest_known(
+        world,
+        radius,
+        scaffold::is_scaffold,
+        |pos, state| {
+            let kind = BlockKind::from(state);
+            let matches = match (tag, wanted_kind) {
+                (Some(tag), _) => praxion_gamedata::block_in_tag(kind.to_str(), tag),
+                (None, Some(wanted_kind)) => kind == wanted_kind,
+                (None, None) => false,
+            };
+            matches && workable(pos, state, |cell| world.block_state(cell))
+        },
+    );
     Some(found.is_some())
 }
 

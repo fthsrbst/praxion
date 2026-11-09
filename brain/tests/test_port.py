@@ -349,8 +349,17 @@ def test_poll_default_returns_a_frame_already_sent(
 ) -> None:
     wait_snapshot(client)
     body.emit_event("note", text="ready")
-
-    message = client.poll()  # the default timeout is zero, but it must pump
+    # The write is synchronous, but macOS loopback can keep the bytes in
+    # transit for a moment, and a zero-timeout select is then honestly empty.
+    # Retry the zero-timeout poll until they land rather than sleeping a fixed
+    # time: a sleep would hide a pump that stopped pumping (review finding 5).
+    # Imported from `main` (console slice) while fixing the smarter-2 review:
+    # this branch predates that fix and the test fails on the branch base.
+    deadline = time.monotonic() + 2.0
+    message = None
+    while message is None:
+        assert time.monotonic() < deadline, "the note never reached the client"
+        message = client.poll()  # the default timeout is zero, but it must pump
 
     assert isinstance(message, EventMessage)
     assert message.event["text"] == "ready"

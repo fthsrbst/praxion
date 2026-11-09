@@ -1,0 +1,13 @@
+# A wooden axe needs 3 planks and 2 sticks, and a placed crafting table: a 3x3
+# recipe, so the table is placed before the axe is crafted. Shaped like
+# `get_wooden_pickaxe`: its children are leaf skills, so the chain stays inside
+# the core depth of 4. A log breaks about twice as fast with an axe as by hand
+# (decision 2026-11-09 "Five next areas").
+skill get_wooden_axe()
+  doc "Have a wooden axe, with a crafting table placed nearby."
+  rules:
+    count(wooden_axe) >= 1 -> done
+    count(#planks) >= 3 and count(stick) >= 2 and near(crafting_table, 4) -> craft(wooden_axe)
+    count(stick) < 2 -> do get_sticks(2)
+    count(#planks) < 3 -> do get_planks(3)
+    true -> do get_crafting_table_near()

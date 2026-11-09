@@ -18,15 +18,18 @@ from praxion_brain.skills import (
 )
 
 CORE_NAMES = {
+    "cut_log",
     "get_cobblestone",
     "get_crafting_table",
     "get_iron_ingot",
     "get_crafting_table_near",
     "get_planks",
     "get_sticks",
+    "get_stone_axe",
     "get_stone_pickaxe",
     "get_stone_sword",
     "get_wood",
+    "get_wooden_axe",
     "get_wooden_pickaxe",
     "find_stone",
     "find_ore",
@@ -43,8 +46,11 @@ def test_load_catalog_reads_the_real_core_skills(tmp_path) -> None:
     wood = catalog.by_name("get_wood")
     assert wood is not None
     assert wood.params == ["n: int = 1"]
-    assert wood.doc == "Collect at least n logs of any wood type."
-    assert wood.rules == 3
+    assert wood.doc == (
+        "Collect at least n logs of any wood type, crafting an axe from surplus "
+        "planks and climbing a log at a time to a log it cannot reach."
+    )
+    assert wood.rules == 6
 
     cobblestone = catalog.by_name("get_cobblestone")
     assert cobblestone is not None
@@ -67,6 +73,7 @@ def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
         "dig_down",
         "explore",
         "mine",
+        "pillar",
         "place",
         "smelt",
     ]

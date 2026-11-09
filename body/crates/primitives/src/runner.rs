@@ -21,6 +21,7 @@ use crate::dig_down::Digger;
 use crate::explore::{Explore, ExploreMemory};
 use crate::mine::Mine;
 use crate::move_to::Move;
+use crate::pillar::Pillar;
 use crate::place::Place;
 use crate::small::{Attack, Eat, Equip, EquipStage, Observe, Wait};
 use crate::smelt::Smelt;
@@ -124,6 +125,7 @@ enum Active {
     Mine(Mine),
     Dig(Digger),
     Place(Place),
+    Pillar(Pillar),
     Craft(Craft),
     Smelt(Smelt),
     Eat(Eat),
@@ -187,6 +189,7 @@ impl Runner {
                 hand: HandSelect::default(),
                 pickup: None,
                 dig_through: None,
+                blocked: 0,
             }),
             "dig_down" => Active::Dig(Digger::dig_down(arg)),
             "branch_mine" => Active::Dig(Digger::branch_mine(arg)),
@@ -199,6 +202,7 @@ impl Runner {
                 rejected: Vec::new(),
                 clear_clicks: 0,
             }),
+            "pillar" => Active::Pillar(Pillar::new(arg)),
             "craft" => Active::Craft(Craft::new(arg)?),
             "smelt" => Active::Smelt(Smelt::new(arg)),
             "eat" => Active::Eat(Eat {
@@ -259,6 +263,10 @@ impl Runner {
                 Active::Smelt(smelt) => smelt.request_close(outcome.clone()),
                 Active::Mine(mine) if outcome == Outcome::Confirmed => mine.begin_pickup(),
                 Active::Dig(dig) if outcome == Outcome::Confirmed => dig.note_settled(),
+                // The confirmed place receipt is the only proof the block
+                // stands: the pillar marks its cell as scaffolding here, not
+                // when it clicks (review finding 3).
+                Active::Pillar(pillar) if outcome == Outcome::Confirmed => pillar.note_settled(),
                 _ => {}
             }
         }
@@ -364,6 +372,7 @@ impl Runner {
             Active::Mine(state) => state.tick(ctx, self.started),
             Active::Dig(state) => state.tick(ctx),
             Active::Place(state) => state.tick(ctx, self.started),
+            Active::Pillar(state) => state.tick(ctx, self.started),
             Active::Craft(state) => state.tick(ctx, self.started),
             Active::Smelt(state) => state.tick(ctx, self.started),
             Active::Eat(state) => state.tick(ctx, self.started),

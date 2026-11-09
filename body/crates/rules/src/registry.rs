@@ -347,6 +347,40 @@ impl Primitives {
             evidence: EvidenceKind::BlockStateChanged,
         });
 
+        // `pillar(block)`: jump and place one block under the feet, to reach a
+        // block above (decision 2026-11-09 "Five next areas"). One block per
+        // call, so the effect is exactly `place`'s; the skill calls it again.
+        // The budget covers the preparation (hand, look, safety answers), one
+        // or two jumps and the 40-tick receipt window (the measurement is in
+        // `primitives/src/pillar.rs`); 180 outlasts the primitive's own
+        // 165-tick bound, so its typed failure always comes first (review
+        // finding 6).
+        primitives.add(PrimitiveRecord {
+            name: "pillar",
+            version: 1,
+            params: vec![PrimParam {
+                name: "block",
+                ty: ArgType::Value(ValueType::Block),
+            }],
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            default_max_ticks: 180,
+            effects: Effects {
+                produces: Vec::new(),
+                drops: Vec::new(),
+                consumes: vec![ItemDelta {
+                    item: "$block".into(),
+                    count: 1,
+                }],
+                changes: vec![BlockChange {
+                    from: BlockRef::Air,
+                    to: BlockRef::Param(0),
+                }],
+            },
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::BlockStateChanged,
+        });
+
         let mut craft = PrimitiveRecord {
             name: "craft",
             version: 1,
@@ -748,6 +782,7 @@ mod tests {
             "dig_down",
             "branch_mine",
             "place",
+            "pillar",
             "craft",
             "smelt",
             "eat",
@@ -763,6 +798,21 @@ mod tests {
             assert_eq!(record.version, 1);
             assert!(record.default_max_ticks > 0);
         }
+    }
+
+    #[test]
+    fn pillar_has_places_effects_and_a_longer_budget() {
+        let p = Primitives::standard();
+        let pillar = p.get("pillar").expect("pillar is registered");
+        let place = p.get("place").unwrap();
+        assert_eq!(pillar.kind, PrimitiveKind::Discrete);
+        assert_eq!(pillar.evidence, EvidenceKind::BlockStateChanged);
+        assert_eq!(pillar.effects, place.effects, "one block per call, like place");
+        assert_eq!(pillar.params, place.params);
+        assert!(
+            pillar.default_max_ticks >= 165,
+            "outlasts the primitive's own two-jump bound (review finding 6)"
+        );
     }
 
     #[test]

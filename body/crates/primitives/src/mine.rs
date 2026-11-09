@@ -117,7 +117,15 @@ pub(crate) struct Mine {
     pub(crate) pickup: Option<Pickup>,
     /// `Some` while the call digs soft blocks that hide a known target.
     pub(crate) dig_through: Option<DigState>,
+    /// Aligned ticks on which the crosshair was not on the target. Past
+    /// [`BLOCKED_TICKS`] the call fails `out_of_reach` or `no_sight` instead of
+    /// clicking something else for 160 ticks (decision 2026-11-09 "Five next
+    /// areas": run 6 spent 2,358 ticks on logs it could not hit).
+    pub(crate) blocked: u32,
 }
+
+/// Aligned ticks without the crosshair on the target before the call gives up.
+const BLOCKED_TICKS: u32 = 10;
 
 impl Mine {
     pub(crate) fn begin_pickup(&mut self) {
@@ -131,6 +139,7 @@ impl Mine {
         self.target = Some(target);
         self.waited = 0;
         self.tool_waited = 0;
+        self.blocked = 0;
         if let Some(dig) = &mut self.dig_through {
             dig.digging_occluder = digging_occluder;
             dig.target_started = false;
@@ -325,6 +334,19 @@ impl Mine {
         // of aiming forever at a cell the client will never pick.
         let eye = ctx.body.eye_position();
         let reach = ctx.body.block_interaction_range() - 0.25;
+        // Walking closer shortens the horizontal gap only. A target whose
+        // centre lies higher above the eye than the reach cannot be hit from
+        // under it either: climbing (`pillar`) is the skill's job, and the
+        // typed failure says so at once instead of walking for 80 ticks.
+        if above_reach(eye.y, target, reach) {
+            log::debug!(
+                "mine: {:?} at {:?} is higher than reach above the eye {:?}",
+                self.name,
+                target,
+                eye
+            );
+            return (frame, None, Some(Outcome::Failed("out_of_reach".into())));
+        }
         if eye.distance_to(center(target)) > reach {
             self.waited = self.waited.saturating_add(1);
             if self.waited > 80 {
@@ -355,6 +377,39 @@ impl Mine {
         frame.look = look;
         if !aligned {
             return (frame, None, None);
+        }
+        // The crosshair must be on the target. A canopy log behind leaves or
+        // another log clicked something else until the dig window ran out
+        // (run 6): fail fast and typed instead.
+        let pick = praxion_headless::pick(ctx.world, ctx.body);
+        // Only another block under the crosshair counts: an empty pick (the
+        // chunk not loaded, a ray just missing) keeps the old behaviour and
+        // clicks.
+        let on_other = pick
+            .block
+            .as_ref()
+            .is_some_and(|hit| !hit.miss && hit.block_pos != target);
+        if on_other && !target_started {
+            self.blocked += 1;
+            if self.blocked > BLOCKED_TICKS {
+                let feet = ctx.body.position().to_block_pos_floor();
+                let kind = if target.y >= feet.y + 2 {
+                    "out_of_reach"
+                } else {
+                    "no_sight"
+                };
+                log::debug!(
+                    "mine: crosshair never reached {:?} at {:?}: {kind}; pick {:?}",
+                    self.name,
+                    target,
+                    pick.block.as_ref().map(|hit| (hit.block_pos, hit.miss))
+                );
+                return (frame, None, Some(Outcome::Failed(kind.into())));
+            }
+            return (frame, None, None);
+        }
+        if !on_other {
+            self.blocked = 0;
         }
         frame.clicks.push(praxion_headless::Click::Attack);
         // Keep sending the spec until the runner registers it; a target that
@@ -534,6 +589,12 @@ fn is_soft_occluder(state: BlockState) -> bool {
     praxion_planner::blocks::is_breakable(state)
         && !praxion_planner::blocks::is_hazard(state)
         && hand_break_ticks(state) <= HAND_BREAK_TICKS
+}
+
+/// Whether the centre of `target` lies higher above the eye (`eye_y`) than
+/// `reach` allows: no horizontal approach can bring it within range.
+fn above_reach(eye_y: f64, target: BlockPos, reach: f64) -> bool {
+    f64::from(target.y) + 0.5 - eye_y > reach
 }
 
 /// Whether removing `cell` leaves the body's own column over a drop deeper
@@ -803,6 +864,7 @@ mod tests {
             hand: HandSelect::default(),
             pickup: None,
             dig_through,
+            blocked: 0,
         }
     }
 
@@ -996,6 +1058,7 @@ mod tests {
             hand: HandSelect::default(),
             pickup: None,
             dig_through: None,
+            blocked: 0,
         };
         let mut ctx = Ctx {
             tick: 0,
@@ -1010,6 +1073,40 @@ mod tests {
             Some(dry),
             "the wet stone is nearer but cannot be worked"
         );
+    }
+
+    #[test]
+    fn mine_never_targets_the_log_the_body_placed_to_climb() {
+        use crate::test_world::{feet, set_block, swept, world};
+        use praxion_perception::scaffold;
+
+        // Review finding 1: a scaffold log is real `#logs`, and `mine` took it
+        // for a target while `near` still counted it. Both sides skip the cells
+        // the body filled to climb, through one predicate.
+        let placed = BlockPos::new(1, 65, 0);
+        let real = BlockPos::new(2, 65, 2);
+        let mut world = world();
+        set_block(&mut world, placed, BlockState::from(BlockKind::OakLog));
+        set_block(&mut world, real, BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        scaffold::note(placed);
+
+        let body = Body::new(feet());
+        let mut mine = fresh_mine("#logs", None);
+        let mut ctx = Ctx {
+            tick: 0,
+            body: &body,
+            world: &world,
+            perception: &mut perception,
+            style: praxion_planner::Personality::default(),
+        };
+        let _ = mine.tick(&mut ctx, false);
+        assert_eq!(
+            mine.target,
+            Some(real),
+            "the nearer log is the body's own scaffolding"
+        );
+        scaffold::reset();
     }
 
     #[test]
@@ -1084,5 +1181,107 @@ mod tests {
         assert!(frame.select_slot.is_none(), "no hotbar key either");
         assert!(pending.is_none(), "the registered target needs no new receipt");
         assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn above_reach_is_the_vertical_gap_only() {
+        // Eye at 65.62, reach 4.25: a centre at 70.5 is 4.88 above, one at
+        // 69.5 is 3.88 above.
+        assert!(above_reach(65.62, BlockPos::new(0, 70, 0), 4.25));
+        assert!(!above_reach(65.62, BlockPos::new(0, 69, 0), 4.25));
+        assert!(!above_reach(65.62, BlockPos::new(40, 64, 40), 4.25), "far away is not above");
+    }
+
+    fn fresh_mine(name: &str, target: Option<BlockPos>) -> Mine {
+        Mine {
+            name: name.to_owned(),
+            target,
+            waited: 0,
+            tool_waited: 0,
+            hand: HandSelect::default(),
+            pickup: None,
+            dig_through: None,
+            blocked: 0,
+        }
+    }
+
+    /// Tick `mine` until it ends, applying its look each tick; returns the
+    /// outcome and the tick it came on.
+    fn run_to_outcome(
+        mine: &mut Mine,
+        world: &World,
+        perception: &mut Perception,
+        body: &mut Body,
+        max: u64,
+    ) -> Option<(u64, Outcome)> {
+        for tick in 0..max {
+            let (_, outcome) = run_mine_tick(mine, tick, false, body, world, perception);
+            if let Some(outcome) = outcome {
+                return Some((tick, outcome));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_log_higher_than_reach_fails_out_of_reach_at_once() {
+        use crate::test_world::{feet, set_block, swept, world};
+        // Decision 2026-11-09 "Five next areas": a log five blocks above the
+        // feet was walked toward for 80 ticks. It is in view and under five
+        // blocks away, but no step brings it within reach.
+        let mut world = world();
+        set_block(&mut world, BlockPos::new(0, 70, 0), BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = fresh_mine("#logs", None);
+        let (tick, outcome) = run_to_outcome(&mut mine, &world, &mut perception, &mut body, 40)
+            .expect("it fails");
+        assert_eq!(outcome, Outcome::Failed("out_of_reach".into()));
+        assert!(tick <= 3, "fast, not 80 ticks: {tick}");
+    }
+
+    #[test]
+    fn a_target_behind_another_block_fails_typed_after_ten_aligned_ticks() {
+        use crate::test_world::{feet, set_block, swept, world};
+        for (target, wall, kind) in [
+            // Level with the head: nothing to climb to, the view is blocked.
+            (BlockPos::new(0, 64, 2), BlockPos::new(0, 64, 1), "no_sight"),
+            // Overhead (feet + 3): climbing could change the angle.
+            (BlockPos::new(0, 67, 2), BlockPos::new(0, 66, 1), "out_of_reach"),
+        ] {
+            let mut world = world();
+            set_block(&mut world, target, BlockState::from(BlockKind::OakLog));
+            set_block(&mut world, wall, BlockState::from(BlockKind::Stone));
+            let mut perception = swept(&world);
+            let mut body = Body::new(feet());
+            let mut mine = fresh_mine("#logs", Some(target));
+            let (tick, outcome) =
+                run_to_outcome(&mut mine, &world, &mut perception, &mut body, 60)
+                    .unwrap_or_else(|| panic!("{kind}: it never failed"));
+            assert_eq!(outcome, Outcome::Failed(kind.into()), "{target:?} behind {wall:?}");
+            assert!(
+                (BLOCKED_TICKS as u64..=BLOCKED_TICKS as u64 + 6).contains(&tick),
+                "{kind}: failed on tick {tick}, about {BLOCKED_TICKS} aligned ticks"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clear_view_still_digs() {
+        use crate::test_world::{feet, set_block, swept, world};
+        let target = BlockPos::new(0, 64, 2);
+        let mut world = world();
+        set_block(&mut world, target, BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = fresh_mine("#logs", Some(target));
+        let pending = run_until_dig(&mut mine, false, &mut body, &world, &mut perception);
+        assert_eq!(
+            pending,
+            Some(IntentSpec::Dig {
+                pos: target,
+                window: 160
+            })
+        );
     }
 }

@@ -20,6 +20,7 @@ mod config;
 mod hash;
 mod known;
 mod ledger;
+pub mod scaffold;
 mod see_through;
 mod sight;
 mod sky;
@@ -301,6 +302,16 @@ impl Perception {
     /// Write a cell a ray reached to the known map, with the chunk revision it
     /// was checked against.
     fn record_seen(&mut self, world: &World, pos: BlockPos, state: BlockState, eye: Vec3) {
+        // A scaffolding cell that is empty again is not scaffolding any more:
+        // the body dug its own column down, or something else broke it. This
+        // happens for every observation, not only a confirmed change of our own
+        // intent, so a column broken by a creeper or another player is
+        // forgotten too. Keeping the entry would hide the real block that later
+        // fills the cell and count a column that is no longer there (review
+        // finding 3).
+        if state.is_air() {
+            scaffold::forget(pos);
+        }
         let focus = section_key_of(eye.to_block_pos_floor());
         let revision = world
             .chunk_revision(praxion_world::ChunkPos::from(pos))

@@ -406,6 +406,49 @@ fn near_skips_a_stone_that_holds_back_water_but_counts_a_workstation() {
 }
 
 #[test]
+fn near_ignores_the_scaffolding_the_body_placed() {
+    // Review finding 1: `mine`'s target search skipped the body's own
+    // scaffolding and `near` did not, so `get_wood` retried a chop the map
+    // answered "yes" to and then burned the logs it held on a column.
+    let mut log_world = world();
+    let placed = BlockPos::new(1, 66, 0);
+    set_block(
+        &mut log_world,
+        placed,
+        praxion_world::BlockState::from(BlockKind::OakLog),
+    );
+    let mut perception = swept(&log_world);
+    assert_eq!(
+        near_fact(&mut perception, &log_world, "#logs"),
+        Truth::True,
+        "a real log is a target"
+    );
+
+    praxion_perception::scaffold::note(placed);
+    assert_eq!(
+        near_fact(&mut perception, &log_world, "#logs"),
+        Truth::False,
+        "the log the body placed to climb is not a target"
+    );
+
+    // Only the placed cell is skipped: a real log elsewhere still counts. It
+    // sits straight above the head: a log east of the scaffold would be hidden
+    // behind it, and the known map only holds what the sweep saw.
+    set_block(
+        &mut log_world,
+        BlockPos::new(0, 66, 0),
+        praxion_world::BlockState::from(BlockKind::OakLog),
+    );
+    let mut perception = swept(&log_world);
+    assert_eq!(
+        near_fact(&mut perception, &log_world, "#logs"),
+        Truth::True,
+        "a real log next to the scaffold counts"
+    );
+    praxion_perception::scaffold::reset();
+}
+
+#[test]
 fn f3_facts_read_health_food_and_the_day_clock() {
     let world = with_time(with_health(world(), 17.5, 14), 13_000);
     let mut perception = Perception::new(Config::default());

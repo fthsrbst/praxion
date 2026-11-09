@@ -1526,3 +1526,50 @@ fn a_confirmed_change_enters_the_known_map_at_once() {
     let remembered = p.known(table).expect("the change is remembered");
     assert_eq!(remembered.state, find_block("crafting_table", &[]));
 }
+
+#[test]
+fn a_cell_changed_back_to_air_is_no_longer_scaffolding() {
+    // Review finding 3: the scaffolding set cannot be write-only. The body can
+    // dig its own column down (`dig_down`, `branch_mine`) or a block can be
+    // broken; a stale entry would hide a real block that later fills the cell
+    // and count a column that no longer exists.
+    let cell = BlockPos::new(2, 65, 0);
+    let log = find_block("oak_log", &[]);
+    let mut world = world_with(&[(cell, log)]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    scaffold::note(cell);
+    p.note_changed(&world, cell);
+    assert!(
+        scaffold::is_scaffold(cell),
+        "a cell that still holds its block stays scaffolding"
+    );
+
+    set_block(&mut world, cell, BlockState::from(BlockKind::Air));
+    p.note_changed(&world, cell);
+    assert!(
+        !scaffold::is_scaffold(cell),
+        "the emptied cell is scaffolding no more"
+    );
+}
+
+#[test]
+fn a_scaffold_cell_a_query_sees_empty_is_forgotten() {
+    // Review finding 3, the other half: a column broken by something that is
+    // not our own block intent (a creeper, another player) never reaches
+    // `note_changed`. Any sight query that reads the cell as air forgets it,
+    // so the set is not write-only.
+    let cell = BlockPos::new(2, 65, 0);
+    let mut world = world_with(&[(cell, find_block("oak_log", &[]))]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    scaffold::note(cell);
+
+    set_block(&mut world, cell, BlockState::from(BlockKind::Air));
+    let answer = p.block(Caller::Other, &world, cell);
+    assert!(answer.value().is_some(), "the empty cell is seen");
+    assert!(
+        !scaffold::is_scaffold(cell),
+        "the query that saw it empty forgot it"
+    );
+}

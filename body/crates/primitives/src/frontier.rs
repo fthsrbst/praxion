@@ -6,7 +6,7 @@ use std::collections::{HashSet, VecDeque};
 use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockKind;
 use praxion_gamedata as gamedata;
-use praxion_perception::{Perception, workable};
+use praxion_perception::{Perception, scaffold, workable};
 use praxion_world::{BlockState, World};
 
 use crate::heading::{Dir, SECTORS, sector_of};
@@ -52,7 +52,7 @@ pub(crate) fn nearest_known_block(
     perception.nearest_known(
         world,
         radius,
-        |pos| excluded.contains(&pos),
+        |pos| excluded.contains(&pos) || scaffold::is_scaffold(pos),
         |pos, state| {
             let kind = BlockKind::from(state);
             let matches = match (tag, wanted_kind) {

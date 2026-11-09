@@ -1245,6 +1245,33 @@ mod tests {
     }
 
     #[test]
+    fn explore_does_not_complete_on_the_log_the_body_placed_to_climb() {
+        use crate::test_world::{set_block, swept, world};
+        use praxion_perception::scaffold;
+
+        // Review finding 1: explore's `near` and `mine`'s walk share one
+        // known-map search. A scaffold log is real `#logs`, so without the
+        // shared exclusion explore would answer "already near" for a column
+        // whose only log is the one the body put there.
+        let mut log_world = world();
+        let placed = BlockPos::new(0, 64, 2);
+        set_block(&mut log_world, placed, BlockState::from(BlockKind::OakLog));
+        let perception = swept(&log_world);
+        assert_eq!(
+            near_block(&perception, &log_world, "#logs", EXPLORE_NEAR_RADIUS),
+            Some(true),
+            "a real log is a target"
+        );
+        scaffold::note(placed);
+        assert_eq!(
+            near_block(&perception, &log_world, "#logs", EXPLORE_NEAR_RADIUS),
+            Some(false),
+            "the log the body placed is not a target"
+        );
+        scaffold::reset();
+    }
+
+    #[test]
     fn an_empty_plan_is_already_here_only_at_the_start_cell() {
         // `explore` asks for `Goal::Block`, which means exactly one cell. An
         // empty successful plan can only mean the body already stands on it;

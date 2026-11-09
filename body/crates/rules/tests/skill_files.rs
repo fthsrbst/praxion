@@ -53,6 +53,10 @@ fn every_skill_file_loads_together() {
         "get_cobblestone",
         "get_stone_pickaxe",
         "get_stone_sword",
+        "get_wood",
+        "cut_log",
+        "get_wooden_axe",
+        "get_stone_axe",
     ] {
         assert!(program.skill(name).is_some(), "missing skill {name}");
     }
