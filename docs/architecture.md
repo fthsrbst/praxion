@@ -132,7 +132,7 @@ user, pauses autonomous LLM work while reflexes and the core keep running.
 | Version manifest | data | pins client, server jar, protocol 777, Azalea commit, toolchain date, [D]; plus data-report hash and dependency licences [D]; the forwarder refuses a handshake with another protocol number [D] | Q4 |
 | Forwarder | Rust | forwards bytes untouched; tees a copy to the body over loopback with a bounded queue that never blocks forwarding | 2.2, Q3 |
 | Decoder | Rust | packet field layouts from the pinned Azalea commit; ids and registries from Mojang data reports; tracks Handshake, Login, Configuration (with Known Packs) and Play, including re-entry into Configuration; loss of sync marks perception invalid | 2.2, R1-B2 |
-| Raw store | Rust | everything the decoder receives; readable only by perception (module boundary plus lint) | R1-M3 |
+| Raw store | Rust | everything the decoder receives; world facts reach decision code only through perception; the allowed direct readers are listed in §5.1 and checked by a scan test [D, 2026-11-09] | R1-M3 |
 | Perception API | Rust | deny-by-default queries under the line-of-sight rule (§5.1); `unknown` is a typed value; denied attempts go to the ledger | 3, R1-M3 |
 | Reflexes | Rust | `evaluate(world) -> action`, about 10 typed settings the user can edit, first-night set growing per rung | 7 |
 | Arbiter | Rust | tiers survival, command, maintenance, projects; soft and hard thresholds; owns the intent stack; all quantities in expected ticks [D] | 7, HOL-8 |
@@ -165,8 +165,19 @@ a proposed rule of thumb, not a decision.
 
 ### 5.1 Perception
 
-The decoder fills the raw store with everything the server sends. Other modules see the world only
-through the perception API [D]:
+The decoder fills the raw store with everything the server sends. Decision-making code (primitives,
+facts, reflexes, skills) gets world facts (blocks, entities, columns) only through the perception API
+[D]. Direct raw-store reads are allowed only for [D, 2026-11-09]:
+
+- the headless actuator (physics needs the real blocks, as the game client does);
+- receipts and the driver (server evidence that an action took effect, §5.3);
+- own-state reads: inventory, held slot, open container, own pose.
+
+Any other peek is a perception query that answers with provenance `privileged` and a ledger entry.
+A scan test lists every direct store read in the body crates; a read outside the allowed readers and
+a committed baseline fails it, and the baseline may only shrink.
+
+The perception API itself:
 
 - **Line of sight** within about 64 blocks in every direction; camera direction is ignored; F3
   information is allowed, everything else is denied [D].
@@ -463,7 +474,7 @@ restart.
 
 | Boundary | Rule | Enforced by |
 |---|---|---|
-| Zero cheats [D] | APIs expose only what a player can do and see; no operator commands, no `/tp`; test setup through a separate logged harness | raw store readable only by perception (module boundary plus lint) [D]; ledger of privileged reads |
+| Zero cheats [D] | APIs expose only what a player can do and see; no operator commands, no `/tp`; test setup through a separate logged harness | world facts only through perception, with the allowed direct readers of §5.1, checked by a scan test with a shrinking baseline [D, 2026-11-09]; ledger of privileged reads |
 | Game connection [D] | no Praxion crash drops it | forwarder process with no game logic |
 | Take-over [D] | the user always wins within 50 ms | hooks, nonce [D], liveness probe [D], watchdog |
 | Network independence [D] | reflexes, take-over, ruleset, control verbs and the indicator never use the network | body-side implementation |
