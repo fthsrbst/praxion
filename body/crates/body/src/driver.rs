@@ -1338,6 +1338,19 @@ impl BodyDriver {
         }
     }
 
+    /// Fill the known map from what the eye can see, spending the rays the
+    /// callers left this tick, and return the wall time it took. Shared by the
+    /// normal tick and the CLI start delay: a body that is waiting for its goal
+    /// still sees, so the goal's first tick is not blind.
+    fn sweep_perception(&mut self, world: &World) -> u64 {
+        let stage = Instant::now();
+        {
+            let mut perception = lock(&self.perception);
+            perception.sweep(world);
+        }
+        stage.elapsed().as_nanos() as u64
+    }
+
     fn note_world(&mut self, world: &World, tick: u64, ts_ns: u64) {
         if let Some(reason) = world.status().reason()
             && !self.desync_logged
@@ -1399,10 +1412,17 @@ impl Driver for BodyDriver {
 
         // The CLI goal waits out the start delay (the harness sets the scene);
         // a brain session has no delay and idles with reflexes on from tick 0.
+        // The delay holds back the goal, the reflexes and the arbiter, but
+        // perception still runs: a goal that started with an empty known map
+        // would read a furnace two blocks away as `no_furnace` on its first
+        // tick (and admission runs start blind for the same reason).
         if self.port.is_none()
             && matches!(self.cli, CliGoal::Waiting(_))
             && view.tick < first_tick.saturating_add(self.options.start_delay_ticks)
         {
+            let sweep_ns = self.sweep_perception(world);
+            self.note_world(world, view.tick, ts_ns);
+            lock(&self.shared).record_stage("sweep", sweep_ns);
             return self.finish_tick(
                 view,
                 ControlFrame::new(view.tick, view.body.generation(), Held::NONE),
@@ -1543,13 +1563,8 @@ impl Driver for BodyDriver {
             );
         }
         let primitive_ns = stage.elapsed().as_nanos() as u64;
-        let stage = Instant::now();
 
-        {
-            let mut perception = lock(&self.perception);
-            perception.sweep(world);
-        }
-        let sweep_ns = stage.elapsed().as_nanos() as u64;
+        let sweep_ns = self.sweep_perception(world);
         let stage = Instant::now();
         self.note_world(world, view.tick, ts_ns);
         // One snapshot per second, on every wake, on the connect edge and
@@ -1965,6 +1980,27 @@ skill stall()
         harness_with(None, DEFAULT_BRAIN_SILENCE)
     }
 
+    /// A harness whose CLI goal waits out `start_delay_ticks`, as a `--goal`
+    /// run and an admission practice run do.
+    fn harness_with_start_delay(skill: &str, start_delay_ticks: u64) -> Harness {
+        let run_dir = run_dir();
+        let program = praxion_rules::load(INSTA).expect("the test program must load");
+        let shared = Arc::new(Mutex::new(Shared::new("test", "", vec![])));
+        let mut options = options(DEFAULT_BRAIN_SILENCE);
+        options.skill = Some(skill.to_owned());
+        options.start_delay_ticks = start_delay_ticks;
+        let driver =
+            BodyDriver::new(options, run_dir.clone(), program, None, settings(), shared, None)
+                .expect("the driver must start");
+        Harness {
+            driver,
+            world: World::new(),
+            body: Body::new(Vec3::ZERO),
+            tick: 1,
+            run_dir,
+        }
+    }
+
     impl Harness {
         fn step(&mut self) -> ControlFrame {
             let view = TickView {
@@ -2284,6 +2320,25 @@ skill stall()
             accepted[0].2,
             Some(harness.driver.arbiter.generation()),
             "the receipt carries the generation Arbiter::command bumped to"
+        );
+    }
+
+    #[test]
+    fn the_cli_start_delay_still_sweeps_perception() {
+        let mut harness = harness_with_start_delay("insta", 4);
+
+        // Ticks 1..=4 are the delay: the goal is not injected yet.
+        harness.run(4);
+        assert!(harness.driver.arbiter.stack().entries().is_empty());
+        let summary = harness.summary();
+        let stages = &summary["tick_stages"];
+        assert!(
+            stages.get("sweep").is_some(),
+            "perception must sweep while the CLI goal waits: {stages}"
+        );
+        assert!(
+            stages.get("arbiter").is_none(),
+            "the delay must not run the arbiter: {stages}"
         );
     }
 
