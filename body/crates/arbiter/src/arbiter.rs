@@ -212,6 +212,13 @@ impl Arbiter {
     /// record of what was asked, so a started skill without an entry (or an
     /// entry without a skill) would leave the body owning nothing. A refused
     /// skill rolls the push back, so the two never disagree.
+    ///
+    /// A meal in progress is ended only once the command is accepted: its
+    /// skill would otherwise run under the meal's ownership while the
+    /// interpreter holds the command's skill. A refused command must leave the
+    /// meal running and owned, so the push and the skill start come first and
+    /// neither path can leave a `done` entry, a dead meal or an unannounced
+    /// owner change behind (review of survival slice 1, finding 1).
     pub fn command(
         &mut self,
         interpreter: &mut Interpreter,
@@ -221,25 +228,25 @@ impl Arbiter {
         args: Vec<ArgValue>,
     ) -> Result<CommandAccepted, CommandError> {
         let strings: Vec<String> = args.iter().map(arg_to_string).collect();
-        // A command during a meal ends the meal: its skill would otherwise
-        // run under the meal's ownership once the interpreter holds the
-        // command's skill. The need comes back on its own if still hungry.
-        let dropped_meal = self.meal.take();
-        if let Some(run) = &dropped_meal {
-            self.stack.done(run.intent_id);
-        }
         let pushed = self
             .stack
             .push(Tier::Command, skill, strings.clone())
             .map_err(|_| CommandError::StackFull)?;
         if let Err(refusal) = interpreter.start_skill(skill, args) {
+            // The push only suspended the running entry (the meal's, when one
+            // is in progress); rolling back makes it the running entry again,
+            // and the interpreter still holds its skill. Nothing else changed.
             self.stack.rollback(pushed);
-            if dropped_meal.is_some() {
-                // The meal is gone and the command was refused: nobody owns
-                // the body until the next tick picks an owner.
-                self.owner = Owner::Idle;
-            }
             return Err(CommandError::Skill(refusal));
+        }
+
+        // The command is accepted: the meal is over, not paused, because the
+        // interpreter no longer holds its skill. The need comes back on its
+        // own if still hungry.
+        let dropped_meal = self.meal.take();
+        let meal_id = dropped_meal.as_ref().map(|run| run.intent_id);
+        if let Some(run) = &dropped_meal {
+            self.stack.done(run.intent_id);
         }
 
         let mut events = Vec::new();
@@ -255,7 +262,9 @@ impl Arbiter {
             skill: skill.to_owned(),
             args: strings,
         });
-        if let Some(suspended) = pushed.suspended {
+        // The push suspended the meal's entry before it was marked done; only
+        // a command that really waits on the stack is announced as suspended.
+        if let Some(suspended) = pushed.suspended.filter(|id| Some(*id) != meal_id) {
             events.push(EventKind::IntentState {
                 intent_id: suspended,
                 state: IntentState::Suspended.name().to_owned(),
@@ -634,8 +643,8 @@ impl Arbiter {
     fn preempt_for_reflex(&mut self, interpreter: &mut Interpreter, actuator: &mut dyn Actuator) {
         if let Some(run) = self.meal.take() {
             // The meal is over, not paused: a reflex interrupted it. The body
-            // writes `done` for its own intent; the receipt of the cancelled
-            // `eat` already settles `preempted`.
+            // writes `done` for its own intent; `preempt` cancels the `eat`
+            // primitive's in-flight action, whose receipt settles `preempted`.
             self.stack.done(run.intent_id);
             self.events.push(EventKind::IntentState {
                 intent_id: run.intent_id,

@@ -2812,6 +2812,90 @@ skill stall()
     }
 
     #[test]
+    fn a_rejected_command_abandons_nothing_of_the_meal() {
+        // Review of survival slice 1, finding 1: a rejected command used to
+        // end the meal before validation (the driver's `Err` branch did not
+        // abandon the flight either). The rejection must leave the meal
+        // owned, its entry running and its primitive untouched.
+        let mut harness = harness();
+        for index in 1..=7 {
+            accept(&mut harness, command(&format!("c-{index}"), "stall"));
+        }
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        let out = tick_arbiter(
+            &mut harness.driver,
+            &harness.world,
+            &hungry_view(test_view(feet, 6)),
+            Needs {
+                health: 20.0,
+                food: 6,
+            },
+            10,
+        );
+        assert_eq!(out.owner, Owner::Maintenance(NeedKind::Eat), "{:?}", out.events);
+        let meal_id = out.loaded_intent.expect("the meal started");
+        assert_eq!(harness.driver.arbiter.stack().depth(), 8, "the meal filled the stack");
+        let bridge = (
+            harness.driver.bridge.start.clone(),
+            harness.driver.bridge.continuous.clone(),
+            harness.driver.bridge.cancelled,
+        );
+
+        let mut rejection = command("c-full", "stall");
+        rejection.based_on_generation = harness.driver.arbiter.generation();
+        harness
+            .driver
+            .accept_command(rejection, 11, now_ns(), &harness.world);
+        flush(&mut harness);
+
+        let rejected: Vec<(String, Option<String>)> = harness
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.event {
+                EventKind::CommandReceipt {
+                    command_id,
+                    state,
+                    reason,
+                    ..
+                } if command_id == "c-full" => Some((state, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rejected,
+            vec![
+                ("pending".to_owned(), None),
+                ("rejected".to_owned(), Some("stack_full".to_owned())),
+            ],
+            "the command is rejected for the full stack"
+        );
+        assert_eq!(
+            *harness.driver.arbiter.owner(),
+            Owner::Maintenance(NeedKind::Eat),
+            "the meal still owns the body"
+        );
+        assert_eq!(
+            harness.driver.arbiter.stack().get(meal_id).map(|entry| entry.state),
+            Some(IntentState::Running),
+            "the meal's entry is still running"
+        );
+        assert_eq!(
+            harness.driver.interpreter.current_skill(),
+            Some("eat_food"),
+            "the meal's skill was not replaced"
+        );
+        assert_eq!(
+            (
+                harness.driver.bridge.start.clone(),
+                harness.driver.bridge.continuous.clone(),
+                harness.driver.bridge.cancelled,
+            ),
+            bridge,
+            "the meal's in-flight primitive was not abandoned"
+        );
+    }
+
+    #[test]
     fn a_budget_settle_under_a_reflex_resumes_the_older_skill() {
         let mut harness = harness();
         accept(&mut harness, command("c-1", "stall"));

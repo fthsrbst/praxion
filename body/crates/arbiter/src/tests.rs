@@ -613,6 +613,186 @@ fn a_full_intent_stack_refuses_before_starting_the_skill() {
     assert_eq!(rig.arbiter.generation(), generation, "no owner change");
 }
 
+/// The meal's entry: the only `eat_food` intent on the stack.
+fn meal_entry(rig: &Rig) -> (u64, IntentState) {
+    let entry = rig
+        .arbiter
+        .stack()
+        .entries()
+        .iter()
+        .find(|entry| entry.skill_ref == "eat_food")
+        .expect("the meal is on the stack");
+    (entry.intent_id, entry.state)
+}
+
+#[test]
+fn a_refused_command_leaves_the_meal_running_and_owned() {
+    // Review of survival slice 1, finding 1: the meal used to be ended before
+    // the command was validated, so a refused skill killed the meal, left
+    // `Owner::Maintenance` with `meal = None` and an unannounced owner change.
+    // A refusal must change nothing at all.
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs {
+        health: 20.0,
+        food: 6,
+    };
+    rig.tick(0, &hungry, needs, &settings);
+    assert_eq!(rig.arbiter.owner(), &Owner::Maintenance(NeedKind::Eat));
+    let (meal_id, _) = meal_entry(&rig);
+    let depth = rig.arbiter.stack().depth();
+    let generation = rig.arbiter.generation();
+
+    let refusal = rig
+        .arbiter
+        .command(
+            &mut rig.interpreter,
+            &mut rig.body,
+            1,
+            "no_such_skill",
+            Vec::<ArgValue>::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&refusal, CommandError::Skill(message) if message.contains("no_such_skill")),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        rig.arbiter.owner(),
+        &Owner::Maintenance(NeedKind::Eat),
+        "the meal still owns the body"
+    );
+    assert_eq!(rig.arbiter.stack().depth(), depth, "no entry was added");
+    assert_eq!(
+        meal_entry(&rig),
+        (meal_id, IntentState::Running),
+        "the rollback put the meal entry back to running"
+    );
+    assert_eq!(
+        rig.interpreter.current_skill(),
+        Some("eat_food"),
+        "the interpreter still runs the meal"
+    );
+    assert_eq!(rig.arbiter.generation(), generation, "nothing changed");
+}
+
+#[test]
+fn a_full_stack_refuses_a_command_without_ending_the_meal() {
+    // Review of survival slice 1, finding 1: the `StackFull` early return used
+    // to leave a dead meal behind a full stack. Seven commands plus the meal
+    // fill the eight-deep stack; the refusal must leave all eight entries and
+    // the meal's ownership untouched.
+    let (mut rig, settings) = hungry_rig();
+    for _ in 0..6 {
+        rig.command("work");
+    }
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs {
+        health: 20.0,
+        food: 6,
+    };
+    let out = rig.tick(0, &hungry, needs, &settings);
+    assert_eq!(out.owner, Owner::Maintenance(NeedKind::Eat));
+    assert_eq!(rig.arbiter.stack().depth(), 8, "the meal filled the stack");
+    let (meal_id, meal_state) = meal_entry(&rig);
+    assert_eq!(meal_state, IntentState::Running);
+    let generation = rig.arbiter.generation();
+
+    let refusal = rig
+        .arbiter
+        .command(
+            &mut rig.interpreter,
+            &mut rig.body,
+            1,
+            "work",
+            Vec::<ArgValue>::new(),
+        )
+        .unwrap_err();
+    assert_eq!(refusal, CommandError::StackFull);
+    assert_eq!(
+        rig.arbiter.owner(),
+        &Owner::Maintenance(NeedKind::Eat),
+        "the meal still owns the body"
+    );
+    assert_eq!(rig.arbiter.stack().depth(), 8, "the stack did not grow");
+    assert_eq!(meal_entry(&rig), (meal_id, IntentState::Running));
+    assert_eq!(rig.arbiter.generation(), generation, "no owner change");
+}
+
+#[test]
+fn an_accepted_command_ends_the_meal_with_one_done_and_no_phantom_suspend() {
+    // Review of survival slice 1, finding 1: the accepted path must write
+    // exactly one `done` for the meal and never announce the meal as
+    // `suspended`/`replan_needed` (the push suspends it only on its way to
+    // `done`), and the owner change it makes must be logged.
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs {
+        health: 20.0,
+        food: 6,
+    };
+    rig.tick(0, &hungry, needs, &settings);
+    let (meal_id, _) = meal_entry(&rig);
+    let generation = rig.arbiter.generation();
+
+    let accepted = rig
+        .arbiter
+        .command(
+            &mut rig.interpreter,
+            &mut rig.body,
+            1,
+            "work",
+            Vec::<ArgValue>::new(),
+        )
+        .expect("the program has the skill");
+    let done = accepted
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EventKind::IntentState { intent_id, state }
+                    if *intent_id == meal_id && state == "done"
+            )
+        })
+        .count();
+    assert_eq!(done, 1, "{:?}", accepted.events);
+    let phantoms = accepted
+        .events
+        .iter()
+        .filter(|event| match event {
+            EventKind::IntentState { intent_id, state } => {
+                *intent_id == meal_id && state != "done"
+            }
+            EventKind::ReplanNeeded { intent_id } => *intent_id == meal_id,
+            _ => false,
+        })
+        .count();
+    assert_eq!(phantoms, 0, "the meal is done, not suspended: {:?}", accepted.events);
+    let owner_changes = accepted
+        .events
+        .iter()
+        .filter(|event| matches!(event, EventKind::OwnerChanged { .. }))
+        .count();
+    assert_eq!(owner_changes, 1, "{:?}", accepted.events);
+    assert_eq!(
+        rig.arbiter.owner(),
+        &Owner::Skill {
+            intent_id: accepted.intent_id
+        }
+    );
+    assert!(rig.arbiter.generation() > generation, "the owner changed");
+    assert_eq!(
+        meal_entry(&rig),
+        (meal_id, IntentState::Done),
+        "the meal entry is kept and marked done"
+    );
+    assert_eq!(rig.interpreter.current_skill(), Some("work"));
+}
+
 #[test]
 fn the_body_alone_writes_done_when_maintenance_finishes() {
     let mut rig = Rig::new(continuous_program());
