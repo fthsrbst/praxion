@@ -437,8 +437,14 @@ impl Arbiter {
                         );
                     }
                 }
+                // No food to eat: wake the brain so it can set a `get_food` goal
+                // (decision 2026-11-09 "Five next areas"). The arbiter does not
+                // push `get_food` itself: hunting runs for minutes, and a need
+                // at the survival tier would take the body from the user's
+                // command for all of it, with no goal budget or receipt of its
+                // own. The brain already owns goals.
                 None => self.wake(
-                    "hunger",
+                    "hunger_no_food",
                     "food at the hard threshold and no food in the inventory".to_owned(),
                 ),
             }

@@ -1,0 +1,18 @@
+# Get under cover for the night: cut a staircase into the ground and wait in it
+# until morning (decision 2026-11-09 "Five next areas"; the simplest shelter the
+# existing primitives allow). A hole is not a sealed room: the entrance stays
+# open, so a mob can still follow and the reflexes fight it in a one-wide tunnel,
+# which is the point. What is left is a sealed shelter and a `sheltered` fact.
+#
+# Why the rules are ordered this way: the night ends the skill first. Then, if
+# stone is not within three blocks, `dig_down` cuts the stairs until stone is
+# within reach (stone lies three to six blocks under flat ground), which puts
+# the body below the surface. With stone near, the body waits in short steps so
+# the night check runs again. A `dig_down` that fails (water, a drop, no ground)
+# falls through to waiting where the body stands.
+skill take_shelter()
+  doc "Dig a staircase into the ground and wait in it until the night is over."
+  rules:
+    not is_night() -> done
+    not near(stone, 3) -> dig_down(stone)
+    true -> wait(40)

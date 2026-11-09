@@ -59,7 +59,9 @@ pub use look::{
     Cue, Gaze, GazeMode, Personality, STEP, WALK_TOLERANCE_DEG, aim, look_towards, wrap_degrees,
 };
 pub use moves::{MoveData, MoveKind, PLACE_BLOCK_COST, PrimitiveCall};
-pub use state::{HotbarItem, Inventory, Placements, PlanningState, place_block_kind};
+pub use state::{
+    HotbarItem, Inventory, Placements, PlanningState, SPRINT_FOOD_MIN, place_block_kind,
+};
 pub use stuck::{BlacklistEntry, ResetCondition, StuckGuard, Unreachable};
 pub use world::{
     Block, DirectBlocks, KnownBlocks, Limits, PerceptionBlocks, TestWorld, center,

@@ -5,15 +5,15 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use azalea_core::position::BlockPos;
-use azalea_registry::builtin::BlockKind;
+use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Look};
 use praxion_interpreter::Outcome;
-use praxion_perception::{FactKind, QueryKind};
+use praxion_perception::{Caller, FactKind, QueryKind};
 use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, Step};
 use praxion_world::{BlockState, World};
 
-use crate::common::{block_name, idle, plan_inventory};
+use crate::common::{block_name, idle, plan_food, plan_inventory};
 use crate::frontier::{
     FrontierChoice, FrontierScan, near_block, nearest_known_block, scan_frontiers,
 };
@@ -27,6 +27,13 @@ pub const EXPLORE_NEAR_RADIUS: u32 = praxion_rules::registry::EXPLORE_NEAR_RADIU
 /// How far `explore` looks for its target before it falls back to a frontier
 /// of the known map.
 pub const EXPLORE_SEARCH_RADIUS: u32 = praxion_rules::registry::EXPLORE_SEARCH_RADIUS;
+
+/// How close a mob must be for `explore(mob)` to end (decision 2026-11-09
+/// "Five next areas": `hunt` and `get_food` search for animals the same way).
+pub const EXPLORE_ENTITY_RADIUS: u32 = 24;
+
+/// Ticks between two mob checks of one `explore(mob)` call.
+pub const EXPLORE_ENTITY_PERIOD_TICKS: u64 = 10;
 
 /// The frontier scan radius. It must reach past the sight range, not stay
 /// inside it: rays record seen cells out to 64 blocks, so a 64-block box on
@@ -126,6 +133,10 @@ impl LookAround {
 #[derive(Debug)]
 pub(crate) struct Explore {
     target: String,
+    /// Set when the target is a mob, not a block: the call then ends when one
+    /// is within [`EXPLORE_ENTITY_RADIUS`], checked every
+    /// [`EXPLORE_ENTITY_PERIOD_TICKS`] (an entity query costs rays).
+    entity: Option<EntityKind>,
     planner: Planner,
     follower: Option<Follower>,
     goal: Option<BlockPos>,
@@ -287,11 +298,19 @@ impl Explore {
             if gamedata::block_tag(tag).is_none() {
                 return Err(format!("unknown block tag `#{tag}`"));
             }
-        } else if target.parse::<BlockKind>().is_err() {
-            return Err(format!("unknown block `{target}`"));
+        } else if target.parse::<BlockKind>().is_err() && target.parse::<EntityKind>().is_err() {
+            return Err(format!("unknown block or mob `{target}`"));
         }
+        // A name that is both a block and a mob does not exist in vanilla; the
+        // block reading wins if one ever appears.
+        let entity = if target.starts_with('#') || target.parse::<BlockKind>().is_ok() {
+            None
+        } else {
+            target.parse::<EntityKind>().ok()
+        };
         Ok(Self {
             target,
+            entity,
             planner: {
                 // Explore walks; it never digs or places. A frontier that
                 // needs a world change is rejected and another one is chosen,
@@ -353,7 +372,18 @@ impl Explore {
         // The completion check is cheap: a 5-block scan. The wider target
         // search runs on `EXPLORE_SEARCH_PERIOD_TICKS`, also while walking to a
         // frontier or a cue; it walks remembered sections, not the cube.
-        if near_block(ctx.perception, ctx.world, &self.target, EXPLORE_NEAR_RADIUS) == Some(true) {
+        if let Some(kind) = self.entity {
+            if self.waited == 1 || self.waited.is_multiple_of(EXPLORE_ENTITY_PERIOD_TICKS as u32) {
+                let found = ctx
+                    .perception
+                    .nearest_entity(Caller::Other, ctx.world, kind, EXPLORE_ENTITY_RADIUS);
+                if found.is_known() {
+                    return (frame, None, Some(Outcome::Confirmed));
+                }
+            }
+        } else if near_block(ctx.perception, ctx.world, &self.target, EXPLORE_NEAR_RADIUS)
+            == Some(true)
+        {
             return (frame, None, Some(Outcome::Confirmed));
         }
         if self.waited > self.budget {
@@ -830,15 +860,17 @@ impl Explore {
 
     /// The planning state a plan and its follower share: the run's inventory
     /// and the cells explore has stalled in.
-    fn planning_state(&self, world: &World) -> PlanningState {
+    fn planning_state(&self, world: &World, food: Option<u32>) -> PlanningState {
         let mut state = PlanningState::new(plan_inventory(world));
+        state.food = food;
         state.blacklist.extend(self.blocked.iter().copied());
         state
     }
 
     /// Follow `steps` with the planning state the plan used.
     fn follow(&self, ctx: &mut Ctx<'_>, steps: Vec<Step>) -> Follower {
-        let state = self.planning_state(ctx.world);
+        let food = plan_food(ctx);
+        let state = self.planning_state(ctx.world, food);
         let mut source = PerceptionBlocks {
             perception: ctx.perception,
             world: ctx.world,
@@ -950,7 +982,8 @@ impl Explore {
     }
 
     fn plan_to(&self, ctx: &mut Ctx<'_>, start: BlockPos, goal: Goal) -> praxion_planner::Plan {
-        let state = self.planning_state(ctx.world);
+        let food = plan_food(ctx);
+        let state = self.planning_state(ctx.world, food);
         let mut source = PerceptionBlocks {
             perception: ctx.perception,
             world: ctx.world,
@@ -1998,5 +2031,36 @@ mod tests {
             1,
             "one entry per (query, fact), not one per read"
         );
+    }
+
+    #[test]
+    fn a_mob_target_ends_the_call_when_one_is_near_and_unknown_names_are_refused() {
+        use crate::test_world::{add_entity, feet, swept, world};
+        use azalea_registry::builtin::EntityKind;
+        use praxion_planner::Personality;
+
+        let mut memory = ExploreMemory::default();
+        assert!(Explore::new("unicorn".into(), &mut memory).is_err());
+
+        let run = |with_cow: bool| {
+            let mut world = world();
+            if with_cow {
+                add_entity(&mut world, 5, EntityKind::Cow, Vec3::new(5.5, 64.0, 0.5));
+            }
+            let mut perception = swept(&world);
+            let body = Body::new(feet());
+            let mut memory = ExploreMemory::default();
+            let mut explore = Explore::new("cow".into(), &mut memory).expect("a mob target");
+            let mut ctx = Ctx {
+                tick: 20,
+                body: &body,
+                world: &world,
+                perception: &mut perception,
+                style: Personality::default(),
+            };
+            explore.tick(&mut ctx, false, &mut memory).2
+        };
+        assert_eq!(run(true), Some(Outcome::Confirmed), "a cow five blocks away");
+        assert_eq!(run(false), None, "no cow: the call goes on searching");
     }
 }

@@ -74,6 +74,21 @@ pub(crate) struct Attack {
     pub(crate) waited: u32,
 }
 
+/// Ticks `attack` waits for a mob within reach before it fails `no_target`.
+const NO_TARGET_TICKS: u32 = 10;
+
+/// The hotbar index (0 to 8) of the best weapon held there, if any.
+fn best_hotbar_weapon(world: &praxion_world::World) -> Option<u8> {
+    (36..=44usize)
+        .filter_map(|slot| {
+            let stack = world.inventory().get(slot)?;
+            let rank = praxion_gamedata::weapon_rank(crate::common::item_name(stack))?;
+            (stack.count() > 0).then_some((rank, (slot - 36) as u8))
+        })
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, index)| index)
+}
+
 impl Attack {
     pub(crate) fn tick(
         &mut self,
@@ -92,7 +107,10 @@ impl Attack {
                 self.target = Some(position);
             } else {
                 self.waited += 1;
-                if self.waited > 40 {
+                // A mob that stepped out of reach hands control back to the
+                // skill (`hunt` moves to it again) instead of freezing the
+                // body for two seconds.
+                if self.waited > NO_TARGET_TICKS {
                     return (frame, None, Some(Outcome::Failed("no_target".into())));
                 }
                 return (frame, None, None);
@@ -101,6 +119,10 @@ impl Attack {
         let Some(target) = self.target else {
             return (frame, None, Some(Outcome::Failed("no_target".into())));
         };
+        // The best weapon in the hotbar is in hand while fighting (decision
+        // 2026-11-09 "Five next areas"); the actuator sends a select only when
+        // the slot changes. A weapon outside the hotbar is not selected here.
+        frame.select_slot = best_hotbar_weapon(ctx.world);
         let aim_point = Vec3::new(target.x, target.y + 1.0, target.z);
         let (look, aligned) = aim(ctx, aim_point);
         frame.look = look;
@@ -313,5 +335,86 @@ pub fn fact_known(ctx: &mut Ctx<'_>, fact: &FactCall) -> bool {
             entity_target(ctx, name, radius).is_some()
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod attack_tests {
+    use super::*;
+    use crate::test_world::{add_entity, feet, give, swept, world};
+    use azalea_registry::builtin::{EntityKind, ItemKind};
+    use praxion_headless::Body;
+    use praxion_planner::Personality;
+
+    fn attack_for(kind: &str) -> Attack {
+        Attack {
+            kind: kind.to_owned(),
+            entity: None,
+            target: None,
+            waited: 0,
+        }
+    }
+
+    fn tick(
+        attack: &mut Attack,
+        world: &praxion_world::World,
+        perception: &mut praxion_perception::Perception,
+        body: &mut Body,
+        tick: u64,
+    ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
+        let mut ctx = Ctx {
+            tick,
+            body,
+            world,
+            perception,
+            style: Personality::default(),
+        };
+        let result = attack.tick(&mut ctx, false);
+        result.0.apply_with_menu(body, tick).expect("frame applies");
+        result
+    }
+
+    #[test]
+    fn attack_gives_up_after_ten_ticks_without_a_mob_in_reach() {
+        let world = world();
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let mut failed_at = None;
+        for n in 0..40u64 {
+            let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 20 + n);
+            if let Some(outcome) = outcome {
+                assert_eq!(outcome, Outcome::Failed("no_target".into()));
+                failed_at = Some(n);
+                break;
+            }
+        }
+        assert_eq!(failed_at, Some(10), "the 11th tick fails, not the 41st");
+    }
+
+    #[test]
+    fn attack_holds_the_best_hotbar_weapon() {
+        let mut world = world();
+        give(&mut world, 37, ItemKind::WoodenSword, 1);
+        give(&mut world, 38, ItemKind::DiamondSword, 1);
+        give(&mut world, 39, ItemKind::StonePickaxe, 1);
+        add_entity(&mut world, 3, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+        assert_eq!(frame.select_slot, Some(2), "the diamond sword, hotbar 2");
+    }
+
+    #[test]
+    fn attack_with_no_weapon_selects_nothing() {
+        let mut world = world();
+        give(&mut world, 38, ItemKind::StonePickaxe, 1);
+        add_entity(&mut world, 3, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+        assert_eq!(frame.select_slot, None);
     }
 }

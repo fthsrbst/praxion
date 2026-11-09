@@ -19,7 +19,7 @@ use crate::Step;
 use crate::look::{Personality, aim, wrap_degrees};
 use crate::moves::MoveKind;
 use crate::route::{Route, RoutePoint};
-use crate::state::PlanningState;
+use crate::state::{PlanningState, SPRINT_FOOD_MIN};
 use crate::world::{KnownBlocks, center};
 
 /// The forward gate on open, flat walking, standing: a yaw error this large
@@ -77,6 +77,12 @@ pub struct Follower {
     forward_since: Option<u64>,
     /// Sprint is released until this tick after a replan.
     sprint_release_until: Option<u64>,
+    /// The food level the route was planned with; `None` allows sprinting.
+    food: Option<u32>,
+    /// Whether the last frame held sprint. A sprint already running goes on
+    /// when food drops, as in the game; only starting one needs food above
+    /// [`SPRINT_FOOD_MIN`].
+    sprinting: bool,
 }
 
 /// What the follower reports for the caller's progress check.
@@ -115,6 +121,8 @@ impl Follower {
             yaw_request: None,
             forward_since: None,
             sprint_release_until: None,
+            food: state.food,
+            sprinting: false,
         }
     }
 
@@ -293,10 +301,12 @@ impl Follower {
                 && delay_elapsed
                 && !released
                 && !hazards.no_sprint
+                && (self.sprinting || self.food.is_none_or(|food| food > SPRINT_FOOD_MIN))
             {
                 frame.held.sprint = true;
             }
         }
+        self.sprinting = frame.held.sprint;
 
         self.ticks_on_step = self.ticks_on_step.saturating_add(1);
         if self.ticks_on_step > self.max_ticks_per_step {
@@ -765,20 +775,61 @@ mod tests {
     /// Drive a straight east route until `ticks` have elapsed, returning
     /// whether sprint was held on each tick.
     fn sprint_ticks(style: Personality, ticks: usize) -> (Vec<bool>, Follower) {
+        sprint_ticks_at(style, ticks, None, None)
+    }
+
+    /// Like [`sprint_ticks`], planned at `food`; the follower's food becomes
+    /// `food_after` from tick `drop_at` on (a meal's opposite: hunger).
+    fn sprint_ticks_at(
+        style: Personality,
+        ticks: usize,
+        food: Option<u32>,
+        food_after: Option<(usize, u32)>,
+    ) -> (Vec<bool>, Follower) {
         let mut world = TestWorld::flat(63, 32);
         let mut body = body_at(0.5, 64.0, 0.5);
         settle(&mut body);
         body.set_look(azalea_entity::LookDirection::new(-90.0, 8.0));
-        let mut follower =
-            Follower::new(walk_steps(20), &mut world, &PlanningState::default(), style);
+        let state = PlanningState {
+            food,
+            ..PlanningState::default()
+        };
+        let mut follower = Follower::new(walk_steps(20), &mut world, &state, style);
         let mut held = Vec::new();
         for tick in 0..ticks as u64 {
+            if let Some((at, value)) = food_after
+                && tick as usize == at
+            {
+                follower.food = Some(value);
+            }
             let frame = follower.step(tick, body.generation(), &body);
             held.push(frame.held.sprint);
             frame.apply(&mut body, tick).unwrap();
             body.step(&frame.held, &GroundWorld);
         }
         (held, follower)
+    }
+
+    #[test]
+    fn sprint_needs_food_above_six_to_start_but_a_running_sprint_goes_on() {
+        // Decision 2026-11-09 "Five next areas": the hunger gate. Zero delay
+        // so the only thing that can hold a sprint back is the food level.
+        let style = Personality {
+            sprints: true,
+            sprint_delay_ticks: 0,
+            ..Personality::default()
+        };
+        let (held, _) = sprint_ticks_at(style, 40, Some(6), None);
+        assert!(held.iter().all(|&sprint| !sprint), "food 6 never starts a sprint");
+        let (held, _) = sprint_ticks_at(style, 40, Some(7), None);
+        assert!(held.iter().any(|&sprint| sprint), "food 7 sprints");
+        let (held, _) = sprint_ticks_at(style, 40, None, None);
+        assert!(held.iter().any(|&sprint| sprint), "an unknown food level allows it");
+        // Food falls to 3 after the sprint started: it is not cut short.
+        let (held, _) = sprint_ticks_at(style, 40, Some(20), Some((20, 3)));
+        let first = held.iter().position(|&sprint| sprint).expect("it sprinted");
+        assert!(first < 20);
+        assert!(held[20..].iter().any(|&sprint| sprint), "the running sprint continues: {held:?}");
     }
 
     #[test]

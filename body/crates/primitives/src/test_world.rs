@@ -291,3 +291,38 @@ pub(crate) fn close_menu(world: &mut World, id: i32) {
         ),
     );
 }
+
+/// A server `add_entity`: `kind` appears at `pos` with entity id `id`.
+pub(crate) fn add_entity(
+    world: &mut World,
+    id: i32,
+    kind: azalea_registry::builtin::EntityKind,
+    pos: Vec3,
+) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::AddEntity(azalea_protocol::packets::game::ClientboundAddEntity {
+            id: azalea_core::entity_id::MinecraftEntityId(id),
+            uuid: uuid::Uuid::from_u128(id as u128),
+            entity_type: kind,
+            position: pos,
+            movement: azalea_core::delta::LpVec3::Zero,
+            x_rot: 0,
+            y_rot: 0,
+            y_head_rot: 0,
+            data: 0,
+        }),
+    );
+}
+
+/// A server `remove_entities` for one entity.
+pub(crate) fn remove_entity(world: &mut World, id: i32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::RemoveEntities(
+            azalea_protocol::packets::game::ClientboundRemoveEntities {
+                entity_ids: vec![azalea_core::entity_id::MinecraftEntityId(id)],
+            },
+        ),
+    );
+}

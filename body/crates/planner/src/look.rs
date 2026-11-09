@@ -68,7 +68,13 @@ impl Personality {
             step_deg: STEP,
             look_ahead: rng.gen_range(1.8..3.0),
             deadband_deg: rng.gen_range(4.0..12.0),
-            sprints: rng.gen_bool(0.8),
+            // Every body sprints (decision 2026-11-09 "Five next areas": a coin
+            // toss made one run a body that never sprints). The draw is still
+            // taken so the traits drawn after it keep their values (§4.6).
+            sprints: {
+                let _ = rng.gen_bool(0.8);
+                true
+            },
             sprint_delay_ticks: if rng.gen_bool(0.25) {
                 0
             } else {
@@ -623,6 +629,13 @@ fn unwrap_near(degrees: f32, reference: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_seed_draws_a_body_that_sprints() {
+        for seed in 0..200u64 {
+            assert!(Gaze::new(seed).personality().sprints, "seed {seed}");
+        }
+    }
 
     struct Rig {
         gaze: Gaze,

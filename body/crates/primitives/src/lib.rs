@@ -13,6 +13,7 @@ mod frontier;
 mod heading;
 mod mine;
 mod move_to;
+mod pickup;
 mod place;
 mod runner;
 mod small;

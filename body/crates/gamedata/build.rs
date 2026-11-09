@@ -42,7 +42,10 @@ const FIXED_BLOCKS: &[&str] = &[
     "iron_ore",
     "coal_ore",
 ];
-const ENTITIES: &[&str] = &["cow", "sheep", "chicken"];
+/// The mobs whose loot tables are generated: the passive animals the body eats
+/// from and the hostiles it may hunt at night (decision 2026-11-09 "Five next
+/// areas"). Creepers and Endermen are never hunted, so they have no table.
+const ENTITIES: &[&str] = &["cow", "sheep", "chicken", "pig", "zombie", "skeleton", "spider"];
 
 /// The versioned server jar, held in memory and read on demand by entry name.
 type Jar = ZipArchive<Cursor<Vec<u8>>>;
@@ -707,8 +710,19 @@ fn parse_table(jar: &mut Jar, path: &str, depth: usize) -> Result<Vec<DropDef>, 
             .get("entries")
             .and_then(Value::as_array)
             .ok_or_else(|| format!("pool {index} has no `entries`"))?;
+        let chance = pool
+            .get("condition")
+            .or_else(|| pool.get("conditions"))
+            .is_some_and(has_chance);
         for entry in entries {
-            drops.extend(parse_entry(jar, entry, path, depth, false)?);
+            let mut found = parse_entry(jar, entry, path, depth, false)?;
+            if chance {
+                // A pool that only rolls with some probability may drop nothing.
+                for drop in &mut found {
+                    drop.min = 0;
+                }
+            }
+            drops.extend(found);
         }
     }
     Ok(drops)
@@ -735,7 +749,9 @@ fn parse_entry(
         .as_object()
         .ok_or_else(|| format!("an entry in {path} is not an object"))?;
     let mut tool = None;
+    let mut chance = false;
     if let Some(condition) = object.get("condition").or_else(|| object.get("conditions")) {
+        chance = has_chance(condition);
         match condition_of(condition, path, lenient)? {
             Condition::Skip => return Ok(Vec::new()),
             Condition::Accept(found) => tool = found,
@@ -754,7 +770,7 @@ fn parse_entry(
             let (min, max) = counts(object, path)?;
             Ok(vec![DropDef {
                 item: normalize(name),
-                min,
+                min: if chance { 0 } else { min },
                 max,
                 tool,
             }])
@@ -836,10 +852,12 @@ fn parse_count(value: &Value, path: &str) -> Result<(u32, u32), String> {
     if object.get("type").and_then(Value::as_str) != Some("minecraft:uniform") {
         return Err(format!("unsupported count {value} in {path}"));
     }
+    // A negative minimum (spider eyes: -1 to 1) is a drop of nothing.
     let min = object
         .get("min")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| format!("uniform count in {path} has no `min`"))?;
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("uniform count in {path} has no `min`"))?
+        .max(0) as u64;
     let max = object
         .get("max")
         .and_then(Value::as_u64)
@@ -848,6 +866,26 @@ fn parse_count(value: &Value, path: &str) -> Result<(u32, u32), String> {
         u32::try_from(min).map_err(|_| format!("min {min} is too large"))?,
         u32::try_from(max).map_err(|_| format!("max {max} is too large"))?,
     ))
+}
+
+/// Whether a condition rolls a probability (`random_chance` and its enchanted
+/// variants): the entry it guards may drop nothing.
+fn has_chance(condition: &Value) -> bool {
+    match condition {
+        Value::Array(terms) => terms.iter().any(has_chance),
+        Value::Object(object) => {
+            let own = object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("minecraft:random_chance"));
+            let nested = object
+                .get("terms")
+                .and_then(Value::as_array)
+                .is_some_and(|terms| terms.iter().any(has_chance));
+            own || nested
+        }
+        _ => false,
+    }
 }
 
 fn condition_of(condition: &Value, path: &str, lenient: bool) -> Result<Condition, String> {
@@ -875,6 +913,17 @@ fn condition_of(condition: &Value, path: &str, lenient: bool) -> Result<Conditio
                 .ok_or_else(|| format!("a condition in {path} has no `type`"))?;
             match kind {
                 "minecraft:survives_explosion" => Ok(Condition::Accept(None)),
+                // Mob loot: the body kills with its own hands, so a drop that
+                // needs a player kill is a drop; its probability only lowers
+                // the minimum (see `has_chance`).
+                "minecraft:killed_by_player"
+                | "minecraft:random_chance"
+                | "minecraft:random_chance_with_enchanted_bonus" => Ok(Condition::Accept(None)),
+                // A rider, a burning mob, a baby on a chicken: states the
+                // plain kill does not meet.
+                // Inside `alternatives` (a sheep's colour) the first branch is taken
+                // leniently, as before.
+                "minecraft:entity_properties" if !lenient => Ok(Condition::Skip),
                 "minecraft:match_tool" => {
                     let tool = object
                         .get("predicate")

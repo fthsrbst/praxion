@@ -87,6 +87,8 @@ impl Facts {
             ("health", ValueType::Int),
             ("is_night", ValueType::Bool),
             ("time_of_day", ValueType::Int),
+            // The edible items held, raw or cooked (`get_food` ends on it).
+            ("count_food", ValueType::Int),
         ] {
             facts.add(FactSig {
                 name,
@@ -474,6 +476,34 @@ impl Primitives {
         }
         primitives.add(attack);
 
+        // `pickup(item)`: walk to a dropped item and collect it. The receipt is
+        // the inventory gaining one of `item`; a drop of another kind picked up
+        // on the way does not settle it.
+        primitives.add(PrimitiveRecord {
+            name: "pickup",
+            version: 1,
+            params: vec![PrimParam {
+                name: "item",
+                ty: ArgType::Value(ValueType::Item),
+            }],
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            // The walk and the wait for a drop to appear: 80 ticks of pickup
+            // plus the receipt's window.
+            default_max_ticks: 100,
+            effects: Effects {
+                produces: vec![ItemDelta {
+                    item: "$item".into(),
+                    count: 1,
+                }],
+                drops: Vec::new(),
+                consumes: Vec::new(),
+                changes: Vec::new(),
+            },
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::InventoryDelta,
+        });
+
         primitives.add(PrimitiveRecord {
             name: "equip",
             version: 1,
@@ -493,9 +523,10 @@ impl Primitives {
         primitives.add(PrimitiveRecord {
             name: "explore",
             version: 1,
+            // A block, or a mob (`explore(cow)` ends when one is within 24).
             params: vec![PrimParam {
                 name: "target",
-                ty: ArgType::Value(ValueType::Block),
+                ty: ArgType::BlockOrEntity,
             }],
             kind: PrimitiveKind::Continuous,
             cancellation: CancellationClass::Interruptible,
@@ -766,6 +797,7 @@ mod tests {
             "craft",
             "smelt",
             "eat",
+            "pickup",
             "explore",
             "attack",
             "equip",
@@ -778,6 +810,18 @@ mod tests {
             assert_eq!(record.version, 1);
             assert!(record.default_max_ticks > 0);
         }
+    }
+
+    #[test]
+    fn pickup_is_a_discrete_inventory_primitive_that_produces_its_item() {
+        let p = Primitives::standard();
+        let pickup = p.get("pickup").expect("pickup is registered");
+        assert_eq!(pickup.kind, PrimitiveKind::Discrete);
+        assert_eq!(pickup.evidence, EvidenceKind::InventoryDelta);
+        assert!(pickup.default_max_ticks >= 100);
+        let effects = pickup.effects_for(&[ArgValue::Item("beef".into())]);
+        // The `$item` placeholder is resolved by the consumer, as for `eat`.
+        assert_eq!(effects.produces, vec![delta("$item", 1)]);
     }
 
     #[test]
@@ -794,7 +838,8 @@ mod tests {
             p.get("explore").unwrap().params,
             vec![PrimParam {
                 name: "target",
-                ty: ArgType::Value(ValueType::Block),
+                // A block or a mob (`explore(cow)`).
+                ty: ArgType::BlockOrEntity,
             }]
         );
         assert_eq!(
@@ -882,6 +927,7 @@ mod tests {
             ("food", ValueType::Int),
             ("health", ValueType::Int),
             ("time_of_day", ValueType::Int),
+            ("count_food", ValueType::Int),
             ("is_night", ValueType::Bool),
         ] {
             let sig = f.get(name).unwrap_or_else(|| panic!("{name} is declared"));

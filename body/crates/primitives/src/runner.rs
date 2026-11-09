@@ -21,6 +21,7 @@ use crate::dig_down::Digger;
 use crate::explore::{Explore, ExploreMemory};
 use crate::mine::Mine;
 use crate::move_to::Move;
+use crate::pickup::PickupItem;
 use crate::place::Place;
 use crate::small::{Attack, Eat, Equip, EquipStage, Observe, Wait};
 use crate::smelt::Smelt;
@@ -126,6 +127,7 @@ enum Active {
     Place(Place),
     Craft(Craft),
     Smelt(Smelt),
+    Pickup(PickupItem),
     Eat(Eat),
     Explore(Explore),
     Attack(Attack),
@@ -201,6 +203,7 @@ impl Runner {
             }),
             "craft" => Active::Craft(Craft::new(arg)?),
             "smelt" => Active::Smelt(Smelt::new(arg)),
+            "pickup" => Active::Pickup(PickupItem::new(arg)),
             "eat" => Active::Eat(Eat {
                 item: arg,
                 sent: false,
@@ -366,6 +369,7 @@ impl Runner {
             Active::Place(state) => state.tick(ctx, self.started),
             Active::Craft(state) => state.tick(ctx, self.started),
             Active::Smelt(state) => state.tick(ctx, self.started),
+            Active::Pickup(state) => state.tick(ctx, self.started),
             Active::Eat(state) => state.tick(ctx, self.started),
             Active::Explore(state) => state.tick(ctx, self.started, &mut self.explore_memory),
             Active::Attack(state) => state.tick(ctx, self.started),
@@ -528,5 +532,26 @@ mod tests {
         let result = preempt(&mut runner, &world, &mut perception, &body, 0);
         assert_eq!(result.outcome, Some(Outcome::Preempted));
         assert!(result.frame.menu.is_none());
+    }
+
+    #[test]
+    fn pickup_and_an_explore_for_a_mob_start() {
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "pickup".into(),
+                args: vec![ArgValue::Item("beef".into())],
+            })
+            .expect("pickup starts");
+        assert!(runner.is_active());
+        assert!(!runner.is_continuous(), "pickup is discrete");
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "explore".into(),
+                args: vec![ArgValue::Name("cow".into())],
+            })
+            .expect("explore takes a mob");
+        assert!(runner.is_continuous());
     }
 }

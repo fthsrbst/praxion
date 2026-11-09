@@ -1,0 +1,25 @@
+# Find, approach and kill one mob, then pick up its drop. A core skill: the
+# reflexes only react inside four blocks and give the body back after thirty
+# ticks, while a hunt has to walk to the mob (decision 2026-11-09 "Five next
+# areas"). The mob must be one the body may hunt: cow, pig, sheep, chicken,
+# zombie, skeleton or spider. Never a creeper (the reflex keeps its distance) or
+# an Enderman (the look guard); the callers in core skills name only those.
+#
+# Why the rules are ordered this way (highest true rule fires, every tick):
+# the retreat comes first, so a body at eight health or less stops hunting and
+# leaves the fight to the reflex, which flees below the same number; attack
+# beats approach, so a mob within reach is hit before anything else; approach
+# beats pickup, so a drop on the ground cannot pull the body out of a fight;
+# pickup beats the end, so the meat is collected once nothing is left to hit.
+# The last rule ends the call. `near_entity` answers unknown when no mob of the
+# kind is in sight (never false), and an unknown guard never fires, so with no
+# mob and no drop the rules above stay silent and `true` ends the hunt; the
+# caller decides whether to look for another mob.
+skill hunt(mob: entity_kind, drop: item)
+  doc "Approach and kill one mob in sight, then pick up its drop; ends when no mob or drop is in sight; fails health_low at eight health or less."
+  rules:
+    health() <= 8 -> fail(health_low)
+    near_entity($mob, 3) -> attack($mob)
+    near_entity($mob, 24) -> move_to($mob)
+    near_entity(item, 8) -> pickup($drop)
+    true -> done

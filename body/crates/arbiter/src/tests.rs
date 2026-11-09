@@ -808,6 +808,23 @@ fn a_death_with_no_owner_still_moves_to_a_new_generation() {
 }
 
 #[test]
+fn hunger_with_no_food_wakes_the_brain_with_its_own_cause_and_starts_no_meal() {
+    let (mut rig, settings) = hungry_rig();
+    let mut starving = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    starving.best_food = None;
+    let out = rig.tick(0, &starving, Needs { health: 20.0, food: 6 }, &settings);
+    assert!(
+        out.events
+            .iter()
+            .any(|event| matches!(event, EventKind::WakeBrain { cause, .. } if cause == "hunger_no_food")),
+        "{:?}",
+        out.events
+    );
+    assert_ne!(out.owner, Owner::Maintenance(NeedKind::Eat));
+    assert!(rig.arbiter.stack().entries().iter().all(|entry| entry.skill_ref != "eat_food"));
+}
+
+#[test]
 fn intent_args_are_preserved_as_strings() {
     assert_eq!(
         crate::arg_to_string(&ArgValue::Item("oak_log".to_owned())),

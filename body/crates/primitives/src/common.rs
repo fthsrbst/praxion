@@ -362,6 +362,12 @@ pub(crate) fn entity_target(ctx: &mut Ctx<'_>, wanted: &str, radius: u32) -> Opt
         .map(|fact| (fact.id, fact.position))
 }
 
+/// The own food level for a plan's sprint gate, or `None` before the server
+/// said (a movement nicety, not a safety rule: unknown allows the sprint).
+pub(crate) fn plan_food(ctx: &mut Ctx<'_>) -> Option<u32> {
+    ctx.perception.own_food(ctx.world).value().copied()
+}
+
 pub(crate) fn plan_inventory(world: &World) -> PlanInventory {
     let hotbar = (36..=44)
         .filter_map(|index| world.inventory().get(index))
