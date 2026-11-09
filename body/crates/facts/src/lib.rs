@@ -16,6 +16,7 @@
 //! Facts the registry may add later answer `Unknown` until they are implemented
 //! here; this crate is the one place the mapping lives.
 
+use azalea_inventory::components;
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_interpreter::{Facts as InterpreterFacts, IntValue, Truth};
 use praxion_perception::{Answer, Caller, Perception, workable};
@@ -109,6 +110,12 @@ pub fn int_fact(perception: &mut Perception, world: &World, call: &FactCall) -> 
             },
             None => IntValue::Unknown(call.clone()),
         },
+        "count_food" => match perception.inventory(world) {
+            Answer::Known { value: inventory, .. } => {
+                IntValue::Known(i64::from(count_food(inventory.get(1..).unwrap_or_default())))
+            }
+            Answer::Unknown(_) => IntValue::Unknown(call.clone()),
+        },
         "health" => match perception.own_health(world).value() {
             Some(health) => IntValue::Known(i64::from(health.health().floor() as i32)),
             None => IntValue::Unknown(call.clone()),
@@ -151,6 +158,21 @@ pub fn count_in(inventory: &[ItemStack], wanted: &str) -> u32 {
         .iter()
         .filter(|stack| item_matches(stack, wanted))
         .map(|stack| stack.count().max(0) as u32)
+        .sum()
+}
+
+/// The number of food items in a known inventory: the sum of the counts of the
+/// stacks that carry the `Food` component, raw or cooked. Slot 0 (the crafting
+/// preview) is not owned and the caller leaves it out.
+pub fn count_food(inventory: &[ItemStack]) -> u32 {
+    inventory
+        .iter()
+        .filter_map(|stack| match stack {
+            ItemStack::Present(data) if data.get_component::<components::Food>().is_some() => {
+                Some(stack.count().max(0) as u32)
+            }
+            _ => None,
+        })
         .sum()
 }
 

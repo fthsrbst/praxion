@@ -18,20 +18,25 @@ from praxion_brain.skills import (
 )
 
 CORE_NAMES = {
+    "cook_food",
     "eat_food",
+    "find_ore",
+    "find_stone",
     "get_cobblestone",
     "get_crafting_table",
-    "get_iron_ingot",
     "get_crafting_table_near",
+    "get_food",
+    "get_iron_ingot",
     "get_planks",
     "get_sticks",
     "get_stone_pickaxe",
     "get_stone_sword",
     "get_wood",
     "get_wooden_pickaxe",
-    "find_stone",
-    "find_ore",
+    "hunt",
+    "night_watch",
     "search_surface",
+    "take_shelter",
 }
 
 
@@ -63,16 +68,29 @@ def test_catalog_text_contains_every_skill_source() -> None:
 def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
     catalog = load_catalog()
     assert primitive_names(catalog) == [
+        "attack",
         "branch_mine",
         "craft",
         "dig_down",
         "eat",
         "explore",
         "mine",
+        "move_to",
+        "pickup",
         "place",
         "smelt",
+        "wait",
     ]
-    assert fact_names(catalog) == ["count", "food", "has", "near"]
+    assert fact_names(catalog) == [
+        "count",
+        "count_food",
+        "food",
+        "has",
+        "health",
+        "is_night",
+        "near",
+        "near_entity",
+    ]
 
 
 def test_parser_handles_multiple_skills_and_comments(tmp_path) -> None:

@@ -6,7 +6,7 @@ use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
 use praxion_planner::{Follower, Goal, PerceptionBlocks, Planner, PlanningState, center};
 
-use crate::common::{aim, block_target, entity_target, idle, plan_inventory};
+use crate::common::{aim, block_target, entity_target, idle, plan_food, plan_inventory};
 use crate::explore::body_planner;
 use crate::runner::{Ctx, IntentSpec};
 
@@ -106,7 +106,8 @@ impl Move {
             }
         };
         let inventory = plan_inventory(ctx.world);
-        let state = PlanningState::new(inventory);
+        let mut state = PlanningState::new(inventory);
+        state.food = plan_food(ctx);
         let plan = {
             let mut source = PerceptionBlocks {
                 perception: ctx.perception,

@@ -188,7 +188,15 @@ pub struct PlanningState {
     pub protected: HashSet<BlockPos>,
     /// Cells the stuck handler blacklisted. Treated like protected cells.
     pub blacklist: HashSet<BlockPos>,
+    /// The food level (0 to 20) when the route was planned, or `None` when the
+    /// server has not said. The follower refuses to start a sprint at or below
+    /// [`SPRINT_FOOD_MIN`]; vanilla sprints only above it.
+    pub food: Option<u32>,
 }
+
+/// The food level at or below which a sprint cannot start (vanilla: sprinting
+/// needs food above 6).
+pub const SPRINT_FOOD_MIN: u32 = 6;
 
 impl PlanningState {
     pub fn new(inventory: Inventory) -> Self {

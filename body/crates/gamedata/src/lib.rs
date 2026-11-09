@@ -233,6 +233,29 @@ pub fn smelting_recipes_for(item: &str) -> impl Iterator<Item = &'static Smeltin
     SMELTING.iter().filter(move |recipe| recipe.output == item)
 }
 
+/// The weapon ladder: how good `item` is as a melee weapon, or `None` when it
+/// is not one. Swords outrank axes of the same material; fists are rank 0 and
+/// implicit. The reflex view and the `attack` primitive share this one table
+/// (decision 2026-11-09 "Five next areas").
+pub fn weapon_rank(item: &str) -> Option<u8> {
+    let (sword, axe) = match normalize(item) {
+        "netherite_sword" => (9, 8),
+        "diamond_sword" => (8, 7),
+        "iron_sword" => (7, 6),
+        "golden_sword" => (5, 4),
+        "stone_sword" | "copper_sword" => (4, 3),
+        "wooden_sword" => (2, 1),
+        "netherite_axe" => (8, 7),
+        "diamond_axe" => (7, 6),
+        "iron_axe" => (6, 5),
+        "golden_axe" => (4, 3),
+        "stone_axe" | "copper_axe" => (3, 2),
+        "wooden_axe" => (1, 1),
+        _ => return None,
+    };
+    Some(sword.max(axe))
+}
+
 /// The recipes whose output is in the item tag `name`.
 pub fn recipes_for_tag(name: &str) -> impl Iterator<Item = &'static Recipe> {
     let values = item_tag(name).unwrap_or(&[]);
@@ -303,6 +326,42 @@ mod tests {
         let sheep = entity_drops("sheep").expect("sheep table");
         assert_eq!(drop(sheep, "mutton").min, 1);
         assert_eq!(drop(sheep, "white_wool").max, 1);
+    }
+
+    #[test]
+    fn hostile_and_pig_tables_are_generated_without_the_cow_drops() {
+        // Decision 2026-11-09 "Five next areas": `attack(zombie)` declared the
+        // union of the cow, sheep and chicken tables before these existed.
+        let range = |mob: &str, item: &str| {
+            let table = entity_drops(mob).unwrap_or_else(|| panic!("{mob} table"));
+            let drop = table
+                .iter()
+                .find(|drop| drop.item == item)
+                .unwrap_or_else(|| panic!("{mob} drops {item}: {table:?}"));
+            (drop.min, drop.max)
+        };
+        assert_eq!(range("zombie", "rotten_flesh"), (0, 2));
+        assert_eq!(range("zombie", "iron_ingot"), (0, 1), "a rare drop may be nothing");
+        assert_eq!(range("skeleton", "bone"), (0, 2));
+        assert_eq!(range("skeleton", "arrow"), (0, 2));
+        assert_eq!(range("spider", "string"), (0, 2));
+        assert_eq!(range("pig", "porkchop"), (1, 3));
+        for mob in ["zombie", "skeleton", "spider"] {
+            let table = entity_drops(mob).unwrap();
+            assert!(table.iter().all(|drop| drop.item != "beef"), "{mob} drops no beef");
+        }
+        assert!(
+            entity_drops("zombie").unwrap().iter().all(|drop| drop.item != "red_mushroom"),
+            "a zombie rider's mushroom is not a plain kill's drop"
+        );
+    }
+
+    #[test]
+    fn the_weapon_ladder_ranks_swords_over_axes_and_knows_no_tools() {
+        assert!(weapon_rank("minecraft:diamond_sword") > weapon_rank("iron_sword"));
+        assert!(weapon_rank("stone_sword") > weapon_rank("stone_axe"));
+        assert_eq!(weapon_rank("stone_pickaxe"), None);
+        assert_eq!(weapon_rank("bread"), None);
     }
 
     #[test]

@@ -440,7 +440,7 @@ impl Pickup {
     /// The position to walk to, from this tick's item entities. The first
     /// visible item becomes the target; if it is missing for a few ticks the
     /// drop has been collected.
-    fn target(&mut self, items: &[praxion_perception::EntityFact]) -> Option<Vec3> {
+    pub(crate) fn target(&mut self, items: &[praxion_perception::EntityFact]) -> Option<Vec3> {
         if let Some(id) = self.target_id {
             if let Some(fact) = items.iter().find(|fact| fact.id == id) {
                 self.missing = 0;
@@ -459,8 +459,18 @@ impl Pickup {
         Some(nearest.position)
     }
 
-    fn gone(&self) -> bool {
+    pub(crate) fn gone(&self) -> bool {
         self.target_id.is_some() && self.missing >= PICKUP_GONE_TICKS
+    }
+
+    /// Forget the tracked item so the next [`Pickup::target`] call picks the
+    /// nearest one again. `pickup` uses it when the tracked drop vanished
+    /// while the wanted item was not collected: the drop it followed was
+    /// another item (or despawned), and a farther drop of the wanted item may
+    /// still be on the ground (review finding 6).
+    pub(crate) fn retarget(&mut self) {
+        self.target_id = None;
+        self.missing = 0;
     }
 }
 
@@ -580,7 +590,7 @@ fn kind_at(world: &praxion_world::World, pos: BlockPos) -> Option<BlockKind> {
 }
 
 /// Whether the body is close enough that the server should collect the drop.
-fn pickup_arrived(position: Vec3, target: Vec3) -> bool {
+pub(crate) fn pickup_arrived(position: Vec3, target: Vec3) -> bool {
     let dx = position.x - target.x;
     let dz = position.z - target.z;
     dx * dx + dz * dz < 0.49 && (position.y - target.y).abs() < 1.0

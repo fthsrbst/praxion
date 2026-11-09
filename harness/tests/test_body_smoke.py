@@ -457,3 +457,98 @@ def test_the_body_eats_when_hungry() -> None:
         assert bread is not None and bread < 8, "no bread was eaten\n" + context
         assert food is not None and food > 16, "the food bar did not rise\n" + context
         assert session.referee.player_health(BODY) > 0.0, context
+
+
+HUNT_TIMEOUT = 240.0
+
+
+def _setup_cow_arena(fixture, referee, run: BodyRun) -> None:
+    """Peaceful daytime, a sword, one cow six blocks east.
+
+    ``/give`` may put the sword in the main inventory rather than the hotbar;
+    ``attack`` brings the best carried weapon into the main hand either way
+    (review finding 8), so this setup does not depend on the slot it lands in.
+    """
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(1000)
+    fixture.give(BODY, "stone_sword", 1)
+    px, py, pz = _feet_cell(referee)
+    fixture.summon("cow", px + 6.5, py, pz + 0.5, "{PersistenceRequired:1b}")
+
+
+def test_get_food_hunts_a_summoned_cow_and_collects_beef() -> None:
+    """Decision 2026-11-09 "Five next areas": ``get_food`` -> ``hunt``.
+
+    The body walks to the cow, hits it with the sword in hand, picks up the
+    beef and the goal ends ``done``; the referee, not the body, decides that
+    the inventory holds beef. Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "get_food",
+        ["1"],
+        setup=_setup_cow_arena,
+        max_ticks=8000,
+        start_delay_ticks=80,
+    ) as run:
+        summary = run.wait_for_outcome(HUNT_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["skill"] == "get_food", context
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "beef") >= 1, "the referee must see beef\n" + context
+        assert _intent_starts(events, "attack"), "the body never attacked\n" + context
+        assert _intent_starts(events, "pickup"), "the drop was not picked up by `pickup`\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def _setup_night_with_a_sword(fixture, referee, run: BodyRun) -> None:
+    """Frozen night, no natural spawns, a sword, one weak zombie six blocks east.
+
+    The sword may land in the main inventory; ``attack`` equips the best
+    carried weapon itself (review finding 8).
+    """
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(14000)
+    fixture.give(BODY, "stone_sword", 1)
+    fixture.give(BODY, "bread", 4)
+    px, py, pz = _feet_cell(referee)
+    # Health 2: a stone sword kills it in one hit, so a failure is the body's.
+    fixture.summon(
+        "zombie", px + 6.5, py, pz + 0.5, "{Health:2.0f,PersistenceRequired:1b}"
+    )
+
+
+def _zombie_alive(run: BodyRun) -> bool:
+    reply = run.fixture.raw("execute if entity @e[type=zombie]")
+    return "passed" in reply.lower()
+
+
+def test_night_watch_kills_a_zombie_with_the_sword_and_survives() -> None:
+    """Armed and healthy at night, the body hunts the hostile in sight.
+
+    The clock is frozen at night, so ``night_watch`` itself never ends: the
+    test waits for the zombie to be gone, then checks the body lived.
+    """
+    with start_body(
+        101,
+        "night_watch",
+        setup=_setup_night_with_a_sword,
+        max_ticks=8000,
+        start_delay_ticks=80,
+    ) as run:
+        deadline = time.monotonic() + HUNT_TIMEOUT
+        while time.monotonic() < deadline and _zombie_alive(run):
+            if run.process.poll() is not None:
+                break
+            time.sleep(1.0)
+        summary = run.summary() or {}
+        context = _context(run, summary)
+
+        assert not _zombie_alive(run), "the zombie is still alive\n" + context
+        assert run.referee.death_count(BODY) == 0, "the referee saw a death\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context

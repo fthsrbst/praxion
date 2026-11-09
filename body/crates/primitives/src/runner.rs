@@ -21,6 +21,7 @@ use crate::dig_down::Digger;
 use crate::explore::{Explore, ExploreMemory};
 use crate::mine::Mine;
 use crate::move_to::Move;
+use crate::pickup::PickupItem;
 use crate::place::Place;
 use crate::small::{Attack, Eat, Equip, EquipStage, Observe, Wait};
 use crate::smelt::Smelt;
@@ -126,6 +127,7 @@ enum Active {
     Place(Place),
     Craft(Craft),
     Smelt(Smelt),
+    Pickup(PickupItem),
     Eat(Eat),
     Explore(Explore),
     Attack(Attack),
@@ -201,6 +203,7 @@ impl Runner {
             }),
             "craft" => Active::Craft(Craft::new(arg)?),
             "smelt" => Active::Smelt(Smelt::new(arg)),
+            "pickup" => Active::Pickup(PickupItem::new(arg)),
             "eat" => Active::Eat(Eat {
                 item: arg,
                 sent: false,
@@ -208,12 +211,27 @@ impl Runner {
                 hand: HandSelect::default(),
             }),
             "explore" => Active::Explore(Explore::new(arg, &mut self.explore_memory)?),
-            "attack" => Active::Attack(Attack {
-                kind: arg,
-                entity: None,
-                target: None,
-                waited: 0,
-            }),
+            "attack" => {
+                // The same allowlist the load-time checker enforces (decision
+                // 2026-11-09 "Five next areas": never a creeper or an
+                // Enderman). A skill started with a mob argument at run time
+                // bypasses the checker, so the action itself refuses one
+                // (review finding 4).
+                if praxion_gamedata::entity_drops(praxion_gamedata::normalize(&arg)).is_none() {
+                    return Err(format!(
+                        "`{arg}` is not hunted: the mob allowlist is cow, pig, sheep, chicken, zombie, skeleton and spider"
+                    ));
+                }
+                Active::Attack(Attack {
+                    kind: arg,
+                    entity: None,
+                    target: None,
+                    waited: 0,
+                    out_of_reach: 0,
+                    hand: HandSelect::default(),
+                    weapon_waited: 0,
+                })
+            }
             "equip" => Active::Equip(Equip {
                 item: arg,
                 stage: EquipStage::Select,
@@ -366,6 +384,7 @@ impl Runner {
             Active::Place(state) => state.tick(ctx, self.started),
             Active::Craft(state) => state.tick(ctx, self.started),
             Active::Smelt(state) => state.tick(ctx, self.started),
+            Active::Pickup(state) => state.tick(ctx, self.started),
             Active::Eat(state) => state.tick(ctx, self.started),
             Active::Explore(state) => state.tick(ctx, self.started, &mut self.explore_memory),
             Active::Attack(state) => state.tick(ctx, self.started),
@@ -528,5 +547,56 @@ mod tests {
         let result = preempt(&mut runner, &world, &mut perception, &body, 0);
         assert_eq!(result.outcome, Some(Outcome::Preempted));
         assert!(result.frame.menu.is_none());
+    }
+
+    #[test]
+    fn pickup_and_an_explore_for_a_mob_start() {
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "pickup".into(),
+                args: vec![ArgValue::Item("beef".into())],
+            })
+            .expect("pickup starts");
+        assert!(runner.is_active());
+        assert!(!runner.is_continuous(), "pickup is discrete");
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "explore".into(),
+                args: vec![ArgValue::Name("cow".into())],
+            })
+            .expect("explore takes a mob");
+        assert!(runner.is_continuous());
+    }
+
+    #[test]
+    fn attack_and_explore_refuse_a_mob_the_body_may_not_hunt() {
+        // Decision 2026-11-09 "Five next areas": never a creeper or an
+        // Enderman. The checker rejects a literal in a skill; this guard also
+        // covers a skill started with a mob argument at run time (review
+        // finding 4).
+        for primitive in ["attack", "explore"] {
+            for mob in ["creeper", "enderman"] {
+                let mut runner = Runner::new();
+                let error = runner
+                    .start(&StartAction {
+                        primitive: primitive.into(),
+                        args: vec![ArgValue::Name(mob.into())],
+                    })
+                    .expect_err("the call must not start");
+                assert!(
+                    error.contains("is not hunted"),
+                    "{primitive}({mob}): {error}"
+                );
+            }
+        }
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "attack".into(),
+                args: vec![ArgValue::Name("zombie".into())],
+            })
+            .expect("a hunted mob starts");
     }
 }

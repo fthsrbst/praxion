@@ -284,3 +284,41 @@ fn skill_argument_count() {
         "skill `b` takes 1 to 1 arguments, got 0",
     );
 }
+
+#[test]
+fn attack_and_hunt_only_name_mobs_the_body_may_hunt() {
+    // Decision 2026-11-09 "Five next areas": creepers and Endermen are never
+    // hunted. The allowlist is the loot-table list, enforced at load time so a
+    // learned or hand-written skill cannot bypass the core callers (review
+    // finding 4).
+    reject(
+        "skill s()\n  rules:\n    true -> attack(creeper)\n",
+        3,
+        20,
+        "`creeper` is not hunted",
+    );
+    reject(
+        "skill hunt(mob: entity_kind, drop: item)\n  rules:\n    true -> attack($mob)\nskill s()\n  rules:\n    true -> do hunt(creeper, gunpowder)\n",
+        6,
+        21,
+        "`creeper` is not hunted",
+    );
+    reject(
+        "skill s(mob: entity_kind)\n  rules:\n    true -> attack($mob)\nskill t()\n  rules:\n    true -> do s(enderman)\n",
+        6,
+        18,
+        "`enderman` is not hunted",
+    );
+    // A guard that only looks for a creeper stays legal: the reflex keeps its
+    // distance, and a skill may want to know whether one is near.
+    load("skill s()\n  rules:\n    near_entity(creeper, 16) -> wait(1)\n").expect("a look-out");
+}
+
+#[test]
+fn explore_keeps_accepting_blocks_and_huntable_mobs() {
+    // The block-or-mob half is split at run time (`Explore::new`), where the
+    // game's block vocabulary lives; the load-time half checks every
+    // unambiguous entity kind above.
+    load("skill s()\n  rules:\n    true -> explore(oak_log)\n").expect("a block");
+    load("skill s()\n  rules:\n    true -> explore(cow)\n").expect("a huntable mob");
+}

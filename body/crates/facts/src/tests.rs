@@ -420,6 +420,31 @@ fn f3_facts_read_health_food_and_the_day_clock() {
 }
 
 #[test]
+fn count_food_sums_the_edible_stacks_and_ignores_the_preview_slot() {
+    // Decision 2026-11-09 "Five next areas": `get_food` ends on this count.
+    let mut world = world();
+    let mut items = vec![ItemStack::Empty; 46];
+    items[0] = ItemStack::new(ItemKind::Bread, 9); // the 2x2 grid's preview
+    items[9] = ItemStack::new(ItemKind::Beef, 2);
+    items[10] = ItemStack::new(ItemKind::Apple, 1);
+    items[11] = ItemStack::new(ItemKind::OakLog, 5);
+    items[36] = ItemStack::new(ItemKind::CookedBeef, 3);
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::ContainerSetContent(ClientboundContainerSetContent {
+            container_id: 0,
+            state_id: 0,
+            items,
+            carried_item: ItemStack::Empty,
+        }),
+    );
+    let mut perception = Perception::new(Config::default());
+    perception.begin_tick(&world);
+    let mut facts = Facts::new(&mut perception, &world);
+    assert_eq!(facts.int_fact(&call("count_food", vec![])), IntValue::Known(6));
+}
+
+#[test]
 fn air_and_burning_are_unknown_until_the_server_says() {
     let world = world();
     let mut perception = Perception::new(Config::default());

@@ -219,7 +219,7 @@ fn check_skill(
                         ));
                     } else {
                         for (arg, param) in args.iter().zip(&record.params) {
-                            if let Err(e) = check_arg(arg, param.ty, skill, facts) {
+                            if let Err(e) = check_arg(arg, param.ty, skill, facts, true) {
                                 errors.push(e);
                             }
                         }
@@ -247,7 +247,7 @@ fn check_skill(
                     } else {
                         for (arg, param) in args.iter().zip(&target.params) {
                             if let Err(e) =
-                                check_arg(arg, ArgType::Value(param.ty), skill, facts)
+                                check_arg(arg, ArgType::Value(param.ty), skill, facts, true)
                             {
                                 errors.push(e);
                             }
@@ -309,7 +309,7 @@ fn type_of(
                 ));
             }
             for (arg, ty) in args.iter().zip(&sig.params) {
-                check_arg(arg, ArgType::Value(*ty), skill, facts)?;
+                check_arg(arg, ArgType::Value(*ty), skill, facts, false)?;
             }
             Ok(sig.ret)
         }
@@ -349,14 +349,21 @@ fn expect_type(
 }
 
 /// Checks one argument against a primitive or skill parameter type.
+///
+/// `in_action` says whether the argument is an action's argument rather than a
+/// fact's. A mob named in an action must be one the body may hunt (the
+/// allowlist the loot tables are generated from); a mob named in a guard, such
+/// as `near_entity(creeper, 16)`, is a look-out, not a hunt, and stays legal
+/// (review finding 4).
 fn check_arg(
     expr: &Expr,
     want: ArgType,
     skill: &Skill,
     facts: &Facts,
+    in_action: bool,
 ) -> Result<(), Error> {
     match want {
-        ArgType::Value(ty) => check_value(expr, ty, skill, facts),
+        ArgType::Value(ty) => check_value(expr, ty, skill, facts, in_action),
         ArgType::BlockOrEntity => match &expr.kind {
             ExprKind::Name(name) => {
                 if name.starts_with('#') {
@@ -429,11 +436,46 @@ fn check_tag(
     }
 }
 
+/// Rejects a mob literal that the body may not hunt.
+///
+/// The mob allowlist is the loot-table list `praxion-gamedata` is built from
+/// (`build.rs` `ENTITIES`): cow, pig, sheep, chicken, zombie, skeleton and
+/// spider. Creepers and Endermen have no table and are never hunted
+/// (decision 2026-11-09 "Five next areas"); the reflexes keep their distance.
+/// This is the load-time half: a learned or hand-written skill cannot name one
+/// in `attack`, `hunt` or any other action whose argument is typed
+/// `entity_kind`, and slip past the hand-written callers (review finding 4).
+fn check_huntable(name: &str, skill: &Skill, span: Span) -> Result<(), Error> {
+    let name = praxion_gamedata::normalize(name);
+    if praxion_gamedata::entity_drops(name).is_some() {
+        Ok(())
+    } else {
+        Err(err(
+            skill,
+            format!(
+                "`{name}` is not hunted: the mob allowlist is cow, pig, sheep, chicken, zombie, skeleton and spider"
+            ),
+            span,
+        ))
+    }
+}
+
+/// Checks one value argument against its declared type.
+///
+/// An `entity_kind` literal in an action is the unambiguous half of the
+/// block-or-mob split, so it is checked against the hunt allowlist here
+/// ([`check_huntable`]). The other half, `ArgType::BlockOrEntity`, cannot be
+/// split at load time without the game's block vocabulary, which this crate
+/// does not carry (the gamedata block list is only the core skills' tables);
+/// its primitive rejects a non-huntable mob when the call starts
+/// (`Explore::new`, `Runner::start`), which also covers a skill started with a
+/// mob argument at run time (review finding 4).
 fn check_value(
     expr: &Expr,
     want: ValueType,
     skill: &Skill,
     _facts: &Facts,
+    in_action: bool,
 ) -> Result<(), Error> {
     match &expr.kind {
         ExprKind::Int(_) if want == ValueType::Int => Ok(()),
@@ -445,6 +487,9 @@ fn check_value(
             ) =>
         {
             check_tag(name, want, skill, expr.span)?;
+            if in_action && want == ValueType::EntityKind {
+                check_huntable(name, skill, expr.span)?;
+            }
             Ok(())
         }
         ExprKind::Param(name) => {

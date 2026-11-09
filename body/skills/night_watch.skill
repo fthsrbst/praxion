@@ -1,0 +1,21 @@
+# What to do at night (decision 2026-11-09 "Five next areas"): armed with a
+# sword and healthy, hunt the hostile mobs that come near; hurt or unarmed, get
+# under cover. Hostile means zombie, skeleton or spider: never a creeper (the
+# reflex keeps eight blocks away) or an Enderman (the look guard).
+#
+# Why the rules are ordered this way: the morning ends the skill first. The
+# shelter rule comes before any hunting so a hurt or unarmed body never goes
+# looking for a fight: ten health or less, or no sword in the inventory. After
+# it the body is armed and healthy, and the nearest kind in sight is hunted
+# (zombie, then skeleton, then spider); `hunt` itself retreats at eight health.
+# With nothing in sight the body waits where it stands: hostiles come to it, and
+# the reflexes handle whatever is within four blocks.
+skill night_watch()
+  doc "At night: hunt zombies, skeletons and spiders in sight if armed and healthy, else take shelter; ends at morning."
+  rules:
+    not is_night() -> done
+    health() <= 10 or count(#swords) < 1 -> do take_shelter()
+    near_entity(zombie, 16) -> do hunt(zombie, rotten_flesh)
+    near_entity(skeleton, 16) -> do hunt(skeleton, bone)
+    near_entity(spider, 16) -> do hunt(spider, string)
+    true -> wait(20)

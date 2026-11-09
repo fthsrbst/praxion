@@ -1,0 +1,18 @@
+# Cook one piece of raw meat in a furnace within four blocks (`smelt` takes the
+# cooked item and needs fuel, which it checks itself). A core skill of its own,
+# not part of `get_food`: raw meat already counts as food, and a furnace is a
+# later rung than the first night (decision 2026-11-09 "Five next areas").
+#
+# Why the rules are ordered this way: nothing happens without a furnace in
+# reach, so every action rule carries the `near(furnace, 4)` guard; beef first
+# (the most common), then pork, mutton and chicken. A `smelt` that fails
+# (`no_fuel`, `needs_furnace`) makes its rule ineligible for one tick and the
+# next rule gets a turn; the last rule ends the skill, so it never loops.
+skill cook_food()
+  doc "Cook one raw meat (beef, porkchop, mutton or chicken) in a furnace within 4 blocks."
+  rules:
+    near(furnace, 4) and count(beef) >= 1 -> smelt(cooked_beef)
+    near(furnace, 4) and count(porkchop) >= 1 -> smelt(cooked_porkchop)
+    near(furnace, 4) and count(mutton) >= 1 -> smelt(cooked_mutton)
+    near(furnace, 4) and count(chicken) >= 1 -> smelt(cooked_chicken)
+    true -> done

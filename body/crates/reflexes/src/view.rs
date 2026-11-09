@@ -565,26 +565,8 @@ fn drop_below(perception: &mut Perception, world: &World, from: BlockPos) -> u8 
     DROP_PROBE as u8
 }
 
-/// The weapon ladder used to pick "the best weapon". Swords outrank axes of the
-/// same material; fists are rank 0 and are implicit when nothing is found.
+/// The weapon ladder used to pick "the best weapon": the shared table in
+/// `praxion-gamedata`. Fists are rank 0 and implicit when nothing is found.
 fn weapon_rank(kind: ItemKind) -> Option<u8> {
-    use ItemKind::*;
-    let (sword, axe) = match kind {
-        NetheriteSword => (9, 8),
-        DiamondSword => (8, 7),
-        IronSword => (7, 6),
-        GoldenSword => (5, 4),
-        StoneSword => (4, 3),
-        CopperSword => (4, 3),
-        WoodenSword => (2, 1),
-        NetheriteAxe => (8, 7),
-        DiamondAxe => (7, 6),
-        IronAxe => (6, 5),
-        GoldenAxe => (4, 3),
-        StoneAxe => (3, 2),
-        CopperAxe => (3, 2),
-        WoodenAxe => (1, 1),
-        _ => return None,
-    };
-    Some(sword.max(axe))
+    praxion_gamedata::weapon_rank(kind.to_str())
 }

@@ -11,6 +11,7 @@ name = "praxion_facts"
 path = "src/lib.rs"
 
 [dependencies]
+azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
 praxion-gamedata = { path = "../gamedata" }
 praxion-interpreter = { path = "../interpreter" }

@@ -2192,6 +2192,7 @@ version = "0.0.0"
 dependencies = [
  "azalea-buf",
  "azalea-core",
+ "azalea-inventory",
  "azalea-protocol",
  "azalea-registry",
  "azalea-world",
@@ -2338,6 +2339,7 @@ dependencies = [
  "praxion-planner",
  "praxion-rules",
  "praxion-world",
+ "uuid",
 ]
 
 [[package]]
@@ -2370,6 +2372,7 @@ dependencies = [
  "azalea-protocol",
  "azalea-registry",
  "azalea-world",
+ "praxion-gamedata",
  "praxion-headless",
  "praxion-perception",
  "praxion-planner",
