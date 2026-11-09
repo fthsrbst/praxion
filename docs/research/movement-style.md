@@ -143,8 +143,14 @@ Replace turn-then-walk with pure pursuit over a smoothed route.
    along the look yaw, so body drift during a turn is the pursuit the carrot corrects.
 5. Waypoint passing on flat Walk: within 0.6 block, or within 1.2 once past it along the next segment [S #1].
 6. Sprint: allowed only on flat Walk runs when `remaining > 2.5` blocks, heading error < 40 deg, `sprint_delay` elapsed
-   (25 % zero, else U(0.1, 0.8) s), 80 % of personalities sprint; release for 600 ms after a replan [S #1].
+   (25 % zero, else U(0.1, 0.8) s); release for 600 ms after a replan [S #1].
    Never while the next steps are Bridge/Descend/Swim/StepUp. Final node keeps the existing 0.35 rule.
+   **Updated 2026-11-09** (decision "Five next areas", D6): every personality sprints; the 80 % draw is
+   gone, because a run that drew the other 20 % looked like a body that cannot run. The other gates stay,
+   and a new hunger gate refuses to *start* a sprint at food 6 or less (a sprint already running goes
+   on, as in the game). `--style-seed` still reproduces a body's other traits; it no longer changes
+   whether it sprints. Code: `planner/src/look.rs` (`Personality::draw`), `planner/src/follow.rs`
+   (`SPRINT_FOOD_MIN`).
 7. Unchanged: step-up jumps, stall hop (`follow.rs:164-177`), `air_forward`, `max_ticks_per_step`.
 
 ### 4.5 Sensitivity quantisation

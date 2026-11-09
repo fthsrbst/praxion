@@ -211,12 +211,27 @@ impl Runner {
                 hand: HandSelect::default(),
             }),
             "explore" => Active::Explore(Explore::new(arg, &mut self.explore_memory)?),
-            "attack" => Active::Attack(Attack {
-                kind: arg,
-                entity: None,
-                target: None,
-                waited: 0,
-            }),
+            "attack" => {
+                // The same allowlist the load-time checker enforces (decision
+                // 2026-11-09 "Five next areas": never a creeper or an
+                // Enderman). A skill started with a mob argument at run time
+                // bypasses the checker, so the action itself refuses one
+                // (review finding 4).
+                if praxion_gamedata::entity_drops(praxion_gamedata::normalize(&arg)).is_none() {
+                    return Err(format!(
+                        "`{arg}` is not hunted: the mob allowlist is cow, pig, sheep, chicken, zombie, skeleton and spider"
+                    ));
+                }
+                Active::Attack(Attack {
+                    kind: arg,
+                    entity: None,
+                    target: None,
+                    waited: 0,
+                    out_of_reach: 0,
+                    hand: HandSelect::default(),
+                    weapon_waited: 0,
+                })
+            }
             "equip" => Active::Equip(Equip {
                 item: arg,
                 stage: EquipStage::Select,
@@ -553,5 +568,35 @@ mod tests {
             })
             .expect("explore takes a mob");
         assert!(runner.is_continuous());
+    }
+
+    #[test]
+    fn attack_and_explore_refuse_a_mob_the_body_may_not_hunt() {
+        // Decision 2026-11-09 "Five next areas": never a creeper or an
+        // Enderman. The checker rejects a literal in a skill; this guard also
+        // covers a skill started with a mob argument at run time (review
+        // finding 4).
+        for primitive in ["attack", "explore"] {
+            for mob in ["creeper", "enderman"] {
+                let mut runner = Runner::new();
+                let error = runner
+                    .start(&StartAction {
+                        primitive: primitive.into(),
+                        args: vec![ArgValue::Name(mob.into())],
+                    })
+                    .expect_err("the call must not start");
+                assert!(
+                    error.contains("is not hunted"),
+                    "{primitive}({mob}): {error}"
+                );
+            }
+        }
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "attack".into(),
+                args: vec![ArgValue::Name("zombie".into())],
+            })
+            .expect("a hunted mob starts");
     }
 }

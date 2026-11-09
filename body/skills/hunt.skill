@@ -15,6 +15,20 @@
 # kind is in sight (never false), and an unknown guard never fires, so with no
 # mob and no drop the rules above stay silent and `true` ends the hunt; the
 # caller decides whether to look for another mob.
+#
+# When the retreat actually fires: guards are evaluated between actions, not
+# during one. An `attack` in flight blocks the whole rule list (interpreter
+# step 2) for at most 400 ticks, so health falling to eight in the middle of a
+# swing is caught by the melee reflex, which flees at eight health or less and
+# fights only above eight (`fight_min_health`), not by the rule above. `attack`
+# also gives the body back after ten ticks without a mob in reach, so a mob that
+# walks away costs ten ticks, not two seconds, and a mob that cannot die costs
+# one call, not the night (review findings 2 and 3).
+#
+# The drop is waited for by kind, not by identity: `pickup` collects any drop of
+# that item within eight blocks, and a kill whose drop lands out of that radius
+# just ends the hunt `done` with nothing picked up; the caller (`get_food`)
+# looks again.
 skill hunt(mob: entity_kind, drop: item)
   doc "Approach and kill one mob in sight, then pick up its drop; ends when no mob or drop is in sight; fails health_low at eight health or less."
   rules:

@@ -308,6 +308,16 @@ impl Explore {
         } else {
             target.parse::<EntityKind>().ok()
         };
+        // A mob target is the exploration half of a hunt, and the body only
+        // hunts the loot-table allowlist: creepers and Endermen are never
+        // hunted (decision 2026-11-09 "Five next areas"). `explore(creeper)`
+        // cannot be told from a block at load time, so it is refused when the
+        // call starts (review finding 4).
+        if entity.is_some() && gamedata::entity_drops(gamedata::normalize(&target)).is_none() {
+            return Err(format!(
+                "`{target}` is not hunted; explore may only seek mobs on the hunt allowlist"
+            ));
+        }
         Ok(Self {
             target,
             entity,
@@ -2041,6 +2051,11 @@ mod tests {
 
         let mut memory = ExploreMemory::default();
         assert!(Explore::new("unicorn".into(), &mut memory).is_err());
+        // The mob half of explore may only seek what the body hunts (decision
+        // 2026-11-09 "Five next areas": never a creeper or an Enderman).
+        assert!(Explore::new("creeper".into(), &mut memory).is_err());
+        assert!(Explore::new("enderman".into(), &mut memory).is_err());
+        assert!(Explore::new("cow".into(), &mut memory).is_ok());
 
         let run = |with_cow: bool| {
             let mut world = world();

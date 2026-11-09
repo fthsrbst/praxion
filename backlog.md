@@ -99,6 +99,15 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Pointers: `runs/test-body-e83d1bea80fc485895e6d958a73de976` (303 done), `runs/test-body-6df7c6bd11304710b9656ecc034e9830`
   (101 pit), `notes.md` 2026-11-02 and 2026-11-03.
 
+### Sealed shelter: `sheltered` fact and a `shelter()` primitive
+- Source: survival slice 2 review (`logs/mac1109/review-survival2.answer.txt`, finding 5), 2026-11-09
+- State: `take_shelter` digs a staircase with `dig_down` and waits; on ground that is already
+  stone at the surface (`near(stone, 5)` true) the rule never fires and the body waits in the open.
+- Remaining: the designed fix (survival design §3.6) is a sealed shelter: dig a hole, cover it, and
+  a `sheltered` body/perception fact so `night_watch` can tell cover from open sky. Needs the
+  `shelter()` primitive and the fact; not in slice 2.
+- Pointers: `body/skills/take_shelter.skill` (its "What is left" note), `docs/decisions.md` 2026-11-09.
+
 ### Design the thin Demo-2 slice with the user (after Demo-0)
 - Source: Claude Opus 5.5, 2026-11-03 (order decided by the user, `docs/decisions.md`)
 - State: order decided only: Demo-0, then this slice on the headless body, then Demo-1.

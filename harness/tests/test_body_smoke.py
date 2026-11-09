@@ -463,7 +463,12 @@ HUNT_TIMEOUT = 240.0
 
 
 def _setup_cow_arena(fixture, referee, run: BodyRun) -> None:
-    """Peaceful daytime, a sword in the hotbar, one cow six blocks east."""
+    """Peaceful daytime, a sword, one cow six blocks east.
+
+    ``/give`` may put the sword in the main inventory rather than the hotbar;
+    ``attack`` brings the best carried weapon into the main hand either way
+    (review finding 8), so this setup does not depend on the slot it lands in.
+    """
     fixture.advance_time(False)
     fixture.spawn_mobs(False)
     fixture.time_set(1000)
@@ -501,7 +506,11 @@ def test_get_food_hunts_a_summoned_cow_and_collects_beef() -> None:
 
 
 def _setup_night_with_a_sword(fixture, referee, run: BodyRun) -> None:
-    """Frozen night, no natural spawns, a sword, one weak zombie six blocks east."""
+    """Frozen night, no natural spawns, a sword, one weak zombie six blocks east.
+
+    The sword may land in the main inventory; ``attack`` equips the best
+    carried weapon itself (review finding 8).
+    """
     fixture.advance_time(False)
     fixture.spawn_mobs(False)
     fixture.time_set(14000)

@@ -77,6 +77,16 @@ the same calls.
 | `has(item)` | `bool` | at least one item in the inventory |
 | `near(block, r)` | `bool` | a block of that kind within `r` of the known map |
 | `near_entity(kind, r)` | `bool` | an entity of that kind within `r` |
+| `food()` | `int` | the food bar (0 to 20) |
+| `health()` | `int` | the health bar (0 to 20) |
+| `is_night()` | `bool` | the body's night window (13000 to 23000) |
+| `time_of_day()` | `int` | the world clock, 0 to 23999 |
+| `count_food()` | `int` | edible items held, raw or cooked |
+
+The `food`, `health`, `is_night` and `time_of_day` facts came with the survival
+slice (decision 2026-11-09 "Five next areas"); `count_food` is what `get_food`
+ends on. They have no arguments, so they are written with empty parentheses,
+`health() <= 8`.
 
 The live body answers `near` from the perception known map: a target is near
 when a cell the perception instance has seen inside `r` holds it. It spends no
@@ -119,8 +129,12 @@ are read from the pinned server jar when `praxion-gamedata` is built. For a
 primitive whose effect depends on its first argument, `effects_for(args)` gives
 the exact effect; the record's `effects` is the union over all arguments.
 `observe(fact)` is discrete, settles with evidence `FactKnown`, and times out
-at its record's default `max_ticks` (100). `explore(target)` is continuous with a
-1200-tick budget: while no target cell is in the perception known map within 32
+at its record's default `max_ticks` (100). `explore(target)` takes a block or,
+since the survival slice, a mob; a mob target must be one the body hunts
+(`entity_drops` in `praxion-gamedata`: cow, pig, sheep, chicken, zombie,
+skeleton, spider), so `explore(creeper)` is refused when the call starts. It is
+continuous with a 1200-tick budget: while no target cell is in the perception
+known map within 32
 blocks it walks to a frontier (a known walkable cell next to unknown cells,
 scored away from cells already explored in that call). The first eight goals in
 a call stay nearest-first; after that a frontier farther from the call's origin
@@ -131,6 +145,22 @@ it. It finishes `Confirmed` when `near(target, 5)` is known — the radius of th
 `mine` search, so the target is in reach — or `Failed(not_found)` at the
 budget. `do skill(...)` calls another skill. `done` finishes the skill;
 `fail(kind)` fails it.
+
+Mob literals in an action are checked against the hunt allowlist at load
+(`attack(creeper)` is a load error); a guard such as `near_entity(creeper, 16)`
+is a look-out, not a hunt, and stays legal. `attack(kind)` walks the body's
+whole inventory for its best weapon (`weapon_rank`) and brings it into the main
+hand by a hotbar key or one menu swap; it re-reads the mob's position every
+tick and fails `no_target` after ten ticks without one in reach (three blocks,
+the same eye-to-feet metric as `near_entity(kind, 3)`), so `hunt`'s `move_to`
+takes over instead of the body swinging at an empty cell. `pickup(item)` walks
+to the nearest item entity within eight blocks and settles on the inventory
+gaining one `item`; a drop of another kind picked up on the way does not settle
+it, and if the followed drop vanishes without the receipt the call looks at the
+floor again for a farther drop of the wanted item. `hunt` therefore waits for
+its drop *by kind*, not by identity: on a messy fight it may collect a drop that
+is not its kill's, and a drop out of the eight-block radius ends the hunt
+`done` with nothing picked up.
 
 ## One tick
 

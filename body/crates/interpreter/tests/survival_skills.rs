@@ -251,6 +251,7 @@ fn an_armed_healthy_body_waits_when_nothing_hostile_is_in_sight() {
 #[test]
 fn a_sheltered_body_waits_until_morning() {
     let mut facts = night();
+    facts.bools.insert("near(stone,5)".into(), true);
     facts.bools.insert("near(stone,3)".into(), true);
     let decision = first_action(&mut start("take_shelter", vec![]), &mut facts);
     assert_eq!(primitive(&decision).0, "wait");
@@ -260,4 +261,26 @@ fn a_sheltered_body_waits_until_morning() {
         Decision::Done,
         "the morning ends it"
     );
+}
+
+#[test]
+fn take_shelter_does_not_dig_while_stone_lies_four_blocks_off() {
+    // `dig_down` stops as soon as stone is known within five blocks
+    // (`EXPLORE_NEAR_RADIUS`). On a hillside the nearest stone can be four
+    // blocks off: `near(stone, 5)` true, `near(stone, 3)` false. A three-block
+    // rule would fire `dig_down` every tick, each call confirming at once, for
+    // the whole night (review finding 1). The rule must use the primitive's
+    // threshold, so the body waits instead.
+    let mut facts = night();
+    facts.bools.insert("near(stone,5)".into(), true);
+    facts.bools.insert("near(stone,3)".into(), false);
+    let decision = first_action(&mut start("take_shelter", vec![]), &mut facts);
+    assert_eq!(primitive(&decision).0, "wait");
+
+    // Stone farther than that is not where `dig_down` would stop: it digs.
+    let mut facts = night();
+    facts.bools.insert("near(stone,5)".into(), false);
+    facts.bools.insert("near(stone,3)".into(), false);
+    let decision = first_action(&mut start("take_shelter", vec![]), &mut facts);
+    assert_eq!(primitive(&decision), ("dig_down".into(), Some("stone".into())));
 }

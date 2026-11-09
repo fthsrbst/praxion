@@ -462,6 +462,16 @@ impl Pickup {
     pub(crate) fn gone(&self) -> bool {
         self.target_id.is_some() && self.missing >= PICKUP_GONE_TICKS
     }
+
+    /// Forget the tracked item so the next [`Pickup::target`] call picks the
+    /// nearest one again. `pickup` uses it when the tracked drop vanished
+    /// while the wanted item was not collected: the drop it followed was
+    /// another item (or despawned), and a farther drop of the wanted item may
+    /// still be on the ground (review finding 6).
+    pub(crate) fn retarget(&mut self) {
+        self.target_id = None;
+        self.missing = 0;
+    }
 }
 
 /// Decide whether a known-but-unseen target can be reached by digging the

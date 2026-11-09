@@ -64,13 +64,23 @@ impl PickupItem {
         };
         let target = items.as_deref().and_then(|items| self.state.target(items));
         self.seen |= target.is_some();
-        let Some(target) = target else {
-            if self.seen && self.state.gone() {
-                // The drop was in sight and is gone: it was collected, but
-                // not as `item` (the receipt would have settled): another
-                // drop, or a despawn.
-                return (frame, None, Some(Outcome::Failed("no_item".into())));
+        let target = match target {
+            Some(target) => Some(target),
+            None if self.seen && self.state.gone() => {
+                // The tracked drop vanished and the receipt did not settle, so
+                // it was another item (or a despawn). Look at the floor again
+                // before giving up: the drop of the wanted item may lie
+                // farther off (review finding 6). Only an empty floor ends the
+                // call.
+                self.state.retarget();
+                match items.as_deref().and_then(|items| self.state.target(items)) {
+                    Some(next) => Some(next),
+                    None => return (frame, None, Some(Outcome::Failed("no_item".into()))),
+                }
             }
+            None => None,
+        };
+        let Some(target) = target else {
             if !self.seen && self.ticks > APPEAR_TICKS {
                 return (frame, None, Some(Outcome::Failed("no_item".into())));
             }
@@ -186,5 +196,36 @@ mod tests {
             }
         }
         assert_eq!(outcome, Some(Outcome::Failed("no_item".into())));
+    }
+
+    #[test]
+    fn a_nearer_drop_of_another_item_gives_way_to_the_wanted_one() {
+        // `hunt(sheep, mutton)`: the wool drop lands nearer than the mutton.
+        // The walk locks the nearest drop, it is collected, and the receipt
+        // does not settle. The wanted drop still lies farther off, so the call
+        // must retarget instead of failing `no_item` (review finding 6).
+        let mut world = world();
+        add_entity(&mut world, 9, EntityKind::Item, Vec3::new(0.5, 64.0, 4.5));
+        add_entity(&mut world, 10, EntityKind::Item, Vec3::new(0.5, 64.0, 7.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut pickup = PickupItem::new("mutton".into());
+        tick_at(&mut pickup, &world, &mut perception, &mut body, 20);
+
+        // The nearer drop is picked up; it was not the mutton.
+        remove_entity(&mut world, 9);
+        let mut outcome = None;
+        let mut walked = false;
+        for tick in 21..45 {
+            let (frame, _, result) =
+                tick_at(&mut pickup, &world, &mut perception, &mut body, tick);
+            walked |= frame.held.forward;
+            if let Some(result) = result {
+                outcome = Some(result);
+                break;
+            }
+        }
+        assert!(outcome.is_none(), "a farther mutton drop is still worth walking to: {outcome:?}");
+        assert!(walked, "the body walks on to the drop of the wanted item");
     }
 }

@@ -70,23 +70,47 @@ impl Eat {
 pub(crate) struct Attack {
     pub(crate) kind: String,
     pub(crate) entity: Option<i32>,
+    /// The locked mob's position, rewritten from the store every tick.
     pub(crate) target: Option<Vec3>,
     pub(crate) waited: u32,
+    /// Ticks the locked mob has been out of reach. Same bound as the search.
+    pub(crate) out_of_reach: u32,
+    /// Brings the best weapon carried into the main hand, hotbar or one swap.
+    pub(crate) hand: HandSelect,
+    /// Ticks spent waiting for that swap before fighting as we are.
+    pub(crate) weapon_waited: u32,
 }
 
 /// Ticks `attack` waits for a mob within reach before it fails `no_target`.
 const NO_TARGET_TICKS: u32 = 10;
 
-/// The hotbar index (0 to 8) of the best weapon held there, if any.
-fn best_hotbar_weapon(world: &praxion_world::World) -> Option<u8> {
-    (36..=44usize)
+/// How far the eye may be from the mob's feet and still click it. The same
+/// metric and radius as the `near_entity(mob, 3)` guard that selects `attack`,
+/// so the primitive and the rule that fired it never disagree about reach.
+const ATTACK_REACH: f64 = 3.0;
+
+/// Ticks `attack` waits for a swap to put the best weapon in the hand before
+/// it fights with what it holds. A swap shows only after the server's slot
+/// update (`common::HandSelect`); a server that drops it must not freeze the
+/// fight, so the wait is bounded.
+const WEAPON_WAIT_TICKS: u32 = 20;
+
+/// The best weapon the body carries, hotbar and main inventory (window slots 9
+/// to 44), by `weapon_rank`. Ties prefer the hotbar, so a sword already in
+/// reach is not swapped for its twin. This is the item name the hand select
+/// brings up.
+fn best_weapon(world: &praxion_world::World) -> Option<&str> {
+    (9..=44usize)
         .filter_map(|slot| {
             let stack = world.inventory().get(slot)?;
+            if stack.count() <= 0 {
+                return None;
+            }
             let rank = praxion_gamedata::weapon_rank(crate::common::item_name(stack))?;
-            (stack.count() > 0).then_some((rank, (slot - 36) as u8))
+            Some((rank, slot >= 36, crate::common::item_name(stack)))
         })
-        .max_by_key(|(rank, _)| *rank)
-        .map(|(_, index)| index)
+        .max_by_key(|(rank, hotbar, _)| (*rank, *hotbar))
+        .map(|(_, _, name)| name)
 }
 
 impl Attack {
@@ -96,13 +120,47 @@ impl Attack {
         started: bool,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let mut frame = idle(ctx);
-        if let Some(id) = self.entity
-            && ctx.world.entity(id).is_none()
-        {
-            return (frame, None, Some(Outcome::Confirmed));
+        // The locked mob's position is asked for again every tick: a mob that
+        // walks away must not leave the body swinging at where it stood
+        // (review finding 2). The read is by the id the primitive locked, on
+        // the crate's one allowlisted store read; perception has no identity
+        // query and would spend a ray for what is already ours.
+        let current = self
+            .entity
+            .and_then(|id| ctx.world.entity(id).map(|entity| entity.position()));
+        if self.entity.is_some() {
+            let Some(position) = current else {
+                // Gone from the store: the kill registered.
+                return (frame, None, Some(Outcome::Confirmed));
+            };
+            if ctx.body.eye_position().distance_to(position) > ATTACK_REACH {
+                // Out of reach: nothing to click. Give the mob the same ten
+                // ticks the search allows, then hand control back so the
+                // skill's next rule (`move_to`) walks to it. Looking at it
+                // keeps the approach aligned.
+                self.out_of_reach += 1;
+                self.target = Some(position);
+                frame.look = aim(ctx, Vec3::new(position.x, position.y + 1.0, position.z)).0;
+                if self.out_of_reach > NO_TARGET_TICKS {
+                    return (frame, None, Some(Outcome::Failed("no_target".into())));
+                }
+                let pending = if started {
+                    None
+                } else {
+                    self.entity.map(|entity_id| IntentSpec::Attack {
+                        entity_id,
+                        window: 20,
+                    })
+                };
+                return (frame, pending, None);
+            }
+            self.out_of_reach = 0;
+            // The refreshed position is what the next swing aims at; a stale
+            // one makes the body click the air behind the mob.
+            self.target = Some(position);
         }
         if self.entity.is_none() {
-            if let Some((id, position)) = entity_target(ctx, &self.kind, 3) {
+            if let Some((id, position)) = entity_target(ctx, &self.kind, ATTACK_REACH as u32) {
                 self.entity = Some(id);
                 self.target = Some(position);
             } else {
@@ -119,10 +177,32 @@ impl Attack {
         let Some(target) = self.target else {
             return (frame, None, Some(Outcome::Failed("no_target".into())));
         };
-        // The best weapon in the hotbar is in hand while fighting (decision
-        // 2026-11-09 "Five next areas"); the actuator sends a select only when
-        // the slot changes. A weapon outside the hotbar is not selected here.
-        frame.select_slot = best_hotbar_weapon(ctx.world);
+        let pending = if started {
+            None
+        } else {
+            self.entity.map(|entity_id| IntentSpec::Attack {
+                entity_id,
+                window: 20,
+            })
+        };
+        // The best weapon the body carries is brought into the main hand
+        // (brief step 1: a weapon is equipped by hotbar select or menu swap;
+        // review finding 8). `HandSelect` sends the swap once and waits for the
+        // server's slot update instead of swapping again, which would undo it.
+        // The fight waits at most `WEAPON_WAIT_TICKS` for that, then goes on
+        // with whatever is held.
+        if let Some(weapon) = best_weapon(ctx.world) {
+            match self.hand.tick(ctx.world, weapon, &mut frame) {
+                Selecting::Held => self.weapon_waited = 0,
+                Selecting::Pending => {
+                    self.weapon_waited += 1;
+                    if self.weapon_waited <= WEAPON_WAIT_TICKS {
+                        return (frame, pending, None);
+                    }
+                }
+                Selecting::Unavailable => self.weapon_waited = 0,
+            }
+        }
         let aim_point = Vec3::new(target.x, target.y + 1.0, target.z);
         let (look, aligned) = aim(ctx, aim_point);
         frame.look = look;
@@ -133,14 +213,6 @@ impl Attack {
         if self.waited > 400 {
             return (frame, None, Some(Outcome::Failed("target_alive".into())));
         }
-        let pending = if started {
-            None
-        } else {
-            self.entity.map(|entity_id| IntentSpec::Attack {
-                entity_id,
-                window: 20,
-            })
-        };
         (frame, pending, None)
     }
 }
@@ -352,6 +424,9 @@ mod attack_tests {
             entity: None,
             target: None,
             waited: 0,
+            out_of_reach: 0,
+            hand: HandSelect::default(),
+            weapon_waited: 0,
         }
     }
 
@@ -416,5 +491,96 @@ mod attack_tests {
         let mut attack = attack_for("zombie");
         let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 20);
         assert_eq!(frame.select_slot, None);
+    }
+
+    #[test]
+    fn attack_follows_the_mob_and_gives_up_when_it_leaves_reach() {
+        let mut world = world();
+        add_entity(&mut world, 3, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let (_, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+        assert!(outcome.is_none());
+        assert_eq!(
+            attack.target,
+            Some(Vec3::new(0.5, 64.0, 2.5)),
+            "the mob is locked in reach"
+        );
+
+        // The mob walks seven blocks away. The primitive must aim at where it
+        // is now, not at the cell it left, and must not swing at the empty
+        // cell for the rest of the call (review finding 2).
+        let moved = Vec3::new(0.5, 64.0, 9.5);
+        crate::test_world::teleport_entity(&mut world, 3, moved);
+        let mut failed_at = None;
+        for n in 0..40u64 {
+            let (frame, _, outcome) = tick(&mut attack, &world, &mut perception, &mut body, 21 + n);
+            assert!(
+                !frame.clicks.contains(&praxion_headless::Click::Attack),
+                "no swing at a mob out of reach (tick {n})"
+            );
+            assert_eq!(attack.target, Some(moved), "the aim follows the mob (tick {n})");
+            if let Some(outcome) = outcome {
+                failed_at = Some((n, outcome));
+                break;
+            }
+        }
+        let (at, outcome) = failed_at.expect("an unreachable mob ends the call");
+        assert_eq!(
+            outcome,
+            Outcome::Failed("no_target".into()),
+            "the skill gets the body back so `move_to` can walk"
+        );
+        assert_eq!(
+            at,
+            u64::from(NO_TARGET_TICKS),
+            "ten ticks of grace, then the skill walks"
+        );
+    }
+
+    #[test]
+    fn attack_swaps_the_best_carried_weapon_into_the_hand() {
+        let mut world = world();
+        // The sword sits in the main inventory, not the hotbar: `/give` may put
+        // it there (review finding 10).
+        give(&mut world, 20, ItemKind::DiamondSword, 1);
+        add_entity(&mut world, 3, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut attack = attack_for("zombie");
+        let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 20);
+        assert_eq!(
+            frame.menu,
+            Some(MenuAction {
+                window: 0,
+                slot: 20,
+                button: 0,
+            }),
+            "one swap click puts the sword in hotbar 0"
+        );
+        assert_eq!(frame.menu_mode, MenuMode::Swap);
+        assert!(
+            frame.clicks.is_empty(),
+            "the body waits for the sword instead of punching with a fist"
+        );
+
+        // The server has not echoed the swap yet: the call waits. A second
+        // swap would swap the sword back out.
+        let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 21);
+        assert_eq!(frame.menu, None, "never two swaps");
+        assert!(frame.clicks.is_empty(), "still waiting");
+
+        // The server echoes it: the sword is in hotbar 0, so it is in the main
+        // hand and the fight goes on. The body turns over a tick or two, so the
+        // first swing lands after the aim request.
+        give(&mut world, 36, ItemKind::DiamondSword, 1);
+        let mut swung = false;
+        for n in 0..3u64 {
+            let (frame, _, _) = tick(&mut attack, &world, &mut perception, &mut body, 22 + n);
+            assert_eq!(frame.menu, None, "never two swaps");
+            swung |= frame.clicks.contains(&praxion_headless::Click::Attack);
+        }
+        assert!(swung, "the sword is in hand and the body swings");
     }
 }

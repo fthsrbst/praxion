@@ -315,6 +315,27 @@ pub(crate) fn add_entity(
     );
 }
 
+/// A server `teleport_entity`: move entity `id` to `pos`, as a mob that walks
+/// away does (all fields absolute, so the store takes the position as given).
+pub(crate) fn teleport_entity(world: &mut World, id: i32, pos: Vec3) {
+    use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::TeleportEntity(
+            azalea_protocol::packets::game::ClientboundTeleportEntity {
+                id: azalea_core::entity_id::MinecraftEntityId(id),
+                change: PositionMoveRotation {
+                    pos,
+                    delta: Vec3::ZERO,
+                    look_direction: Default::default(),
+                },
+                relative: RelativeMovements::all_absolute(),
+                on_ground: true,
+            },
+        ),
+    );
+}
+
 /// A server `remove_entities` for one entity.
 pub(crate) fn remove_entity(world: &mut World, id: i32) {
     world.apply_clientbound_play(

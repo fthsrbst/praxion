@@ -167,7 +167,10 @@ def catalog_text(catalog: SkillCatalog) -> str:
 
 
 def primitive_names(catalog: SkillCatalog) -> list[str]:
-    """Actions used after ``->`` by the catalog, excluding ``do`` and ``done``."""
+    """Actions used after ``->`` by the catalog, excluding ``do``, ``done`` and ``fail``.
+
+    ``fail(kind)`` ends a frame with a typed failure; it is part of the DSL, not a primitive.
+    """
     names: set[str] = set()
     for skill in catalog.skills:
         for line in skill.source.splitlines():
@@ -178,7 +181,7 @@ def primitive_names(catalog: SkillCatalog) -> list[str]:
             if action.startswith("do "):
                 continue
             match = _CALL.match(action)
-            if match:
+            if match and match.group(1) != "fail":
                 names.add(match.group(1))
     return sorted(names)
 
