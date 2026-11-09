@@ -85,8 +85,12 @@ impl Actuator for Mock {
     fn release(&mut self) {}
 }
 
+/// The real core skill the arbiter pushes for a meal.
+const EAT_FOOD: &str = include_str!("../../../skills/eat_food.skill");
+
 fn program(source: &str) -> Program {
-    praxion_rules::load(source).unwrap_or_else(|errors| panic!("{errors:?}"))
+    praxion_rules::load(&format!("{EAT_FOOD}\n{source}"))
+        .unwrap_or_else(|errors| panic!("{errors:?}"))
 }
 
 fn continuous_program() -> Program {

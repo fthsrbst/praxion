@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 import pytest
 
-from praxion_harness.body import BodyRun, start_body
+from praxion_harness.body import BodyRun, start_body, start_session
 
 pytestmark = pytest.mark.server
 
@@ -394,3 +394,66 @@ def test_melee_reflex_preempts_and_the_skill_resumes() -> None:
         # a failure here (e.g. `no_result` from a craft the reflex cut short)
         # is a regression, not bad luck.
         assert summary["goal"]["outcome"] == "done", context
+
+
+#: A hunger effect this strong takes the bar from full to near empty in about
+#: two seconds (exhaustion 0.025 x (amplifier + 1) per tick), long enough for
+#: the arbiter's hunger need to start and short enough that the meal is not
+#: fighting it for long.
+HUNGER_EFFECT_SECONDS = 4
+HUNGER_EFFECT_AMPLIFIER = 120
+EAT_TIMEOUT = 120.0
+
+
+def _setup_hungry_with_bread(fixture, referee, run: BodyRun) -> None:
+    """Peaceful daytime, eight bread, and a hunger effect that empties the bar."""
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(1000)
+    fixture.give(BODY, "bread", 8)
+    fixture.effect(
+        BODY, "minecraft:hunger", HUNGER_EFFECT_SECONDS, HUNGER_EFFECT_AMPLIFIER
+    )
+
+
+def test_the_body_eats_when_hungry() -> None:
+    """Decision 2026-11-09 "Five next areas": hunger runs the ``eat_food`` skill.
+
+    The arbiter used to send one use click that could not finish a 32-tick
+    meal. Now it pushes ``eat_food`` with the food's item name, the tested
+    ``eat`` primitive holds the use button, and the bar rises. The referee, not
+    the body's report, decides: the food level goes up and the bread count goes
+    down. Written for the orchestrator's live run.
+    """
+    with start_session(
+        101, setup=_setup_hungry_with_bread, max_ticks=6000, start_delay_ticks=0
+    ) as session:
+        deadline = time.monotonic() + EAT_TIMEOUT
+        food = bread = None
+        while time.monotonic() < deadline:
+            food = session.referee.player_food(BODY)
+            bread = _count(session.referee.player_inventory(BODY), "bread")
+            if bread < 8 and food > 16:
+                break
+            time.sleep(0.5)
+        events = session.events()
+        pushes = [
+            event
+            for event in events
+            if event.get("kind") == "intent_pushed" and event.get("skill") == "eat_food"
+        ]
+        context = "\n".join(
+            [
+                f"run dir: {session.run_dir}",
+                f"food {food}, bread {bread}",
+                f"eat_food pushes: {pushes}",
+                f"body output tail:\n{session.output()[-2000:]}",
+            ]
+        )
+        assert pushes, "hunger never pushed the eat_food skill\n" + context
+        assert pushes[0].get("args") == ["bread"], (
+            "the argument is the item name, never a slot number\n" + context
+        )
+        assert bread is not None and bread < 8, "no bread was eaten\n" + context
+        assert food is not None and food > 16, "the food bar did not rise\n" + context
+        assert session.referee.player_health(BODY) > 0.0, context

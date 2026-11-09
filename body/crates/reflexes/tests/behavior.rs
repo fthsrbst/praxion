@@ -158,6 +158,73 @@ fn the_melee_reflex_picks_the_best_weapon() {
     }
 }
 
+/// Start the melee attack the engine chose and return its first frame.
+fn first_attack_frame(sim: &mut Sim) -> praxion_headless::ControlFrame {
+    sim.add_mob(2, EntityKind::Zombie, Vec3::new(0.5, 64.0, 3.0));
+    sim.perception.begin_tick(&sim.world);
+    let view = sim.view();
+    let settings = Settings::default();
+    let mut blocks = TestWorld::flat(63, 12);
+    let action = ReflexAction::Attack {
+        target: 2,
+        weapon: view.best_weapon.map(|weapon| weapon.slot),
+    };
+    let mut motion = Motion::start(action, &view, &settings, &sim.body, 0, &mut blocks)
+        .expect("an attack always starts");
+    motion.step(0, sim.body.generation(), &sim.body, &view, &settings)
+}
+
+#[test]
+fn the_melee_attack_selects_the_hotbar_weapon() {
+    // Decision 2026-11-09 "Five next areas": the reflex computed the best
+    // weapon and then fought with whatever was in hand. Slot 38 is hotbar 2.
+    let mut sim = fresh();
+    sim.add_item(37, ItemKind::WoodenSword, 1);
+    sim.add_item(38, ItemKind::DiamondSword, 1);
+    let frame = first_attack_frame(&mut sim);
+    assert_eq!(frame.select_slot, Some(2), "the diamond sword, not the wooden one");
+}
+
+#[test]
+fn a_weapon_outside_the_hotbar_is_not_selected_with_a_hotbar_slot() {
+    // Inventory slot 20 has no hotbar index: selecting would pick the wrong
+    // item, so the frame leaves the hand alone (the swap is a menu action).
+    let mut sim = fresh();
+    sim.add_item(20, ItemKind::DiamondSword, 1);
+    let frame = first_attack_frame(&mut sim);
+    assert_eq!(frame.select_slot, None);
+}
+
+#[test]
+fn an_attack_without_any_weapon_selects_nothing() {
+    let mut sim = fresh();
+    let frame = first_attack_frame(&mut sim);
+    assert_eq!(frame.select_slot, None);
+}
+
+#[test]
+fn a_death_resets_the_reflex_state_and_drops_the_running_routine() {
+    // Decision 2026-11-09 "Five next areas", critique finding 11: nothing used
+    // to reset the reflex state when the player respawned.
+    let mut sim = fresh();
+    sim.add_mob(2, EntityKind::Zombie, Vec3::new(0.5, 64.0, 3.0));
+    for _ in 0..4 {
+        sim.step();
+    }
+    assert!(sim.engine.active().is_some(), "a reflex is running");
+    {
+        let state = sim.engine.state_mut();
+        state.air_ticks = 5;
+        state.last_safe_cell = Some(BlockPos::new(40, 70, 40));
+    }
+    sim.engine.on_death();
+    assert_eq!(sim.engine.active(), None, "the routine of the old life is gone");
+    let state = sim.engine.state();
+    assert_eq!(state.last_safe_cell, None);
+    assert_eq!(state.air_ticks, praxion_reflexes::ReflexState::new().air_ticks);
+    assert_eq!(state.visible_since(ReflexKind::Melee), None);
+}
+
 #[test]
 fn the_fall_guard_refuses_a_deep_step() {
     let mut sim = fresh();

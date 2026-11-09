@@ -20,7 +20,7 @@
 //! guard and no held keys). Reflexes own their own tiny motion routines.
 
 use praxion_eventlog::EventKind;
-use praxion_headless::{Body, Click, ControlFrame, Held};
+use praxion_headless::{Body, ControlFrame, Held};
 use praxion_interpreter::{Actuator, Decision, Facts, Interpreter};
 use praxion_planner::KnownBlocks;
 use praxion_reflexes::{EndermanGuard, Engine, ReflexKind, ReflexTick, Settings, View};
@@ -28,9 +28,15 @@ use praxion_rules::{ArgValue, PrimitiveKind};
 
 use crate::tier::{IntentStack, IntentState, NeedKind, Needs, Tier, arg_to_string};
 
-/// Vanilla eating takes 1.6 s, 32 ticks. The survival action keeps the same
-/// duration so a hunger test sees a real interruption window.
-pub const EAT_TICKS: u64 = 32;
+/// The starvation reflex stays quiet this long after each tick of a meal, so
+/// it never restarts a meal the interpreter is already serving. The cooldown is
+/// refreshed every tick of the meal (a meal may take several items), so only a
+/// meal that ended early lets the reflex back in.
+const MEAL_COOLDOWN_TICKS: u64 = 10;
+
+/// After a meal failed (`no_item`, `not_hungry`) the need is not offered again
+/// for this many ticks, so a failing meal cannot restart every tick.
+const MEAL_RETRY_TICKS: u64 = 200;
 
 /// Who owns the body right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,8 +97,13 @@ pub struct ArbiterTick {
     pub skill_intent: Option<u64>,
     /// A brain wake was emitted this tick (Demo-0: event log only).
     pub wake_brain: bool,
-    /// The inventory slot the body finished eating, when it finished this tick.
-    pub ate: Option<u16>,
+    /// The item the body finished eating, when the `eat_food` skill ended
+    /// `done` this tick.
+    pub ate: Option<String>,
+    /// The intent whose skill the arbiter just loaded into the interpreter (a
+    /// need's skill, started this tick). The driver records it as the
+    /// interpreter's owner and drops any action the previous skill queued.
+    pub loaded_intent: Option<u64>,
 }
 
 /// The accepted command.
@@ -114,13 +125,14 @@ pub enum CommandError {
     Skill(String),
 }
 
+/// A need being served by a skill through the interpreter (decision
+/// 2026-11-09 "Five next areas": one eating path, the tested `eat` primitive).
 #[derive(Clone, Debug)]
-struct MaintenanceRun {
+struct MealRun {
     need: NeedKind,
     intent_id: u64,
-    slot: Option<u16>,
-    started: u64,
-    clicked: bool,
+    /// The food the skill eats, named by item (never a slot number).
+    item: String,
 }
 
 /// The body's decision layer.
@@ -134,11 +146,14 @@ pub struct Arbiter {
     look_guard: EndermanGuard,
     last_switch_tick: u64,
     last_switch_tier: Option<Tier>,
-    maintenance: Option<MaintenanceRun>,
+    meal: Option<MealRun>,
+    /// No new meal before this tick (a failed meal cools down).
+    meal_blocked_until: u64,
     last_decision: Option<Decision>,
     wake_emitted: bool,
     events: Vec<EventKind>,
-    ate: Option<u16>,
+    ate: Option<String>,
+    loaded_intent: Option<u64>,
     /// The intent that ran the interpreter this tick (see [`ArbiterTick`]).
     skill_intent: Option<u64>,
 }
@@ -154,11 +169,13 @@ impl Arbiter {
             look_guard: EndermanGuard::new(),
             last_switch_tick: 0,
             last_switch_tier: None,
-            maintenance: None,
+            meal: None,
+            meal_blocked_until: 0,
             last_decision: None,
             wake_emitted: false,
             events: Vec::new(),
             ate: None,
+            loaded_intent: None,
             skill_intent: None,
         }
     }
@@ -204,21 +221,40 @@ impl Arbiter {
         args: Vec<ArgValue>,
     ) -> Result<CommandAccepted, CommandError> {
         let strings: Vec<String> = args.iter().map(arg_to_string).collect();
+        // A command during a meal ends the meal: its skill would otherwise
+        // run under the meal's ownership once the interpreter holds the
+        // command's skill. The need comes back on its own if still hungry.
+        let dropped_meal = self.meal.take();
+        if let Some(run) = &dropped_meal {
+            self.stack.done(run.intent_id);
+        }
         let pushed = self
             .stack
             .push(Tier::Command, skill, strings.clone())
             .map_err(|_| CommandError::StackFull)?;
         if let Err(refusal) = interpreter.start_skill(skill, args) {
             self.stack.rollback(pushed);
+            if dropped_meal.is_some() {
+                // The meal is gone and the command was refused: nobody owns
+                // the body until the next tick picks an owner.
+                self.owner = Owner::Idle;
+            }
             return Err(CommandError::Skill(refusal));
         }
 
-        let mut events = vec![EventKind::IntentPushed {
+        let mut events = Vec::new();
+        if let Some(run) = &dropped_meal {
+            events.push(EventKind::IntentState {
+                intent_id: run.intent_id,
+                state: IntentState::Done.name().to_owned(),
+            });
+        }
+        events.push(EventKind::IntentPushed {
             intent_id: pushed.intent_id,
             tier: Tier::Command.name().to_owned(),
             skill: skill.to_owned(),
             args: strings,
-        }];
+        });
         if let Some(suspended) = pushed.suspended {
             events.push(EventKind::IntentState {
                 intent_id: suspended,
@@ -234,7 +270,7 @@ impl Arbiter {
         // A reflex or a maintenance action owns the body right now; the new
         // command waits on the stack and runs when the body comes back. Only
         // an idle or skill owner changes to the new command immediately.
-        if matches!(self.owner, Owner::Idle | Owner::Skill { .. }) {
+        if dropped_meal.is_some() || matches!(self.owner, Owner::Idle | Owner::Skill { .. }) {
             let owner = Owner::Skill {
                 intent_id: pushed.intent_id,
             };
@@ -311,6 +347,7 @@ impl Arbiter {
     ) -> ArbiterTick {
         self.events.clear();
         self.ate = None;
+        self.loaded_intent = None;
         self.skill_intent = None;
 
         // 1. Reflexes always win. The engine bumps the body generation on a
@@ -350,43 +387,55 @@ impl Arbiter {
             ReflexTick::Idle => {}
         }
 
-        // 2. A maintenance action in progress.
-        let ended = self
-            .maintenance
-            .as_ref()
-            .is_some_and(|run| self.maintenance_ended(run, tick, needs, settings));
-        if ended {
-            self.finish_maintenance(interpreter, body, tick);
-        } else if self.maintenance.is_some() {
-            let run = self.maintenance.as_mut().expect("checked above");
-            let frame = maintenance_frame(tick, body.generation(), run);
-            let need = run.need;
+        // 2. A need's skill in progress: the interpreter runs it like any
+        // skill, and the driver turns its decisions into primitives. The
+        // arbiter only watches for its end.
+        if let Some(run) = self.meal.clone() {
+            self.engine
+                .state_mut()
+                .set_cooldown(ReflexKind::Starvation, tick + MEAL_COOLDOWN_TICKS);
+            let decision = interpreter.tick(facts, actuator);
+            self.last_decision = Some(decision.clone());
+            self.skill_intent = Some(run.intent_id);
+            match &decision {
+                Decision::Done => self.finish_meal(interpreter, body, tick, None),
+                Decision::Failed(kind) => {
+                    self.finish_meal(interpreter, body, tick, Some(kind.clone()));
+                }
+                _ => {}
+            }
+            let frame = ControlFrame::new(tick, body.generation(), Held::NONE);
             let frame = self.guard(frame, body, view);
-            return self.result(FrameSource::Maintenance(frame), None, Some(need), None);
+            let source = if self.meal.is_some() || matches!(self.owner, Owner::Skill { .. }) {
+                FrameSource::Skill(frame)
+            } else {
+                FrameSource::Idle(frame)
+            };
+            return self.result(source, None, Some(run.need), Some(decision));
         }
 
         // 3. Survival hard threshold: preempt now, no safe-point wait.
-        if needs.food <= settings.eat_hard_threshold {
-            match view.best_food.map(|food| food.slot) {
-                Some(slot) => {
-                    self.start_maintenance(
+        if needs.food <= settings.eat_hard_threshold && tick >= self.meal_blocked_until {
+            match view.best_food.map(|food| food_name(food.kind.to_str())) {
+                Some(item) => {
+                    if self.start_need(
                         NeedKind::Eat,
-                        slot,
+                        &item,
                         Tier::Survival,
                         interpreter,
                         actuator,
                         body,
                         tick,
-                    );
-                    let run = self.maintenance.as_mut().expect("just started");
-                    let frame = maintenance_frame(tick, body.generation(), run);
-                    let frame = self.guard(frame, body, view);
-                    return self.result(
-                        FrameSource::Maintenance(frame),
-                        None,
-                        Some(NeedKind::Eat),
-                        None,
-                    );
+                    ) {
+                        let frame = ControlFrame::new(tick, body.generation(), Held::NONE);
+                        let frame = self.guard(frame, body, view);
+                        return self.result(
+                            FrameSource::Maintenance(frame),
+                            None,
+                            Some(NeedKind::Eat),
+                            None,
+                        );
+                    }
                 }
                 None => self.wake(
                     "hunger",
@@ -415,24 +464,26 @@ impl Arbiter {
 
         // 5. The soft threshold is served at the command's next safe point.
         if needs.food <= settings.eat_soft_threshold
-            && let Some(slot) = view.best_food.map(|food| food.slot)
+            && tick >= self.meal_blocked_until
+            && let Some(item) = view.best_food.map(|food| food_name(food.kind.to_str()))
         {
             let from = self.tier();
             let until = interpreter.until_active();
             if self.is_safe_point(interpreter)
                 && self.may_switch(from, Tier::Maintenance, 1.0, 0.0, until, settings, tick)
-            {
-                self.start_maintenance(
+                && self.start_need(
                     NeedKind::Eat,
-                    slot,
+                    &item,
                     Tier::Maintenance,
                     interpreter,
                     actuator,
                     body,
                     tick,
-                );
-                let run = self.maintenance.as_mut().expect("just started");
-                let frame = maintenance_frame(tick, body.generation(), run);
+                )
+            {
+                // The command's action queued this tick is dropped by the
+                // driver; the meal's first primitive starts next tick.
+                let frame = ControlFrame::new(tick, body.generation(), Held::NONE);
                 let frame = self.guard(frame, body, view);
                 return self.result(
                     FrameSource::Maintenance(frame),
@@ -452,6 +503,47 @@ impl Arbiter {
             FrameSource::Idle(frame)
         };
         self.result(source, None, None, decision)
+    }
+
+    /// The body died and respawned (`Event::Died`): a new player stands in a
+    /// new place. Reset what the old life left behind (the reflex state and
+    /// routine, a meal in progress, an in-flight action), hand the body to the
+    /// command that was running (it re-evaluates from the top) or to no one,
+    /// and move to a new generation so a stale frame can never apply. The
+    /// returned events are the stack lines for the driver's log. Decision
+    /// 2026-11-09 "Five next areas", critique finding 11.
+    pub fn on_death(
+        &mut self,
+        interpreter: &mut Interpreter,
+        actuator: &mut dyn Actuator,
+        body: &mut Body,
+        tick: u64,
+    ) -> Vec<EventKind> {
+        self.events.clear();
+        self.engine.on_death();
+        self.meal_blocked_until = 0;
+        if let Some(run) = self.meal.take() {
+            self.stack.done(run.intent_id);
+            self.events.push(EventKind::IntentState {
+                intent_id: run.intent_id,
+                state: IntentState::Done.name().to_owned(),
+            });
+        }
+        interpreter.preempt(actuator);
+        match self.owner {
+            // A reflex or a meal owned the body: the command underneath, if
+            // any, gets it back.
+            Owner::Reflex(_) | Owner::Maintenance(_) => {
+                self.resume_after_reflex(interpreter, body, tick);
+            }
+            Owner::Skill { .. } | Owner::Idle => {
+                interpreter.resume();
+                body.bump_generation();
+                self.generation = body.generation();
+            }
+        }
+        self.wake_emitted = false;
+        std::mem::take(&mut self.events)
     }
 
     /// The same-tier switch rule: `gain > k x loss`, no `until`, and no second
@@ -540,15 +632,16 @@ impl Arbiter {
 
     /// Suspend the current skill and abandon its in-flight discrete action.
     fn preempt_for_reflex(&mut self, interpreter: &mut Interpreter, actuator: &mut dyn Actuator) {
-        if let Some(run) = self.maintenance.take() {
+        if let Some(run) = self.meal.take() {
             // The meal is over, not paused: a reflex interrupted it. The body
             // writes `done` for its own intent; the receipt of the cancelled
-            // click already settles `preempted`.
+            // `eat` already settles `preempted`.
             self.stack.done(run.intent_id);
             self.events.push(EventKind::IntentState {
                 intent_id: run.intent_id,
                 state: IntentState::Done.name().to_owned(),
             });
+            interpreter.preempt(actuator);
         }
         if let Owner::Skill { intent_id } = self.owner {
             self.stack.set_state(intent_id, IntentState::Suspended);
@@ -616,37 +709,61 @@ impl Arbiter {
         Some(entry)
     }
 
+    /// Serve a need with its skill: push the intent, load the skill into the
+    /// interpreter and let the normal interpreter path run it. A slot number
+    /// never becomes an argument: the skill gets the food's item name.
+    ///
+    /// Returns whether the need started. A skill the program does not have is
+    /// refused here with a wake (a typed error), and the stack is left as it was.
     #[allow(clippy::too_many_arguments)]
-    fn start_maintenance(
+    fn start_need(
         &mut self,
         need: NeedKind,
-        slot: u16,
+        item: &str,
         tier: Tier,
         interpreter: &mut Interpreter,
         actuator: &mut dyn Actuator,
         body: &mut Body,
         tick: u64,
-    ) {
+    ) -> bool {
         let skill = match need {
-            NeedKind::Eat => "eat",
-            NeedKind::Sleep => "sleep",
-            NeedKind::Shelter => "shelter",
+            NeedKind::Eat => "eat_food",
+            // No skill serves these yet; a name nobody defined must not be
+            // pushed (critique 2026-11-09, finding 10).
+            NeedKind::Sleep | NeedKind::Shelter => {
+                self.wake(
+                    "need_skill",
+                    format!("no skill serves the {} need", need.name()),
+                );
+                return false;
+            }
         };
-        let pushed = match self.stack.push(tier, skill, vec![slot.to_string()]) {
+        let pushed = match self.stack.push(tier, skill, vec![item.to_owned()]) {
             Ok(pushed) => pushed,
             Err(_) => {
                 self.wake(
                     "intent_stack",
                     "the stack is full; cannot serve a need".to_owned(),
                 );
-                return;
+                return false;
             }
         };
+        // The safe-point path has no in-flight action; the hard path cancels
+        // one and its receipt settles `preempted`.
+        interpreter.preempt(actuator);
+        if let Err(refusal) = interpreter.start_skill(skill, vec![ArgValue::Item(item.to_owned())])
+        {
+            self.stack.rollback(pushed);
+            interpreter.resume();
+            self.meal_blocked_until = tick + MEAL_RETRY_TICKS;
+            self.wake("need_skill", format!("cannot start {skill}: {refusal}"));
+            return false;
+        }
         self.events.push(EventKind::IntentPushed {
             intent_id: pushed.intent_id,
             tier: tier.name().to_owned(),
             skill: skill.to_owned(),
-            args: vec![slot.to_string()],
+            args: vec![item.to_owned()],
         });
         if let Some(suspended) = pushed.suspended {
             self.events.push(EventKind::IntentState {
@@ -657,38 +774,34 @@ impl Arbiter {
                 intent_id: suspended,
             });
         }
-        // The safe-point path has no in-flight action; the hard path cancels
-        // one and its receipt settles `preempted`.
-        interpreter.preempt(actuator);
         // Keep the starvation reflex from restarting the same meal while this
         // survival action runs; a lava reflex still preempts.
         self.engine
             .state_mut()
-            .set_cooldown(ReflexKind::Starvation, tick + EAT_TICKS + 10);
+            .set_cooldown(ReflexKind::Starvation, tick + MEAL_COOLDOWN_TICKS);
         body.bump_generation();
-        self.maintenance = Some(MaintenanceRun {
+        self.meal = Some(MealRun {
             need,
             intent_id: pushed.intent_id,
-            slot: Some(slot),
-            started: tick,
-            clicked: false,
+            item: item.to_owned(),
         });
+        self.loaded_intent = Some(pushed.intent_id);
         self.set_owner(Owner::Maintenance(need), body.generation(), tick);
         self.record_switch(tier, tick);
+        true
     }
 
-    fn maintenance_ended(
-        &self,
-        run: &MaintenanceRun,
+    /// The need's skill ended: the body alone writes `done` for its intent and
+    /// hands the body back. A failed meal wakes the brain and is not offered
+    /// again for a while.
+    fn finish_meal(
+        &mut self,
+        interpreter: &mut Interpreter,
+        body: &mut Body,
         tick: u64,
-        needs: Needs,
-        settings: &Settings,
-    ) -> bool {
-        tick.saturating_sub(run.started) >= EAT_TICKS || needs.food > settings.eat_soft_threshold
-    }
-
-    fn finish_maintenance(&mut self, interpreter: &mut Interpreter, body: &mut Body, tick: u64) {
-        let Some(run) = self.maintenance.take() else {
+        failure: Option<String>,
+    ) {
+        let Some(run) = self.meal.take() else {
             return;
         };
         self.stack.done(run.intent_id);
@@ -696,7 +809,16 @@ impl Arbiter {
             intent_id: run.intent_id,
             state: IntentState::Done.name().to_owned(),
         });
-        self.ate = run.slot;
+        match failure {
+            None => self.ate = Some(run.item),
+            Some(kind) => {
+                self.meal_blocked_until = tick + MEAL_RETRY_TICKS;
+                self.wake(
+                    "hunger",
+                    format!("{} ended failed({kind}) for {}", run.need.name(), run.item),
+                );
+            }
+        }
         self.resume_after_maintenance(interpreter, body, tick);
     }
 
@@ -761,17 +883,14 @@ impl Arbiter {
             skill,
             skill_intent: self.skill_intent.take(),
             wake_brain,
-            ate: self.ate,
+            ate: self.ate.take(),
+            loaded_intent: self.loaded_intent.take(),
         }
     }
 }
 
-/// Build a maintenance frame and remember that the one use-click went out.
-fn maintenance_frame(tick: u64, generation: u32, run: &mut MaintenanceRun) -> ControlFrame {
-    let mut frame = ControlFrame::new(tick, generation, Held::NONE);
-    if !run.clicked {
-        frame.clicks.push(Click::Use);
-        run.clicked = true;
-    }
-    frame
+/// The food's item name without the namespace, the form skills and receipts
+/// use (`bread`, never a slot number).
+fn food_name(name: &str) -> String {
+    name.strip_prefix("minecraft:").unwrap_or(name).to_owned()
 }

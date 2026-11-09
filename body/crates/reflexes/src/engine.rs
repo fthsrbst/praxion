@@ -142,6 +142,17 @@ impl Engine {
         &mut self.state
     }
 
+    /// The body died and respawned: it is a new player in a new place. Forget
+    /// everything the old life taught the reflexes (air, burning, the last
+    /// safe cell, arrow headings, cooldowns, what was visible since when) and
+    /// drop the running routine; a routine that walked toward the old life's
+    /// safe cell would walk the new body into the world (decision 2026-11-09
+    /// "Five next areas", critique finding 11).
+    pub fn on_death(&mut self) {
+        self.state = ReflexState::new();
+        self.active = None;
+    }
+
     pub fn active(&self) -> Option<ReflexKind> {
         self.active.as_ref().map(|active| active.kind)
     }

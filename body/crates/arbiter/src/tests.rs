@@ -32,6 +32,12 @@ struct Mock {
     cancels: u32,
     applies: u32,
     facts: Vec<String>,
+    /// What the `food` fact answers (the tests move it with the meals).
+    food: i64,
+    /// What `count(...)` answers; 0 makes a meal fail `no_item`.
+    count: Option<i64>,
+    /// The first argument of every started primitive, as text.
+    start_args: Vec<String>,
 }
 
 impl Mock {
@@ -51,13 +57,19 @@ impl Facts for Mock {
 
     fn int_fact(&mut self, call: &FactCall) -> IntValue {
         self.facts.push(call.name.clone());
-        IntValue::Known(1)
+        match call.name.as_str() {
+            "food" => IntValue::Known(self.food),
+            "count" => IntValue::Known(self.count.unwrap_or(1)),
+            _ => IntValue::Known(1),
+        }
     }
 }
 
 impl Actuator for Mock {
     fn start(&mut self, action: &StartAction, tick: u64) -> u32 {
         self.starts.push((action.primitive.clone(), tick));
+        self.start_args
+            .push(action.args.first().map(crate::arg_to_string).unwrap_or_default());
         self.flight = Some((tick + self.duration, Outcome::Confirmed));
         self.duration as u32
     }
@@ -90,8 +102,13 @@ impl Actuator for Mock {
     fn release(&mut self) {}
 }
 
+/// The real core skill the arbiter pushes for a meal.
+const EAT_FOOD: &str = include_str!("../../../skills/eat_food.skill");
+
+/// `source` plus the real `eat_food` skill: a need pushes it by name.
 fn program(source: &str) -> Program {
-    praxion_rules::load(source).unwrap_or_else(|errors| panic!("{errors:?}"))
+    praxion_rules::load(&format!("{EAT_FOOD}\n{source}"))
+        .unwrap_or_else(|errors| panic!("{errors:?}"))
 }
 
 fn continuous_program() -> Program {
@@ -343,19 +360,31 @@ fn the_soft_threshold_eats_at_a_safe_point_and_never_starves() {
     let mut min_food = food;
     let mut eats = 0;
     let mut maintenance_ticks = 0;
+    let mut bitten = 0;
     for tick in 0..36_000u64 {
         if tick % 400 == 399 {
             food = food.saturating_sub(1);
         }
         min_food = min_food.min(food);
         let view = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, food);
+        rig.facts.food = i64::from(food);
         let out = rig.tick(tick, &view, Needs { health: 20.0, food }, &settings);
         if out.maintenance == Some(NeedKind::Eat) {
             maintenance_ticks += 1;
         }
+        // Each `eat` the meal's skill starts feeds the body, as a bite does.
+        let bites = rig
+            .actuator
+            .starts
+            .iter()
+            .filter(|(primitive, _)| primitive == "eat")
+            .count();
+        if bites > bitten {
+            bitten = bites;
+            food = (food + 6).min(20);
+        }
         if out.ate.is_some() {
             eats += 1;
-            food = (food + 6).min(20);
         }
     }
     assert!(eats > 0, "the arbiter ate at least once");
@@ -590,9 +619,14 @@ fn the_body_alone_writes_done_when_maintenance_finishes() {
     rig.command("work");
     let settings = Settings::default();
     let mut done_at = None;
-    for tick in 0..40u64 {
-        let view = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 10);
-        let out = rig.tick(tick, &view, Needs { health: 20.0, food: 10 }, &settings);
+    let mut food = 10u32;
+    for tick in 0..400u64 {
+        let view = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, food);
+        rig.facts.food = i64::from(food);
+        let out = rig.tick(tick, &view, Needs { health: 20.0, food }, &settings);
+        if rig.actuator.starts.iter().any(|(primitive, _)| primitive == "eat") {
+            food = 20;
+        }
         if out.ate.is_some() {
             done_at = Some(tick);
             break;
@@ -604,9 +638,173 @@ fn the_body_alone_writes_done_when_maintenance_finishes() {
         .stack()
         .entries()
         .iter()
-        .find(|entry| entry.skill_ref == "eat")
+        .find(|entry| entry.skill_ref == "eat_food")
         .expect("the maintenance entry is kept");
     assert_eq!(done.state, IntentState::Done);
+}
+
+fn hungry_rig() -> (Rig, Settings) {
+    let mut rig = Rig::new(continuous_program());
+    rig.command("work");
+    (rig, Settings::default())
+}
+
+#[test]
+fn a_meal_is_the_eat_food_skill_with_the_item_name_and_no_click_frame() {
+    // Critique finding 2: the argument is the food's item name, never the
+    // inventory slot (the bread sits in slot 9).
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs { health: 20.0, food: 6 };
+    let start = rig.tick(0, &hungry, needs, &settings);
+    assert_eq!(start.owner, Owner::Maintenance(NeedKind::Eat));
+    let id = start.loaded_intent.expect("the arbiter loaded the meal skill");
+    let entry = rig.arbiter.stack().get(id).expect("the meal is on the stack");
+    assert_eq!((entry.skill_ref.as_str(), entry.args.clone()), ("eat_food", vec!["bread".to_owned()]));
+    assert_eq!(entry.tier, Tier::Survival);
+    assert_eq!(rig.interpreter.current_skill(), Some("eat_food"));
+    // The arbiter builds no click frame of its own on any tick of the meal;
+    // the `eat` primitive is what runs.
+    let mut frames = vec![start];
+    for tick in 1..4 {
+        frames.push(rig.tick(tick, &hungry, needs, &settings));
+    }
+    for out in &frames {
+        assert!(out.source.frame().clicks.is_empty(), "{:?}", out.source);
+    }
+    assert_eq!(frames[1].skill_intent, Some(id));
+    let eats: Vec<&String> = rig
+        .actuator
+        .start_args
+        .iter()
+        .zip(&rig.actuator.starts)
+        .filter(|(_, (primitive, _))| primitive == "eat")
+        .map(|(arg, _)| arg)
+        .collect();
+    assert!(!eats.is_empty(), "the meal runs the eat primitive");
+    assert!(eats.iter().all(|arg| *arg == "bread"), "eat gets the item name: {eats:?}");
+}
+
+#[test]
+fn a_failed_meal_wakes_the_brain_and_is_not_restarted_every_tick() {
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    rig.facts.count = Some(0);
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs { health: 20.0, food: 6 };
+    let mut pushes = 0;
+    let mut woke = false;
+    for tick in 0..100 {
+        let out = rig.tick(tick, &hungry, needs, &settings);
+        pushes += out
+            .events
+            .iter()
+            .filter(|event| matches!(event, EventKind::IntentPushed { skill, .. } if skill == "eat_food"))
+            .count();
+        woke |= out
+            .events
+            .iter()
+            .any(|event| matches!(event, EventKind::WakeBrain { cause, .. } if cause == "hunger"));
+    }
+    assert_eq!(pushes, 1, "one failed meal, then a cool-down");
+    assert!(woke, "the brain hears that the meal failed");
+    assert!(
+        !matches!(rig.arbiter.owner(), Owner::Maintenance(_)),
+        "the failed meal gave the body back: {:?}",
+        rig.arbiter.owner()
+    );
+    assert!(rig.actuator.starts.iter().all(|(primitive, _)| primitive != "eat"));
+}
+
+#[test]
+fn a_reflex_ends_the_meal_and_leaves_no_suspended_meal_behind() {
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs { health: 20.0, food: 6 };
+    rig.tick(0, &hungry, needs, &settings);
+    rig.tick(1, &hungry, needs, &settings);
+    let creeper = with_creeper(hungry.clone(), 1, Vec3::new(0.5, 64.0, 2.5));
+    let out = rig.tick(2, &creeper, needs, &settings);
+    assert!(matches!(out.owner, Owner::Reflex(_)), "{:?}", out.owner);
+    let meal = rig
+        .arbiter
+        .stack()
+        .entries()
+        .iter()
+        .find(|entry| entry.skill_ref == "eat_food")
+        .expect("the meal entry");
+    assert_eq!(meal.state, IntentState::Done, "a reflex ends the meal, it is not parked");
+}
+
+#[test]
+fn a_need_whose_skill_is_missing_is_refused_with_a_wake() {
+    // A program without `eat_food`: the push is rolled back, the command keeps
+    // the body (critique finding 10: validate the skill name).
+    let mut rig = Rig::new(
+        praxion_rules::load("skill work()\n  rules:\n    true -> wait(50)\n").unwrap(),
+    );
+    rig.command("work");
+    let settings = Settings::default();
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let out = rig.tick(0, &hungry, Needs { health: 20.0, food: 6 }, &settings);
+    assert!(
+        out.events
+            .iter()
+            .any(|event| matches!(event, EventKind::WakeBrain { cause, .. } if cause == "need_skill")),
+        "{:?}",
+        out.events
+    );
+    assert_eq!(rig.arbiter.stack().depth(), 1, "only the command is on the stack");
+    assert!(matches!(rig.arbiter.owner(), Owner::Skill { .. }));
+}
+
+#[test]
+fn a_death_during_a_meal_ends_the_meal_and_returns_the_command() {
+    // Critique finding 11: respawn can land mid-meal.
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs { health: 20.0, food: 6 };
+    rig.tick(0, &hungry, needs, &settings);
+    rig.tick(1, &hungry, needs, &settings);
+    assert_eq!(rig.arbiter.owner(), &Owner::Maintenance(NeedKind::Eat));
+    let generation = rig.arbiter.generation();
+    rig.arbiter.engine_mut().state_mut().air_ticks = 3;
+
+    let events = rig
+        .arbiter
+        .on_death(&mut rig.interpreter, &mut rig.actuator, &mut rig.body, 2);
+    assert!(rig.arbiter.generation() > generation, "a new generation");
+    assert_eq!(rig.arbiter.owner(), &Owner::Skill { intent_id: 1 }, "the command has the body back");
+    let meal = rig
+        .arbiter
+        .stack()
+        .entries()
+        .iter()
+        .find(|entry| entry.skill_ref == "eat_food")
+        .expect("the meal entry");
+    assert_eq!(meal.state, IntentState::Done);
+    assert!(
+        events.iter().any(|event| matches!(event, EventKind::IntentState { intent_id, state } if *intent_id == meal.intent_id && state == "done")),
+        "{events:?}"
+    );
+    assert_eq!(
+        rig.arbiter.engine().state().air_ticks,
+        praxion_reflexes::ReflexState::new().air_ticks,
+        "the reflex state is the new life's"
+    );
+}
+
+#[test]
+fn a_death_with_no_owner_still_moves_to_a_new_generation() {
+    let mut rig = Rig::new(continuous_program());
+    let generation = rig.arbiter.generation();
+    rig.arbiter
+        .on_death(&mut rig.interpreter, &mut rig.actuator, &mut rig.body, 0);
+    assert!(rig.arbiter.generation() > generation);
+    assert_eq!(rig.arbiter.owner(), &Owner::Idle);
 }
 
 #[test]

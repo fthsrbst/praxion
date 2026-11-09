@@ -113,6 +113,43 @@ skill helper(n: int = 2)
     }
 
     #[test]
+    fn survival_facts_load_in_guards() {
+        // `food() <= 6` and the clock facts (decision 2026-11-09 "Five next
+        // areas"): before they were declared, each of these was a load error.
+        let program = load(
+            r#"
+skill s()
+  rules:
+    food() <= 6 and health() > 8 -> craft(stick)
+    is_night() and time_of_day() >= 13000 -> done
+    not is_night() -> done
+    true -> done
+"#,
+        )
+        .unwrap();
+        assert_eq!(program.skill("s").unwrap().rules.len(), 4);
+    }
+
+    #[test]
+    fn survival_facts_are_typed_and_take_no_arguments() {
+        let wrong = |source: &str| {
+            load(source)
+                .unwrap_err()
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        // An int fact is not a boolean guard, a bool fact is not an int.
+        assert!(!wrong("skill s()\n  rules:\n    food() -> done\n").is_empty());
+        assert!(!wrong("skill s()\n  rules:\n    is_night() >= 1 -> done\n").is_empty());
+        let arity = wrong("skill s()\n  rules:\n    food(stick) <= 6 -> done\n");
+        assert!(arity.contains("takes 0 arguments"), "{arity}");
+        // A bare identifier is still not a fact call.
+        assert!(!wrong("skill s()\n  rules:\n    food <= 6 -> done\n").is_empty());
+    }
+
+    #[test]
     fn namespace_is_optional() {
         let program = load(
             "skill s()\n  rules:\n    has(minecraft:stick) -> mine(minecraft:stone)\n    true -> done\n",

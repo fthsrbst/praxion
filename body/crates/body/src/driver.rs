@@ -146,6 +146,8 @@ pub struct BodyDriver {
     /// popped) can hand the body to an intent the interpreter does not hold;
     /// the driver restarts that record's skill when it sees the mismatch.
     interpreter_intent: Option<u64>,
+    /// The last tick `frame` saw, for events the session reports between frames.
+    last_tick: u64,
     /// The `--goal` command, once the start delay has passed.
     cli: CliGoal,
     /// The port was connected last tick, so the connect edge publishes state.
@@ -288,6 +290,7 @@ impl BodyDriver {
             watch,
             commands: BTreeMap::new(),
             interpreter_intent: None,
+            last_tick: 0,
             cli,
             port_connected: false,
             brain_silent: false,
@@ -600,6 +603,36 @@ impl BodyDriver {
         } else if self.runner.is_active() {
             self.bridge.cancelled = true;
         }
+    }
+
+    /// The player died and respawned: reset the reflex state, drop a meal and
+    /// the primitive in flight, and move to a new generation, so nothing from
+    /// the old life drives the new body (decision 2026-11-09 "Five next
+    /// areas", critique finding 11). The running command keeps its intent and
+    /// re-evaluates from the top; settling it `failed(died)` is a later slice.
+    fn handle_death(&mut self) {
+        let tick = self.last_tick;
+        let ts_ns = now_ns();
+        let events = self.arbiter.on_death(
+            &mut self.interpreter,
+            &mut self.bridge,
+            &mut self.mirror,
+            tick,
+        );
+        self.log_events(tick, ts_ns, events);
+        // The interpreter's flight and the runner's primitive belonged to the
+        // old player; a discrete one is cancelled (and may close a menu) on
+        // the next frame, a continuous one is released.
+        self.abandon_flight();
+        self.pending = None;
+        self.interpreter_intent = None;
+        self.record(
+            tick,
+            ts_ns,
+            EventKind::Note {
+                text: "death_reset".to_owned(),
+            },
+        );
     }
 
     /// A brain `pop` releases an intent. Stop and cancel always work
@@ -1365,6 +1398,7 @@ impl Driver for BodyDriver {
         }
         let work_start = Instant::now();
         let ts_ns = now_ns();
+        self.last_tick = view.tick;
         {
             let mut shared = lock(&self.shared);
             shared.ticks = view.tick + 1;
@@ -1458,6 +1492,15 @@ impl Driver for BodyDriver {
         };
         self.log_events(view.tick, ts_ns, ticked.events.clone());
         self.log_interpreter_events(view.tick, ts_ns);
+        if let Some(intent_id) = ticked.loaded_intent {
+            // The arbiter loaded a need's skill (a meal) into the interpreter:
+            // the interpreter now holds that intent, and an action the
+            // previous skill queued this tick must not start as the meal's.
+            self.interpreter_intent = Some(intent_id);
+            self.bridge.start = None;
+            self.bridge.continuous = None;
+            self.deferred_start = None;
+        }
         if self.sync_interpreter() {
             // The decision this tick came from the previous goal's frames, so
             // it does not belong to the intent that just got the body back.
@@ -1620,6 +1663,10 @@ impl Driver for BodyDriver {
 
     fn done(&self) -> bool {
         matches!(self.cli, CliGoal::Settled)
+    }
+
+    fn on_death(&mut self) {
+        self.handle_death();
     }
 
     fn summary_json(&self) -> Option<String> {
@@ -1876,14 +1923,18 @@ mod tests {
 
     use super::*;
 
-    const INSTA: &str = "\
+    /// Two small skills plus the real `eat_food` core skill a meal pushes.
+    const INSTA: &str = concat!(
+        include_str!("../../../skills/eat_food.skill"),
+        "
 skill insta()
   rules:
     true -> done
 skill stall()
   rules:
     true -> wait(100)
-";
+"
+    );
 
     static RUNS: AtomicU64 = AtomicU64::new(0);
 
@@ -2667,6 +2718,37 @@ skill stall()
     }
 
     #[test]
+    fn a_death_resets_the_reflex_state_and_moves_to_a_new_generation() {
+        let mut harness = harness();
+        accept(&mut harness, command("c-1", "stall"));
+        let generation = harness.driver.arbiter.generation();
+        {
+            let state = harness.driver.arbiter.engine_mut().state_mut();
+            state.air_ticks = 3;
+            state.last_safe_cell = Some(praxion_world::BlockPos::new(9, 70, 9));
+        }
+        harness.driver.last_tick = 40;
+
+        harness.driver.handle_death();
+
+        assert!(harness.driver.arbiter.generation() > generation);
+        let state = harness.driver.arbiter.engine().state();
+        assert_eq!(state.last_safe_cell, None);
+        assert_ne!(state.air_ticks, 3, "the air supply is the new life's");
+        assert_eq!(
+            harness.driver.interpreter_intent, None,
+            "the command restarts from the top on the respawned body"
+        );
+        // The command keeps the body and starts again on the next sync.
+        assert_eq!(
+            *harness.driver.arbiter.owner(),
+            Owner::Skill { intent_id: 1 }
+        );
+        assert!(harness.driver.sync_interpreter());
+        assert_eq!(harness.driver.interpreter_intent, Some(1));
+    }
+
+    #[test]
     fn a_goal_done_during_maintenance_resumes_the_older_skill() {
         let mut harness = harness();
         accept(&mut harness, command("c-1", "stall"));
@@ -2701,9 +2783,12 @@ skill stall()
             "the meal keeps the body while c-2 settles"
         );
 
+        // The test world is invalid, so the meal's facts are unknown and the
+        // `eat_food` skill ends at once (`no_item`): the hand-over is what is
+        // under test.
         let mut resumed = false;
-        let mut food = 10;
-        for tick in 11..(11 + praxion_arbiter::EAT_TICKS + 4) {
+        let food = 10;
+        for tick in 11..40 {
             let needs = Needs {
                 health: 20.0,
                 food,
@@ -2715,11 +2800,6 @@ skill stall()
                 needs,
                 tick,
             );
-            if out.ate.is_some() {
-                // The meal finished; the next view is fed, so the soft path
-                // does not immediately start another one.
-                food = 20;
-            }
             if out.owner == (Owner::Skill { intent_id: 1 }) {
                 resumed = true;
                 break;
