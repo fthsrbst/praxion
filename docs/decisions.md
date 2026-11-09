@@ -66,6 +66,15 @@ All four approved by the user (macOS session), each the recommended option; desi
   site outside the allowlist and a committed baseline that may only shrink. Architecture §4, §5.1 and §7 are updated to
   this rule. Rules out for now: removing `praxion-world` from the primitives, facts and reflexes crates (type-level
   enforcement).
+- **Chat: control words bare, tasks with a prefix (user).** In game chat the four control words `dur`, `iptal`, `durum`,
+  `devam` (and `stop`, `cancel`, `status`, `resume`, `carry on`) always act, bare. A task needs a configurable prefix,
+  `p:` by default (`p: 8 taş getir`; `--chat-prefix`; an empty prefix takes every operator line as a task). The body
+  strips the prefix before forwarding the task to the brain. Any other operator chat stays chat: it is neither answered
+  nor sent to the mapper, so a sentence like "keşke biraz taş olsa" can never start work. The console's task box needs no
+  prefix (it speaks to the brain directly). Reason: session 9's decided rule ("in-game chat with a prefix; other chat
+  stays chat", `docs/sessions/09-commands.md`, `docs/architecture.md` §5.6) was dropped in the talk slice, leaving the
+  operator's every sentence a candidate command (review of `wip/talk2`, finding 1). Rules out: a bare-text task channel
+  and a second prefix per source.
 
 ## 2026-11-08
 

@@ -522,7 +522,12 @@ fn pump(stream: TcpStream, session: &Session) -> Result<(), FrameError> {
         &mut writer,
         &BodyMessage::Hello {
             port_version: PORT_VERSION,
-            caps: vec![Capability::Command, Capability::Snapshot, Capability::Pop],
+            caps: vec![
+                Capability::Command,
+                Capability::Snapshot,
+                Capability::Pop,
+                Capability::Say,
+            ],
             body: session.config.body.clone(),
             run_id: session.config.run_id.clone(),
         },
@@ -684,7 +689,7 @@ fn handle_brain_message(
         }
         // A repeated hello is harmless.
         BrainMessage::Hello { .. } => {}
-        other @ (BrainMessage::Command(_) | BrainMessage::Pop { .. }) => {
+        other @ (BrainMessage::Command(_) | BrainMessage::Pop { .. } | BrainMessage::Say { .. }) => {
             if incoming.try_send(other).is_err() {
                 // The driver is not draining its inbox: close so the brain
                 // notices instead of silently losing directives.

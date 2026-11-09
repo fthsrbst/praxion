@@ -254,6 +254,28 @@ impl Arbiter {
         })
     }
 
+    /// Carry on (`devam` / `resume` / `carry on`) with the brain down: give the
+    /// body back to the newest suspended command, whose skill the caller then
+    /// restarts from the top. A no-op while anything else owns the body (a
+    /// running skill, a reflex or a meal), so the word never fights the body.
+    ///
+    /// Returns the intent that now owns the body and the events to log, like
+    /// [`Arbiter::end_command`]. Decision 2026-11-09 "Five next areas": the four
+    /// control verbs work with the brain down (architecture §5.4).
+    pub fn resume_command(&mut self, body: &mut Body, tick: u64) -> (Option<u64>, Vec<EventKind>) {
+        if !matches!(self.owner, Owner::Idle) {
+            return (None, Vec::new());
+        }
+        let Some(intent) = self.resume_suspended_command() else {
+            return (None, Vec::new());
+        };
+        body.bump_generation();
+        self.set_owner(Owner::Skill { intent_id: intent }, body.generation(), tick);
+        let mut events = Vec::new();
+        events.append(&mut self.events);
+        (Some(intent), events)
+    }
+
     /// The driver settled a command: mark its intent `done` and hand the body
     /// back. When a suspended command is waiting, it becomes the running one
     /// again (a new command suspends the old one, so settling the new one must
@@ -599,14 +621,20 @@ impl Arbiter {
             .rev()
             .find(|entry| {
                 entry.tier == Tier::Command
-                    && matches!(entry.state, IntentState::Suspended | IntentState::Running)
+                    && matches!(
+                        entry.state,
+                        IntentState::Suspended
+                            | IntentState::FrozenForCarryOn
+                            | IntentState::Running
+                    )
             })?
             .intent_id;
-        if self
-            .stack
-            .get(entry)
-            .is_some_and(|entry| entry.state == IntentState::Suspended)
-        {
+        if self.stack.get(entry).is_some_and(|entry| {
+            matches!(
+                entry.state,
+                IntentState::Suspended | IntentState::FrozenForCarryOn
+            )
+        }) {
             self.stack.set_state(entry, IntentState::Running);
             self.events.push(EventKind::IntentState {
                 intent_id: entry,
@@ -774,4 +802,73 @@ fn maintenance_frame(tick: u64, generation: u32, run: &mut MaintenanceRun) -> Co
         run.clicked = true;
     }
     frame
+}
+
+#[cfg(test)]
+mod carry_on {
+    use praxion_world::Vec3;
+
+    use super::*;
+
+    /// A brain preempts a command and dies: the preempted intent is suspended
+    /// and nothing owns the body. `devam` must give the body back (review
+    /// finding 3: the four control words work with the brain down).
+    #[test]
+    fn carry_on_resumes_the_newest_suspended_command() {
+        let mut arbiter = Arbiter::new(0);
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        let pushed = arbiter
+            .stack
+            .push(Tier::Command, "stall", Vec::new())
+            .expect("the stack has room");
+        arbiter
+            .stack
+            .set_state(pushed.intent_id, IntentState::Suspended);
+        arbiter.owner = Owner::Idle;
+
+        let (resumed, events) = arbiter.resume_command(&mut body, 7);
+        assert_eq!(resumed, Some(pushed.intent_id));
+        assert_eq!(
+            arbiter.owner,
+            Owner::Skill {
+                intent_id: pushed.intent_id
+            }
+        );
+        assert_eq!(
+            arbiter.stack.get(pushed.intent_id).map(|entry| entry.state),
+            Some(IntentState::Running)
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                EventKind::IntentState { state, .. } if state == "running"
+            )),
+            "the log must show the intent as running: {events:?}"
+        );
+        // A second carry-on has nothing left and changes nothing.
+        let generation = arbiter.generation();
+        assert_eq!(arbiter.resume_command(&mut body, 8).0, None);
+        assert_eq!(arbiter.generation(), generation);
+    }
+
+    /// A running skill owns the body; `devam` must not steal it.
+    #[test]
+    fn carry_on_never_takes_the_body_from_a_running_skill() {
+        let mut arbiter = Arbiter::new(0);
+        let mut body = Body::new(Vec3::new(0.5, 64.0, 0.5));
+        let pushed = arbiter
+            .stack
+            .push(Tier::Command, "stall", Vec::new())
+            .expect("the stack has room");
+        arbiter.owner = Owner::Skill {
+            intent_id: pushed.intent_id,
+        };
+        let generation = arbiter.generation();
+        assert_eq!(arbiter.resume_command(&mut body, 7).0, None);
+        assert_eq!(arbiter.generation(), generation);
+        assert_eq!(
+            arbiter.stack.get(pushed.intent_id).map(|entry| entry.state),
+            Some(IntentState::Running)
+        );
+    }
 }

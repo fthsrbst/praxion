@@ -13,8 +13,8 @@ use crate::forwards;
 use crate::frame::{FrameError, FrameReader, MAX_FRAME_SIZE, write_frame, write_payload};
 use crate::server::{ConnectionState, PortConfig, PortServer, PublishOutcome};
 use crate::wire::{
-    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, Snapshot,
-    StackEntry,
+    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, SayPriority,
+    Snapshot, StackEntry,
 };
 
 fn config() -> PortConfig {
@@ -106,7 +106,12 @@ impl Brain {
                 assert_eq!(port_version, PORT_VERSION);
                 assert_eq!(
                     caps,
-                    vec![Capability::Command, Capability::Snapshot, Capability::Pop]
+                    vec![
+                        Capability::Command,
+                        Capability::Snapshot,
+                        Capability::Pop,
+                        Capability::Say
+                    ]
                 );
             }
             other => panic!("expected hello, got {other:?}"),
@@ -504,6 +509,10 @@ fn a_resync_request_is_answered_with_a_snapshot_then_deltas() {
     brain.receive();
 
     brain.send(&BrainMessage::ResyncRequest);
+    // Wait until the connection thread has read the request: a snapshot
+    // published before that is a wake snapshot and is cut down to the last
+    // sent event, which is not what this test is about.
+    wait_for(|| server.needs_snapshot());
     // The stored snapshot (seq 5) is the cut; later events must follow it.
     server.publish_snapshot(snapshot(5));
     assert_eq!(
@@ -700,7 +709,12 @@ fn body_golden_frames() -> Vec<(&'static str, BodyMessage)> {
             "rust_hello.bin",
             BodyMessage::Hello {
                 port_version: PORT_VERSION,
-                caps: vec![Capability::Command, Capability::Snapshot, Capability::Pop],
+                caps: vec![
+                    Capability::Command,
+                    Capability::Snapshot,
+                    Capability::Pop,
+                    Capability::Say,
+                ],
                 body: "praxion 0.x (abc123)".to_owned(),
                 run_id: "run-1".to_owned(),
             },
@@ -769,6 +783,14 @@ fn brain_golden_frames() -> Vec<(&'static str, BrainMessage)> {
                 intent_id: 3,
             },
         ),
+        (
+            "brain_say.bin",
+            BrainMessage::Say {
+                id: "s-0007".to_owned(),
+                text: "bitti: 8 taş".to_owned(),
+                priority: SayPriority::Urgent,
+            },
+        ),
         ("brain_resync_request.bin", BrainMessage::ResyncRequest),
         ("brain_ping.bin", BrainMessage::Ping),
     ]
@@ -819,5 +841,42 @@ fn python_brain_frames_replay_exactly() {
             reencoded, golden,
             "{name} is not canonical for the Rust decoder"
         );
+    }
+}
+
+#[test]
+fn say_is_a_wire_message_and_chat_events_are_forwarded() {
+    // The brain's line, as the Python side writes it.
+    let line = r#"{"t":"say","id":"s-0007","text":"bitti: 8 taş","priority":"urgent"}"#;
+    let parsed: BrainMessage = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        parsed,
+        BrainMessage::Say {
+            id: "s-0007".to_owned(),
+            text: "bitti: 8 taş".to_owned(),
+            priority: crate::wire::SayPriority::Urgent,
+        }
+    );
+    // Priority is optional on the wire.
+    let bare: BrainMessage = serde_json::from_str(r#"{"t":"say","id":"s-1","text":"x"}"#).unwrap();
+    assert!(matches!(bare, BrainMessage::Say { priority: crate::wire::SayPriority::Normal, .. }));
+    assert_eq!(serde_json::to_string(&Capability::Say).unwrap(), "\"say\"");
+
+    for event in [
+        EventKind::ChatReceived {
+            sender: "00".to_owned(),
+            text: "durum".to_owned(),
+            control: Some("status".to_owned()),
+        },
+        EventKind::ChatSent {
+            id: "s-1".to_owned(),
+            text: "x".to_owned(),
+        },
+        EventKind::ChatDropped {
+            id: "s-1".to_owned(),
+            reason: "stale".to_owned(),
+        },
+    ] {
+        assert!(forwards(&event), "{event:?} must reach the brain");
     }
 }

@@ -751,4 +751,38 @@ mod tests {
             "the first selection of the new life must reach the server"
         );
     }
+
+    #[test]
+    fn a_chat_line_in_a_frame_is_one_unsigned_chat_packet_and_a_report() {
+        let mut state = PlayState::new(
+            false,
+            None,
+            None,
+            None,
+            Vec3::ZERO,
+            LookDirection::default(),
+        );
+        let body = Body::new(Vec3::ZERO);
+        let world = World::new();
+        let mut frame = ControlFrame::new(0, body.generation(), Held::NONE);
+        let (silent, quiet) = plan(&mut state.actuator, &body, &world, &frame, 0);
+        assert!(silent.is_empty() && quiet.chat.is_none());
+
+        frame.chat = Some("tamam: 8 taş".to_owned());
+        let (packets, report) = plan(&mut state.actuator, &body, &world, &frame, 0);
+        let chats: Vec<_> = packets
+            .iter()
+            .filter_map(|packet| match packet {
+                Outgoing::Packet(packet) => match packet.as_ref() {
+                    ServerboundGamePacket::Chat(chat) => Some(chat.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].message, "tamam: 8 taş");
+        assert!(chats[0].signature.is_none(), "offline 26.3 takes unsigned chat");
+        assert_eq!(report.chat.as_deref(), Some("tamam: 8 taş"));
+    }
 }

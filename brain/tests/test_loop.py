@@ -1931,6 +1931,8 @@ def test_a_stop_before_the_body_accepts_is_sent_on_accept() -> None:
 
     loop = Loop.__new__(Loop)
     loop._written, loop._open_goal = None, opened
+    # `_pop_suspended` reads the preempted goals (`__init__` owns the list).
+    loop._suspended = []
     loop.records = Records()
     loop.session = SimpleNamespace(port=SimpleNamespace(pop=pops.append), snapshot={})
     loop.evidence = SimpleNamespace(write=lambda kind, **_: lines.append(kind))

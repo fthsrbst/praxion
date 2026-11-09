@@ -38,6 +38,7 @@ from praxion_brain.port import (
     Ping,
     Pong,
     Pop,
+    Say,
     PortClosed,
     ProtocolError,
     ResyncRequest,
@@ -85,6 +86,8 @@ class FakeBody:
         stale_ticks: int = 0,
         send_snapshot_on_connect: bool = True,
         handshake_timeout: float = HANDSHAKE_TIMEOUT_S,
+        caps: Optional[list[str]] = None,
+        chat_reply: str = "sent",
     ) -> None:
         self.host = host
         self.port_version = port_version
@@ -95,6 +98,11 @@ class FakeBody:
         self.max_stack = max_stack
         self.send_snapshot_on_connect = send_snapshot_on_connect
         self.handshake_timeout = handshake_timeout
+        #: What the hello advertises; add "say" to let the brain talk.
+        self.caps = list(caps) if caps is not None else ["command", "snapshot", "pop"]
+        #: ``sent`` or ``dropped``: what the body answers to a `say` line.
+        self.chat_reply = chat_reply
+        self.says: list[Any] = []
 
         self.generation = generation
         self.tick = tick
@@ -252,6 +260,8 @@ class FakeBody:
             if intent_id is None:
                 raise KeyError(f"no accepted command {command_id!r}")
             self.stack = [entry for entry in self.stack if entry.intent_id != intent_id]
+            if self.stack and not any(entry.state == "running" for entry in self.stack):
+                self.stack[-1].state = "running"
             record = {
                 "command_id": command_id,
                 "outcome": outcome,
@@ -365,7 +375,7 @@ class FakeBody:
                 conn,
                 Hello(
                     port_version=self.port_version,
-                    caps=["command", "snapshot", "pop"],
+                    caps=list(self.caps),
                     body=self.body,
                     run_id=self.run_id,
                 ),
@@ -440,6 +450,18 @@ class FakeBody:
                 self.pings += 1
                 self._send(Pong(seq=self.seq, tick=self.tick))
             return
+        if isinstance(message, Say):
+            with self._state:
+                self.says.append(message)
+                if self.chat_reply == "dropped":
+                    self._emit_locked(
+                        {"kind": "chat_dropped", "id": message.id, "reason": "stale"}
+                    )
+                else:
+                    self._emit_locked(
+                        {"kind": "chat_sent", "id": message.id, "text": message.text}
+                    )
+            return
         if isinstance(message, ResyncRequest):
             self._send_snapshot()
             return
@@ -496,6 +518,11 @@ class FakeBody:
             self._receipt(command_id=command.id, state="rejected", reason="stack_full")
             return
 
+        # A newer command suspends the running one (session 9); the older
+        # command resumes when the newer settles (see `settle`).
+        for older in self.stack:
+            if older.state == "running":
+                older.state = "suspended"
         self.generation += 1
         self._next_intent += 1
         entry = StackEntry(

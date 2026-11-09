@@ -17,7 +17,9 @@ path = "src/main.rs"
 [dependencies]
 env_logger = "0.11"
 log = "0.4"
+azalea-protocol = { path = "../../../third_party/azalea/azalea-protocol", default-features = false, features = ["connecting"] }
 praxion-arbiter = { path = "../arbiter" }
+praxion-decoder = { path = "../decoder" }
 praxion-eventlog = { path = "../eventlog" }
 praxion-facts = { path = "../facts" }
 praxion-headless = { path = "../headless" }
@@ -38,4 +40,6 @@ serde_json = "1.0"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
+azalea-chat = { path = "../../../third_party/azalea/azalea-chat" }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
+uuid = "1.29"

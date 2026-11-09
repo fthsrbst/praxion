@@ -67,8 +67,8 @@ pub use server::{
     ConnectionState, DEFAULT_QUEUE_CAPACITY, PortConfig, PortServer, PortStats, PublishOutcome,
 };
 pub use wire::{
-    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, Snapshot,
-    StackEntry,
+    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, SayPriority,
+    Snapshot, StackEntry,
 };
 
 /// Whether one event-log line is forwarded to the brain (proposal §2.2).
@@ -86,6 +86,9 @@ pub fn forwards(event: &praxion_eventlog::EventKind) -> bool {
         | EventKind::ReplanNeeded { .. }
         | EventKind::WakeBrain { .. }
         | EventKind::CommandReceipt { .. }
+        | EventKind::ChatReceived { .. }
+        | EventKind::ChatSent { .. }
+        | EventKind::ChatDropped { .. }
         | EventKind::RunStarted { .. } => true,
         // Notes are debug text (the gaze writes one almost every tick); they
         // filled the 256-message queue and a goal's `settled` receipt was lost

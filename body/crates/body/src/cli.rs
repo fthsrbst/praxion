@@ -6,7 +6,7 @@
 //!              [--max-ticks N] [--settings body/config/reflexes.toml]
 //!              [--skills body/skills] [--candidates DIR]
 //!              [--start-delay-ticks N] [--style-seed N] [--linger-ticks N]
-//!              [--verbose]
+//!              [--operator NAME]... [--verbose]
 //!
 //! praxion-body --forwarder ... --tee ... --run-dir runs/<id> --port 127.0.0.1:P
 //!
@@ -20,6 +20,11 @@
 //! directory is watched: a new or changed file reloads the program before the
 //! next command is accepted, so a skill admitted after the body started is
 //! playable without a restart.
+//!
+//! `--operator` names a player whose chat the body obeys (repeatable; the
+//! harness passes the watcher's name). Their lines are read from
+//! `ClientboundPlayerChat` by sender UUID; `dur`, `iptal`, `durum` and `devam`
+//! are acted on by the body itself, any other line goes to the brain.
 //!
 //! `--goal` is required unless `--port` is set: a port session takes its goals
 //! from the brain, and `--goal` (when given) is injected as command `cli` so
@@ -54,6 +59,13 @@ pub struct Args {
     pub style_seed: u64,
     pub linger_ticks: u64,
     pub verbose: bool,
+    /// Player names whose chat the body obeys (`--operator`, repeatable). With
+    /// none the body reads no chat at all (architecture §7).
+    pub operators: Vec<String>,
+    /// The prefix an operator's task line needs in chat (`--chat-prefix`,
+    /// `p:` by default); an empty value accepts every line as a task
+    /// (decision 2026-11-09 "Chat: control words bare, tasks with a prefix").
+    pub chat_prefix: String,
 }
 
 impl Args {
@@ -73,6 +85,8 @@ impl Args {
         let mut style_seed = 0;
         let mut linger_ticks = 60;
         let mut verbose = false;
+        let mut operators = Vec::new();
+        let mut chat_prefix = crate::chat::DEFAULT_TASK_PREFIX.to_owned();
 
         let mut args = args.into_iter().peekable();
         while let Some(flag) = args.next() {
@@ -80,6 +94,8 @@ impl Args {
                 "--forwarder" => forwarder = Some(address(&mut args, "--forwarder")?),
                 "--tee" => tee = Some(address(&mut args, "--tee")?),
                 "--name" => name = value(&mut args, "--name")?,
+                "--operator" => operators.push(value(&mut args, "--operator")?),
+                "--chat-prefix" => chat_prefix = value(&mut args, "--chat-prefix")?,
                 "--goal" => goal = Some(value(&mut args, "--goal")?),
                 "--goal-args" => {
                     // Every following token that is not a flag is a goal
@@ -158,6 +174,8 @@ impl Args {
             style_seed,
             linger_ticks,
             verbose,
+            operators,
+            chat_prefix,
         })
     }
 }
@@ -330,6 +348,28 @@ mod tests {
             CheckArgs::parse(std::iter::empty()).unwrap_err(),
             "--candidates is required"
         );
+    }
+
+    #[test]
+    fn operators_are_repeatable_and_default_to_none() {
+        let base = [
+            "--forwarder", "127.0.0.1:1", "--tee", "127.0.0.1:2", "--goal", "g", "--run-dir", "r",
+        ];
+        let args = parse(&base).unwrap();
+        assert!(args.operators.is_empty(), "no operator, no chat");
+        assert_eq!(args.chat_prefix, "p:", "tasks need `p:` unless configured");
+        let mut with = base.to_vec();
+        with.extend(["--operator", "Fatih", "--operator", "Ayse"]);
+        assert_eq!(parse(&with).unwrap().operators, vec!["Fatih", "Ayse"]);
+
+        // Decision 2026-11-09: the task prefix is configurable; empty means
+        // every operator line is a task.
+        let mut custom = base.to_vec();
+        custom.extend(["--chat-prefix", "görev:"]);
+        assert_eq!(parse(&custom).unwrap().chat_prefix, "görev:");
+        let mut none = base.to_vec();
+        none.extend(["--chat-prefix", ""]);
+        assert_eq!(parse(&none).unwrap().chat_prefix, "");
     }
 
     #[test]

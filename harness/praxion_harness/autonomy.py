@@ -6,6 +6,14 @@ Starts a fresh-seed body in port mode (peaceful, daytime, nothing given),
 prints the address a real client can join to watch, runs
 ``python -m praxion_brain run --port N`` until the time is up, then prints the
 referee inventory and where the evidence is.
+
+The body obeys the chat of the player named by ``--operator`` (default
+``Fatih``, the watcher): ``dur``, ``iptal``, ``durum`` and ``devam`` act bare; a
+task needs the prefix ``p:`` (``p: 8 taş getir``, ``--chat-prefix`` changes it,
+an empty prefix takes every line as a task); any other chat stays chat. The
+brain maps a task to a goal and the bot answers in Turkish. Join under that
+name or nothing you type is read (decision 2026-11-09 "Chat: control words
+bare, tasks with a prefix").
 """
 
 from __future__ import annotations
@@ -29,11 +37,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seed", type=int, default=303)
     parser.add_argument("--minutes", type=float, default=25.0)
+    parser.add_argument(
+        "--operator",
+        default="Fatih",
+        help="the player name whose chat the bot obeys (the one who watches)",
+    )
     args = parser.parse_args(argv)
 
     root = repo_root()
-    with start_session(args.seed, setup=_peaceful, max_ticks=10**9, keep=True) as session:
+    with start_session(
+        args.seed,
+        setup=_peaceful,
+        max_ticks=10**9,
+        keep=True,
+        extra_args=["--operator", args.operator],
+    ) as session:
         print(f"Watch: Minecraft 26.3 > Direct Connection > 127.0.0.1:{session.server.port}", flush=True)
+        print(f"Join as {args.operator!r}: the bot reads only this player's chat", flush=True)
         print(f"body port {session.port}, run_dir {session.run_dir}", flush=True)
         print("Console: http://127.0.0.1:8765/", flush=True)
         # The body watches this directory: a skill admitted mid-run is live on

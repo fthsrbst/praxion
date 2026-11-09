@@ -6,6 +6,7 @@
 //! The wire is in [`driver`]; the counters and `summary.json` in [`summary`];
 //! paths and version pins in this module; the session loop in `main.rs`.
 
+pub mod chat;
 pub mod cli;
 pub mod driver;
 pub mod summary;

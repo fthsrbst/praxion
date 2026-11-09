@@ -212,6 +212,17 @@ class Pop(_Message):
     intent_id: int = Field(ge=0, le=U64_MAX)
 
 
+class Say(_Message):
+    """One line for the game chat (talk slice 1). Sent only when the body's
+    ``hello.caps`` lists ``say``; the body answers with ``chat_sent`` or
+    ``chat_dropped`` carrying ``id``."""
+
+    t: Literal["say"] = "say"
+    id: str
+    text: str = Field(max_length=200)
+    priority: Literal["urgent", "normal", "droppable"] = "normal"
+
+
 class ResyncRequest(_Message):
     t: Literal["resync_request"] = "resync_request"
 
@@ -221,7 +232,7 @@ class Ping(_Message):
 
 
 BodyMessage = Union[Hello, EventMessage, Snapshot, Dropped, Pong, Bye]
-ClientMessage = Union[ClientHello, Command, Pop, ResyncRequest, Ping]
+ClientMessage = Union[ClientHello, Command, Pop, Say, ResyncRequest, Ping]
 
 _BODY_ADAPTER: TypeAdapter[Any] = TypeAdapter(BodyMessage)
 _CLIENT_ADAPTER: TypeAdapter[Any] = TypeAdapter(ClientMessage)
@@ -383,6 +394,7 @@ class PortClient:
         self._last_received: Optional[float] = None
         self._last_sent: Optional[float] = None
         self._command_number = 0
+        self._line_number = 0
         #: The loop sends commands while the reader thread pings, so one frame
         #: must never interleave with another on the wire.
         self._write_lock = threading.Lock()
@@ -560,6 +572,32 @@ class PortClient:
         command_id = command_id or self.new_command_id()
         self._send(Pop(id=command_id, intent_id=intent_id))
         return command_id
+
+    @property
+    def supports_say(self) -> bool:
+        """Whether the connected body advertised the ``say`` capability."""
+        return self.hello is not None and "say" in self.hello.caps
+
+    def new_line_id(self) -> str:
+        """A brain-run-unique chat line id: ``s-0001``, ``s-0002``, ..."""
+        self._line_number += 1
+        return f"s-{self._line_number:04d}"
+
+    def say(
+        self,
+        text: str,
+        *,
+        line_id: Optional[str] = None,
+        priority: str = "normal",
+    ) -> str:
+        """Send one chat line and return its id. Raises :class:`PortError` when
+        the body did not advertise ``say`` (an old body keeps working: the
+        caller falls back to console-only narration)."""
+        if not self.supports_say:
+            raise PortError("the body does not advertise the say capability")
+        line_id = line_id or self.new_line_id()
+        self._send(Say(id=line_id, text=text, priority=priority))
+        return line_id
 
     def resync(self) -> None:
         """Ask for a snapshot; later events are held until it arrives.

@@ -142,6 +142,8 @@ pub struct ControlFrame {
     pub menu: Option<MenuAction>,
     /// How `menu` is performed.
     pub menu_mode: MenuMode,
+    /// One line to say in game chat, sent unsigned. At most one per frame.
+    pub chat: Option<String>,
 }
 
 impl ControlFrame {
@@ -156,6 +158,7 @@ impl ControlFrame {
             select_slot: None,
             menu: None,
             menu_mode: MenuMode::Click,
+            chat: None,
         }
     }
 }

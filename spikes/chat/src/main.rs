@@ -553,13 +553,83 @@ async fn writer_loop(
     Ok(())
 }
 
+/// Operator mode (`--operator NAME --say DELAY:TEXT ...`): one client that logs
+/// in under `name` and sends each line `DELAY` seconds after it is in play. It
+/// is the fake operator of the talking-bot smoke test
+/// (`harness/tests/test_talk_smoke.py`): the real user's client, minus the
+/// window. Every chat packet it sees is logged like in the two-client spike.
+async fn run_operator(
+    addr: SocketAddr,
+    name: &str,
+    says: Vec<(f64, String)>,
+    deadline: Instant,
+) -> Result<(), String> {
+    let conn = log_in(addr, name).await?;
+    let (reader, mut writer) = conn.into_split();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let flags = Arc::new(Flags::default());
+    let reading = tokio::spawn(read_loop(Role::Listener, flags, reader, tx));
+    let start = Instant::now();
+    let mut schedule: Vec<(Instant, String)> = says
+        .into_iter()
+        .map(|(delay, text)| (start + Duration::from_secs_f64(delay), text))
+        .collect();
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::select! {
+            message = rx.recv() => {
+                let Some(message) = message else { break };
+                write(&mut writer, name, message.label, message.packet, message.fields).await?;
+            }
+            () = sleep_until(tokio::time::Instant::from_std(now + TICK)) => {}
+        }
+        writer
+            .write(ServerboundGamePacket::ClientTickEnd(ServerboundClientTickEnd))
+            .await
+            .map_err(|error| format!("{name}: tick end: {error}"))?;
+        while let Some(index) = schedule.iter().position(|(at, _)| *at <= Instant::now()) {
+            let (_, text) = schedule.remove(index);
+            write(
+                &mut writer,
+                name,
+                "chat",
+                ServerboundGamePacket::Chat(ServerboundChat {
+                    message: text.clone(),
+                    timestamp: unix_ms(),
+                    salt: 0,
+                    signature: None,
+                    last_seen_messages: Default::default(),
+                }),
+                json!({ "text": text, "signature": "none", "timestamp_ms": unix_ms() }),
+            )
+            .await?;
+        }
+    }
+    reading.abort();
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let mut addr: Option<SocketAddr> = None;
     let mut seconds: Option<f64> = None;
+    let mut operator: Option<String> = None;
+    let mut says: Vec<(f64, String)> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--operator" => operator = Some(args.next().ok_or("--operator needs a name")?),
+            "--say" => {
+                let value = args.next().ok_or("--say needs DELAY:TEXT")?;
+                let (delay, text) = value.split_once(':').ok_or("--say wants DELAY:TEXT")?;
+                says.push((
+                    delay.parse::<f64>().map_err(|error| format!("bad delay: {error}"))?,
+                    text.to_owned(),
+                ));
+            }
             "--addr" => {
                 addr = Some(
                     args.next()
@@ -582,6 +652,10 @@ async fn main() -> Result<(), String> {
     let addr = addr.ok_or("--addr is required")?;
     let seconds = seconds.unwrap_or(20.0);
     let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+
+    if let Some(name) = operator {
+        return run_operator(addr, &name, says, deadline).await;
+    }
 
     emit(event(
         "spike",

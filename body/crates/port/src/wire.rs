@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 /// refused with `bye { reason: "version" }`.
 pub const PORT_VERSION: u16 = 0;
 
-/// What a connection can be asked to do. The v0 body always advertises all
-/// three.
+/// What a connection can be asked to do. The body advertises every one it
+/// implements; the brain sends `say` only when `hello.caps` lists it
+/// (docs/decisions.md 2026-11-09 "Five next areas": the talking bot).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -24,6 +25,19 @@ pub enum Capability {
     /// Release an intent: cancel it when it runs, remove it when it is done or
     /// suspended.
     Pop,
+    /// Accept `say`: put one line of text into the game chat.
+    Say,
+}
+
+/// How urgent a `say` line is. The brain does all rate limiting and
+/// coalescing (critique finding 4); the body keeps the value for its log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SayPriority {
+    Urgent,
+    #[default]
+    Normal,
+    Droppable,
 }
 
 /// Why the body closes a connection.
@@ -139,4 +153,12 @@ pub enum BrainMessage {
     /// Ask for a snapshot at the current cut.
     ResyncRequest,
     Ping,
+    /// One line for the game chat, sent as an unsigned `ServerboundChat`. The
+    /// body answers with a `chat_sent` or `chat_dropped` event carrying `id`.
+    Say {
+        id: String,
+        text: String,
+        #[serde(default)]
+        priority: SayPriority,
+    },
 }

@@ -25,7 +25,7 @@ from .log import EvidenceLog
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8765
-ACTIONS = ("pause", "resume", "stop_goal", "new_goal")
+ACTIONS = ("pause", "resume", "stop_goal", "new_goal", "task")
 MAX_BODY_BYTES = 4096
 MAX_TEXT_CHARS = 200
 EVIDENCE_PAGE = 200
@@ -67,7 +67,16 @@ def check_control(body: Any) -> dict[str, Any]:
     if action not in ACTIONS:
         raise ValueError(f"action must be one of {', '.join(ACTIONS)}")
     request: dict[str, Any] = {"action": action}
-    if action == "new_goal":
+    if action == "task":
+        # Free text, mapped to a goal by the loop's command path (the same one
+        # chat uses); no condition needed. Newlines fold to spaces.
+        text = " ".join(str(body.get("text") or "").split())
+        if not text:
+            raise ValueError("a task needs text, e.g. \"8 taş getir\" or \"get cobblestone 8\"")
+        if len(text) > MAX_TEXT_CHARS:
+            raise ValueError(f"text is limited to {MAX_TEXT_CHARS} characters")
+        request["text"] = text
+    elif action == "new_goal":
         text = str(body.get("text") or "").strip()
         condition = str(body.get("condition") or "").strip()
         if not condition:

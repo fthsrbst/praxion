@@ -806,3 +806,12 @@ def test_loop_publishes_a_state_the_console_can_read(tmp_path) -> None:
             json.dumps(state)  # the server must be able to serialise it
         finally:
             loop.close()
+
+
+def test_the_task_action_takes_free_text_without_a_condition(server, console) -> None:
+    status, body = call(server, "POST", "/api/control", {"action": "task", "text": "8 taş\ngetir"})
+    assert status == 202 and body["queued"] == "task"
+    assert console.control.drain() == [{"action": "task", "text": "8 taş getir"}]
+    for bad in ({"action": "task"}, {"action": "task", "text": "   "}, {"action": "task", "text": "x" * 201}):
+        status, _ = call(server, "POST", "/api/control", bad)
+        assert status == 400
