@@ -5,6 +5,34 @@ Proposals and ideas stay in `notes.md` until they are decided here.
 
 ## 2026-11-10
 
+From run 9 (seed 606): the night watch now starts live, but the bot died three times at night. The melee reflex and
+`hunt` fought over one skeleton, sheltering by digging down left the bot open to arrows or failed `unsafe_drop`, and
+failed survival goals were blocked for two hours so the bot went gathering in the dark. All four approved by the user,
+each the recommended option.
+
+- **The skill that started a fight owns it (user).** While the running skill's in-flight primitive targets a mob
+  (`attack` or `move_to` of that kind or id) and health is above the flee threshold, the melee reflex leaves that mob to
+  the skill. Flee at low health, another mob, and every higher-priority reflex (arrow, creeper, lava, fire, drowning)
+  still take the body; a higher-priority trigger may preempt a running lower one. The reflex gets an exit range above
+  its trigger range and a short cooldown after any end, and renews in place instead of ending and re-grabbing. The
+  attack reach of `hunt` and the reflex trigger come from one shared constant. Rules out: the reflex doing all melee.
+- **Unarmed at night: avoid contact (user).** Without a sword at night the bot never hunts and does no ladder work; it
+  shelters or waits. If a mob reaches it anyway it fights back with full-charge swings while health is above the
+  threshold and flees only from mobs slower than a sprinting player (zombie); spider speed is to be measured.
+- **A sealed shelter now (user).** A `shelter()` primitive: dig two blocks straight down where the body stands and
+  place a block over the head (the dug dirt or any held block); where it cannot dig down safely, wall the body in by
+  placing blocks around and above it. A `sheltered()` fact says the cell over the head is solid and the body is enclosed.
+  `take_shelter` becomes "until morning: not sheltered -> shelter, else wait". Rules out: digging a stair down with
+  the sky open (run 9 death 1).
+- **Survival goals are never failure-blocked (user).** Night, shelter and food goals are exempt from the two-hour
+  failure block; a failed survival skill is not picked again for 600 ticks instead. While a night goal is due or backing
+  off, the brain starts no ladder goal at night (it waits). Rules out: expiring the block at dawn.
+
+Technical fixes with no design choice (Claude): a brain `resync_request` no longer drops queued events (run 9's four
+`dropped` notices lost settled receipts; the console's 1 Hz watch resync is removed, the body pushes a snapshot every
+second anyway); `mine` aims at a reachable face of its target, digs through a soft occluder, and rejects a target it
+cannot see for the rest of the call; the death message comes from the session's own `PlayerCombatKill`.
+
 From run 8 (seed 606): a creeper explosion desynchronised the body's world mirror (26.3 `ClientboundExplode` gained a
 trailing `playSound` bool), the body stayed blind and frozen for 36 minutes, served stale facts, and died three times
 at night while the brain idled during a skill admission. All three approved by the user, each the recommended option.
