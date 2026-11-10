@@ -32,7 +32,9 @@
 //! Every body message except `hello` and `bye` carries `seq`: an event's
 //! message `seq` is the event-log `seq`; the other messages carry the last
 //! event `seq` known when they were sent. A `resync_request` is answered with
-//! one `snapshot` at seq S and events with `seq > S` follow.
+//! the next snapshot the driver publishes, cut at the last sent seq S, and
+//! events with `seq > S` follow; it never discards a queued event (only a real
+//! overflow does, and says so with `dropped(n)`).
 //!
 //! The crate is standalone: [`PortServer`] runs the network side on its own
 //! thread, and the driver calls [`PortServer::publish`],

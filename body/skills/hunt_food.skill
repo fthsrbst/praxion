@@ -1,0 +1,25 @@
+# Hunt passive animals until n food items are held. The hunting half of
+# `get_food`, split out so `get_food` can first leave a shelter and still keep
+# the core's six-rule limit (run 9, third review): a body sealed in at night
+# whose food bar turned critical used to start hunting from inside the
+# shelter, find nothing, fail, and stay sealed.
+#
+# Why the rules are ordered this way: the goal check is on top, so the skill
+# also works on its own. Then the animal that is in sight is hunted, cow first
+# (the most meat), then pig, sheep and chicken; `hunt` ends by itself when the
+# kill and the pickup are done, and this skill looks again. Raw meat counts as
+# food: `eat_food` eats whatever the arbiter chooses, and cooking (`cook_food`)
+# is a separate goal because it needs a furnace. With no animal in sight the
+# body explores for a cow; an animal that comes into sight on the way is
+# hunted on the next tick, because every tick starts at the top. `explore` ends
+# when a cow is within 24 blocks; a failed search ends the skill `not_found`
+# after the usual three tries, and the caller decides what then.
+skill hunt_food(n: int = 2)
+  doc "Have n food items: hunt cows, pigs, sheep and chickens in sight (else explore for a cow) and pick up the meat."
+  rules:
+    count_food() >= $n -> done
+    near_entity(cow, 24) -> do hunt(cow, beef)
+    near_entity(pig, 24) -> do hunt(pig, porkchop)
+    near_entity(sheep, 24) -> do hunt(sheep, mutton)
+    near_entity(chicken, 24) -> do hunt(chicken, chicken)
+    true -> explore(cow)

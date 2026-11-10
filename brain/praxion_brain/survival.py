@@ -27,6 +27,11 @@ from .skills import SkillCatalog
 #: own ``eat_hard_threshold`` (``body/config/reflexes.toml``): the point where
 #: the arbiter eats at once and, with nothing to eat, wakes the brain.
 HUNGRY_AT = 6
+#: Food at or below this lets ``get_food`` hunt at night even unarmed or
+#: sheltered (decision 2026-11-10 "Hungry at night: hunt only when it is
+#: critical"). Above it such a body eats what it carries (the body's arbiter
+#: meal) and does not hunt in the dark.
+CRITICAL_FOOD_AT = 3
 #: Food items ``get_food`` collects.
 FOOD_GOAL_COUNT = 2
 #: Health at or below this, or no sword, sends the body into a shelter at night.
@@ -39,10 +44,17 @@ SHELTER_SKILL = "take_shelter"
 #: The survival skills, so a live one in the snapshot's stack means "already
 #: running", never "start another".
 SURVIVAL_SKILLS = frozenset({FOOD_SKILL, NIGHT_SKILL, SHELTER_SKILL})
+#: The night survival skills: the only survival goals critical food interrupts.
+NIGHT_SKILLS = frozenset({NIGHT_SKILL, SHELTER_SKILL})
 
 #: The goal conditions: verifiable by the body at settle time.
 FOOD_CONDITION = f"count_food() >= {FOOD_GOAL_COUNT}"
 NIGHT_CONDITION = "not is_night()"
+#: The morning goal of a body still sealed in by day: ``take_shelter`` waits
+#: until sunrise, then ``leave_shelter()`` opens the cover and the skill ends.
+#: ``not is_night()`` is already true by day, so it cannot be this goal's
+#: condition.
+LEAVE_CONDITION = "not sheltered()"
 
 #: Stack states a live intent can be in (``IntentState`` minus ``done``).
 LIVE_STATES = frozenset({"running", "suspended", "frozen_for_carry_on"})
@@ -56,12 +68,29 @@ LIVE_STATES = frozenset({"running", "suspended", "frozen_for_carry_on"})
 #: ends is a bug, a night goal that ends at dawn is the design.
 NIGHT_BUDGET_TICKS = 12_000
 
+#: Ticks a survival skill is not picked again after its goal failed (30 s).
+#: Survival goals are never failure-blocked (decision 2026-11-10 "Survival goals
+#: are never failure-blocked"): run 9's two failed shelters blocked the night
+#: goal for two hours and the bot went gathering in the dark. The back-off is
+#: kept by the loop in memory only, never persisted.
+SURVIVAL_BACKOFF_TICKS = 600
+
+#: The back-off doubles on each further failure of the same skill, up to this
+#: (a failed night ``get_food`` must not reopen the shelter every 600 ticks all
+#: night; fourth review of run 9, finding 2). A success resets it.
+SURVIVAL_BACKOFF_MAX_TICKS = 6000
+
+#: Consecutive failed ``take_shelter`` goals by day after which a body that
+#: cannot get out stops holding ladder work (a ladder goal may dig out; the
+#: hold must not last all day; fourth review, finding 1).
+LEAVE_GIVE_UP = 3
+
 
 @dataclass(frozen=True)
 class SurvivalGoal:
     """One survival goal due now: the skill that plays it and why."""
 
-    kind: str  # "food" | "night"
+    kind: str  # "food" | "night" | "leave"
     skill: str
     proposal: GoalProposal
     reason: str
@@ -72,7 +101,9 @@ class SurvivalGoal:
     @property
     def budget_ticks(self) -> Optional[int]:
         """The per-goal budget override; ``None`` leaves the loop's default."""
-        return NIGHT_BUDGET_TICKS if self.kind == "night" else None
+        # A leave goal can start sealed at dusk and wait the whole night for
+        # sunrise, so it gets the night budget too (fourth review, finding 3).
+        return NIGHT_BUDGET_TICKS if self.kind in ("night", "leave") else None
 
 
 def _held_food(inventory: Mapping[str, int]) -> int:
@@ -108,22 +139,121 @@ def _live_skills(stack: Optional[Sequence[Mapping[str, Any]]]) -> frozenset[str]
     )
 
 
+def _backing_off(
+    skill: str, backoff: Optional[Mapping[str, int]], tick: Optional[int]
+) -> bool:
+    """Whether ``skill`` failed less than :data:`SURVIVAL_BACKOFF_TICKS` ago."""
+    until = (backoff or {}).get(skill)
+    return until is not None and int(tick or 0) < until
+
+
+def sealed_by_day(facts: Optional[Mapping[str, Any]]) -> bool:
+    """Whether the body is sealed in its shelter while it is not night.
+
+    Only ``take_shelter`` opens the shelter, so every night goal that ends
+    early (a user goal, its budget, a recovery, a failed ``leave_shelter()``)
+    leaves the body shut in, where every ladder goal fails. ``is_night()``
+    false covers the hour before sunrise (23000 to 24000) too: there
+    ``take_shelter`` waits sealed and opens at sunrise.
+    """
+    return (
+        bool(facts)
+        and facts.get("world_valid") is not False
+        and facts.get("sheltered") is True
+        and facts.get("is_night") is False
+    )
+
+
+def _sheltered(
+    facts: Mapping[str, Any],
+    stack: Optional[Sequence[Mapping[str, Any]]],
+    inventory: Mapping[str, int],
+) -> bool:
+    """Whether the body is in its shelter: the ``sheltered`` fact when the
+    facts carry it, else a live ``take_shelter`` in the stack.
+
+    A snapshot read through :class:`~praxion_brain.port.Facts` always carries
+    the key (the body sends it only when true, absent reads false); the stack
+    fallback serves facts that lack the key altogether.
+
+    The snapshot stack lists each intent's root skill only (the body's
+    ``publish_state``), never the children a skill runs, so a ``take_shelter``
+    that ``night_watch`` runs is invisible. ``night_watch`` runs it exactly when
+    its own shelter rule holds (health 10 or less, or no sword): a live
+    ``night_watch`` at night on that rule counts as sheltered too.
+    """
+    if "sheltered" in facts:
+        return facts.get("sheltered") is True
+    live = _live_skills(stack)
+    if SHELTER_SKILL in live:
+        return True
+    return (
+        NIGHT_SKILL in live
+        and facts.get("is_night") is True
+        and _night_skill(facts, inventory) == SHELTER_SKILL
+    )
+
+
+def critical_food(facts: Optional[Mapping[str, Any]]) -> bool:
+    """Whether the food bar is at :data:`CRITICAL_FOOD_AT` or below.
+
+    Only then may ``get_food`` interrupt an open night goal (decision
+    2026-11-10 "Hungry at night: hunt only when it is critical").
+    """
+    food = (facts or {}).get("food")
+    return (
+        isinstance(food, (int, float))
+        and not isinstance(food, bool)
+        and food <= CRITICAL_FOOD_AT
+    )
+
+
+def _hunt_held_at_night(
+    facts: Mapping[str, Any],
+    food: float,
+    inventory: Mapping[str, int],
+    stack: Optional[Sequence[Mapping[str, Any]]],
+) -> bool:
+    """Whether a hungry body must not hunt now: night, unarmed or sheltered,
+    and the food bar above :data:`CRITICAL_FOOD_AT`."""
+    return (
+        facts.get("is_night") is True
+        and food > CRITICAL_FOOD_AT
+        and (not _armed(inventory) or _sheltered(facts, stack, inventory))
+    )
+
+
+def _night_skill(facts: Mapping[str, Any], inventory: Mapping[str, int]) -> str:
+    health = facts.get("health")
+    hurt = isinstance(health, (int, float)) and health <= SHELTER_HEALTH
+    return SHELTER_SKILL if hurt or not _armed(inventory) else NIGHT_SKILL
+
+
 def choose(
     facts: Optional[Mapping[str, Any]],
     inventory: Mapping[str, int],
     catalog: SkillCatalog,
-    memory: Any = None,
     stack: Optional[Sequence[Mapping[str, Any]]] = None,
+    *,
+    backoff: Optional[Mapping[str, int]] = None,
+    tick: Optional[int] = None,
 ) -> Optional[SurvivalGoal]:
     """The survival goal due now, or ``None``.
 
-    Hunger first: food at :data:`HUNGRY_AT` or below with no food held. Then
+    Hunger first: food at :data:`HUNGRY_AT` or below with no food held, except
+    at night while unarmed or sheltered, where ``get_food`` (which hunts) waits
+    until food is at :data:`CRITICAL_FOOD_AT` or below. Then
     night: ``night_watch`` when armed and healthy, ``take_shelter`` when hurt or
-    unarmed. A goal whose skill the catalog lacks, or that failure memory blocks,
-    is skipped (the body's own fallback covers the night). A skill already live
-    in ``stack`` is not started twice. ``facts`` is the snapshot's body facts;
-    without them nothing is decided, and neither with a desynchronised world
-    (``world_valid`` false, decision 2026-11-10): its facts are stale.
+    unarmed. By day a body still sealed in (:func:`sealed_by_day`) gets
+    ``take_shelter`` again, which waits for sunrise and then leaves the
+    shelter (its goal is ``not sheltered()``). A goal whose skill the catalog
+    lacks is skipped (the body's own
+    fallback covers the night). Failure memory never blocks a survival goal;
+    a skill whose goal failed is skipped until ``backoff[skill]`` (a body tick,
+    kept by the loop) has passed ``tick``. A skill already live in ``stack`` is
+    not started twice. ``facts`` is the snapshot's body facts; without them
+    nothing is decided, and neither with a desynchronised world (``world_valid``
+    false, decision 2026-11-10): its facts are stale.
     """
     if not facts or facts.get("world_valid") is False:
         return None
@@ -136,7 +266,7 @@ def choose(
             return False
         if catalog.by_name(skill) is None:
             return False
-        if memory is not None and memory.is_blocked(condition):
+        if _backing_off(skill, backoff, tick):
             return False
         # A goal already true needs nothing (the facts are the same ones the body
         # will evaluate at settle time).
@@ -148,6 +278,7 @@ def choose(
         and not isinstance(food, bool)
         and food <= HUNGRY_AT
         and _held_food(inventory) == 0
+        and not _hunt_held_at_night(facts, food, inventory, stack)
         and usable(FOOD_SKILL, FOOD_CONDITION)
     ):
         return SurvivalGoal(
@@ -161,10 +292,20 @@ def choose(
             reason=f"food {int(food)} and nothing to eat",
         )
 
+    if sealed_by_day(facts) and usable(SHELTER_SKILL, LEAVE_CONDITION):
+        return SurvivalGoal(
+            kind="leave",
+            skill=SHELTER_SKILL,
+            proposal=GoalProposal(
+                text="leave the shelter",
+                condition=LEAVE_CONDITION,
+                rationale="sealed in by day",
+            ),
+            reason="sealed in by day",
+        )
+
     if facts.get("is_night") is True:
-        health = facts.get("health")
-        hurt = isinstance(health, (int, float)) and health <= SHELTER_HEALTH
-        skill = SHELTER_SKILL if hurt or not _armed(inventory) else NIGHT_SKILL
+        skill = _night_skill(facts, inventory)
         if usable(skill, NIGHT_CONDITION):
             return SurvivalGoal(
                 kind="night",
@@ -179,18 +320,68 @@ def choose(
     return None
 
 
+def night_hold(
+    facts: Optional[Mapping[str, Any]],
+    inventory: Mapping[str, int],
+    stack: Optional[Sequence[Mapping[str, Any]]] = None,
+    *,
+    backoff: Optional[Mapping[str, int]] = None,
+    tick: Optional[int] = None,
+    failures: Optional[Mapping[str, int]] = None,
+) -> Optional[str]:
+    """Why no ladder or proposer goal may start now, or ``None``.
+
+    At night the brain waits instead of working (decisions 2026-11-10
+    "Unarmed at night: avoid contact" and "Survival goals are never
+    failure-blocked"): while unarmed, while the night skill is backing off after
+    a failure, and while a night skill is already live in ``stack`` (the body's
+    own fallback: a ladder command would preempt it). By day a body still
+    sealed in waits too (:func:`sealed_by_day`): every ladder goal would fail
+    inside the shelter, so the pick waits until ``take_shelter`` has opened it
+    (it is backing off, running, or missing from the catalog). Call it only
+    after :func:`choose` found nothing to start; a user goal is picked before
+    both.
+    """
+    if sealed_by_day(facts) and (failures or {}).get(SHELTER_SKILL, 0) < LEAVE_GIVE_UP:
+        if _backing_off(SHELTER_SKILL, backoff, tick):
+            return f"sealed in by day, {SHELTER_SKILL} backing off after a failure"
+        if SHELTER_SKILL in _live_skills(stack):
+            return f"sealed in by day, {SHELTER_SKILL} is running"
+        return "sealed in by day"
+    if not facts or facts.get("world_valid") is False or facts.get("is_night") is not True:
+        return None
+    if not _armed(inventory):
+        return "unarmed at night"
+    skill = _night_skill(facts, inventory)
+    if _backing_off(skill, backoff, tick):
+        return f"{skill} backing off after a failure"
+    live = _live_skills(stack) & {NIGHT_SKILL, SHELTER_SKILL}
+    if live:
+        return f"{sorted(live)[0]} is running"
+    return None
+
+
 __all__ = [
+    "CRITICAL_FOOD_AT",
     "FOOD_CONDITION",
     "FOOD_GOAL_COUNT",
     "FOOD_SKILL",
     "HUNGRY_AT",
+    "LEAVE_CONDITION",
     "LIVE_STATES",
     "NIGHT_BUDGET_TICKS",
     "NIGHT_CONDITION",
     "NIGHT_SKILL",
+    "NIGHT_SKILLS",
     "SHELTER_HEALTH",
     "SHELTER_SKILL",
+    "SURVIVAL_BACKOFF_TICKS",
+    "SURVIVAL_BACKOFF_MAX_TICKS",
+    "LEAVE_GIVE_UP",
     "SURVIVAL_SKILLS",
     "SurvivalGoal",
     "choose",
+    "critical_food",
+    "night_hold",
+    "sealed_by_day",
 ]

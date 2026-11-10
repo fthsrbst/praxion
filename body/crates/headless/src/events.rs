@@ -11,7 +11,15 @@ pub enum Event {
     Disconnected(String),
     /// Our player died. With `auto_respawn` the session has already asked to
     /// respawn.
-    Died,
+    ///
+    /// `message` is the death message from this session's own
+    /// `ClientboundPlayerCombatKill`, rendered as plain English text: the
+    /// server sends the vanilla translation (`death.attack.arrow` with the
+    /// victim and killer as arguments) and azalea renders it with its bundled
+    /// `en_us` table, so it reads "Praxion was shot by Skeleton". `None` when
+    /// a zero-health update reported the death before the kill packet, or the
+    /// server sends an empty message (`showDeathMessages` off).
+    Died { message: Option<String> },
 }
 
 /// Something the owner tells the session.

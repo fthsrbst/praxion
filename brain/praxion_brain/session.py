@@ -47,9 +47,9 @@ class SessionListener(Protocol):
     ) -> None:
         """A snapshot arrived and is already cached.
 
-        ``cause`` names who asked: ``heartbeat`` (the 60 s clock),
-        ``watch`` (a console viewer; display-only) or ``None`` when the body
-        sent it unprompted.
+        ``cause`` names who asked: ``heartbeat`` (the 60 s clock), another
+        tag a caller passed to :meth:`BodySession.request_snapshot`, or ``None``
+        when the body sent it unprompted (every 20 ticks).
         """
 
     def on_error(self, error: PortError) -> None:
@@ -90,10 +90,12 @@ class BodySession:
         self._snapshot_at: Optional[float] = None
         #: ``start``/``reconnect`` until the next snapshot is taken as a recovery.
         self._recovering: Optional[str] = None
-        #: Who asked for the snapshot in flight: ``heartbeat`` or ``watch``.
+        #: Who asked for the snapshot in flight, e.g. ``heartbeat``.
         self._snapshot_cause: Optional[str] = None
         #: A snapshot was asked for and has not arrived yet.
         self._awaiting_snapshot = False
+        #: A ``dropped(n)`` arrived and no snapshot has followed it yet.
+        self._dropped = False
         self._next_reconnect = 0.0
         self._closed = False
         self._terminal = False
@@ -191,6 +193,11 @@ class BodySession:
         self._snapshot_cause = None
         self.evidence.write("loop_reconnect", port=self.port_number)
         return True
+
+    def take_dropped(self) -> bool:
+        """Whether a ``dropped(n)`` came before this snapshot, once."""
+        dropped, self._dropped = self._dropped, False
+        return dropped
 
     def take_recovery(self) -> Optional[str]:
         """The cause of the pending recovery (``start``/``reconnect``), once."""
@@ -305,6 +312,9 @@ class BodySession:
         if isinstance(message, Bye):
             self._on_bye(message.reason)
         elif isinstance(message, Dropped):
+            # A real overflow: events, maybe a receipt, are gone. The snapshot
+            # that follows covers them; the owner reconciles against it.
+            self._dropped = True
             self.evidence.write("loop_dropped", n=message.n, seq=message.seq)
         return False
 

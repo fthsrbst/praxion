@@ -62,8 +62,9 @@ const PREPARE_TICKS: u32 = 40;
 const CALL_TICKS: u32 = 165;
 /// How many blocks `pillar` may stack under the feet, one per call (decision
 /// 2026-11-09 "Five next areas": at most about three).
-const MAX_COLUMN: u32 = 3;
-/// Health the body needs to climb.
+pub(crate) const MAX_COLUMN: u32 = 3;
+/// Health the body needs to climb (a free-standing column can be fallen from).
+/// `leave_shelter` turns this check off ([`Pillar::climbing_out`]).
 const MIN_HEALTH: f32 = 10.0;
 /// Jumps one call may make before it fails `no_click` (no click ever went out)
 /// or the receipt times out (`no_place`).
@@ -90,6 +91,9 @@ pub(crate) struct Pillar {
     /// The cell the block goes into: the feet cell when the call started.
     cell: Option<BlockPos>,
     named_slot: bool,
+    /// Refuse the climb below [`MIN_HEALTH`]. Off only inside a shelter's
+    /// column, see [`Pillar::climbing_out`].
+    health_check: bool,
 }
 
 impl Pillar {
@@ -103,6 +107,21 @@ impl Pillar {
             jumps: 0,
             cell: None,
             named_slot: false,
+            health_check: true,
+        }
+    }
+
+    /// A pillar step out of a dug shelter (`leave_shelter`): the column is the
+    /// hole itself, walled by ground on every side, so the climb cannot end in
+    /// a fall and the health rule is off. The body takes shelter exactly when
+    /// it is hurt and health comes back slowly, so with the rule on a body
+    /// sent into the hole at ten health or less was still below it at dawn and
+    /// could never climb out (run 9 review, item 1). The fire, fluid, support,
+    /// headroom and column rules still hold.
+    pub(crate) fn climbing_out(block: String) -> Self {
+        Self {
+            health_check: false,
+            ..Self::new(block)
         }
     }
 
@@ -247,7 +266,7 @@ impl Pillar {
     /// The safety rules, asked of perception, never of the raw world.
     fn check(&self, ctx: &mut Ctx<'_>, feet: BlockPos) -> Check {
         let health = ctx.perception.own_health(ctx.world).value().map(|h| h.health());
-        if health.is_some_and(|health| health < MIN_HEALTH) {
+        if self.health_check && health.is_some_and(|health| health < MIN_HEALTH) {
             return Check::Fail("unsafe");
         }
         if ctx.perception.burning(ctx.world).value().copied() == Some(true) {
@@ -372,7 +391,7 @@ fn jump_heights(ticks: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_world::{feet, give, set_block, swept, world};
+    use crate::test_world::{feet, give, set_block, set_health, swept, world};
     use azalea_registry::builtin::{BlockKind, ItemKind};
     use praxion_headless::Body;
     use praxion_planner::Personality;
@@ -517,6 +536,42 @@ mod tests {
             }
         }
         assert_eq!(outcome, Some(Outcome::Failed("unsafe".into())));
+    }
+
+    #[test]
+    fn a_hurt_body_may_not_pillar_but_may_climb_out_of_a_shelter() {
+        // Run 9 review item 1: the health rule kept a hurt body in its hole.
+        scaffold::reset();
+        let mut world = floor_world();
+        set_health(&mut world, 6.0);
+        let mut rig = Rig::new(world);
+        let mut outcome = None;
+        for _ in 0..PREPARE_TICKS {
+            let (frame, _, out) = rig.run();
+            assert!(!frame.held.jump, "no free-standing climb at six health");
+            if out.is_some() {
+                outcome = out;
+                break;
+            }
+        }
+        assert_eq!(outcome, Some(Outcome::Failed("unsafe".into())));
+
+        let mut world = floor_world();
+        set_health(&mut world, 6.0);
+        let mut rig = Rig::new(world);
+        rig.pillar = Pillar::climbing_out("cobblestone".into());
+        let mut jumped = false;
+        for tick in 0..PREPARE_TICKS {
+            let (frame, _, out) = rig.run();
+            assert!(out.is_none(), "tick {tick}: {out:?}");
+            rig.body.step(&frame.held, &rig.world);
+            if frame.held.jump {
+                jumped = true;
+                break;
+            }
+        }
+        assert!(jumped, "climbing out ignores the health rule");
+        scaffold::reset();
     }
 
     #[test]

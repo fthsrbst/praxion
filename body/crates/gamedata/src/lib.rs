@@ -233,6 +233,22 @@ pub fn smelting_recipes_for(item: &str) -> impl Iterator<Item = &'static Smeltin
     SMELTING.iter().filter(move |recipe| recipe.output == item)
 }
 
+/// How far a melee attack reaches, in blocks: the vanilla 26.3 survival
+/// `entity_interaction_range` (3.0). One number for every melee decision
+/// (decision 2026-11-10 "The skill that started a fight owns it"):
+///
+/// * the `attack` primitive and the `hunt` skill's attack guard
+///   (`near_entity($mob, 3)`, eye to feet) attack only inside it;
+/// * the melee reflex swings inside it plus a mob's half width, and its trigger
+///   range (`melee_range`, horizontal) must be at least
+///   [`MELEE_TRIGGER_MARGIN`] above it, so a mob the skill can hit is always
+///   one the reflex already sees.
+pub const MELEE_REACH: f64 = 3.0;
+
+/// How far the melee reflex trigger (`melee_range`) must reach beyond
+/// [`MELEE_REACH`], in blocks.
+pub const MELEE_TRIGGER_MARGIN: f64 = 1.0;
+
 /// The weapon ladder: how good `item` is as a melee weapon, or `None` when it
 /// is not one. Swords outrank axes of the same material; fists are rank 0 and
 /// implicit. The reflex view and the `attack` primitive share this one table

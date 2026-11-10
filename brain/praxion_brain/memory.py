@@ -343,7 +343,9 @@ class Memory:
         Only ``failed`` records count, and not those of a
         :data:`NOT_FAILURE_KINDS` kind. ``interrupted`` (the brain lost the
         intent, A1) and ``unverified`` (a done the body could not verify, A7)
-        are not failures and never block a goal. Derived once per goal-history
+        are not failures and never block a goal. Survival goals (origin
+        ``survival``) are never failure-blocked (decision 2026-11-10): the loop
+        backs a failed survival skill off for a few hundred ticks instead. Derived once per goal-history
         change: the console asks for it for every rung on every state poll.
         """
         with self._goals_lock:
@@ -355,7 +357,11 @@ class Memory:
     def _derive_failures(self) -> Dict[str, FailureEntry]:
         groups: Dict[str, list[GoalRecord]] = {}
         for record in self._goals.values():
-            if record.status != "failed" or record.failure_kind in NOT_FAILURE_KINDS:
+            if (
+                record.status != "failed"
+                or record.failure_kind in NOT_FAILURE_KINDS
+                or record.origin == "survival"
+            ):
                 continue
             key = normalize_condition(record.condition)
             groups.setdefault(key, []).append(record)

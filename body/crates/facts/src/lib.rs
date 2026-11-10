@@ -17,11 +17,12 @@
 //! here; this crate is the one place the mapping lives.
 
 use azalea_inventory::components;
+use azalea_physics::collision::BlockWithShape;
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_interpreter::{Facts as InterpreterFacts, IntValue, Truth};
 use praxion_perception::{Answer, Caller, Perception, scaffold, workable};
 use praxion_rules::{ArgValue, FactCall};
-use praxion_world::{ItemStack, World};
+use praxion_world::{BlockPos, BlockState, ItemStack, Vec3, World};
 
 #[cfg(test)]
 mod tests;
@@ -94,6 +95,12 @@ pub fn bool_fact(perception: &mut Perception, world: &World, call: &FactCall) ->
         },
         "is_night" => match perception.day_time(world).value() {
             Some(day_time) => truth(is_night(*day_time)),
+            None => Truth::Unknown(call.clone()),
+        },
+        // The body sits in a closed cell (decision 2026-11-10 "A sealed
+        // shelter now"); `take_shelter` waits on it, `shelter()` builds it.
+        "sheltered" => match sheltered(perception, world) {
+            Some(closed) => truth(closed),
             None => Truth::Unknown(call.clone()),
         },
         // Static allowlist, no perception needed: `hunt` asks it before it
@@ -249,6 +256,76 @@ pub fn near_entity(
         Answer::Known { .. } => Some(true),
         Answer::Unknown(_) => None,
     }
+}
+
+/// How far above the feet a block's top may reach and still be the block the
+/// body stands on, not the cell its feet are in: half a block.
+const FEET_CELL_LIFT: f64 = 0.5;
+
+/// The cell the body's feet are in, from its position. On a block lower than a
+/// full cube (dirt path and farmland are 15/16 high, soul sand and mud 14/16)
+/// the feet stand at y + 0.875 or more, so `floor(y)` is the supporting block
+/// itself, and `shelter()` would try to fill its own head cell. Rounding the
+/// height half a block up keeps the supporting block below the feet cell for
+/// every block whose top is in the upper half of its cell, and changes nothing
+/// on a full block (y is whole) or on one lower than half a block (a carpet, a
+/// one-layer snow): there the body's feet really are in that cell.
+pub fn feet_cell(position: Vec3) -> BlockPos {
+    BlockPos::new(
+        position.x.floor() as i32,
+        (position.y + FEET_CELL_LIFT).floor() as i32,
+        position.z.floor() as i32,
+    )
+}
+
+/// The nine cells `sheltered()` checks around the feet cell `feet`, in the
+/// order `shelter()` closes them: the four horizontal neighbours at feet
+/// height, the four at head height, then the cell above the head.
+pub fn shelter_cells(feet: BlockPos) -> [BlockPos; 9] {
+    const SIDES: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+    let at = |dx: i32, dy: i32, dz: i32| BlockPos::new(feet.x + dx, feet.y + dy, feet.z + dz);
+    let mut cells = [feet; 9];
+    for (index, (dx, dz)) in SIDES.into_iter().enumerate() {
+        cells[index] = at(dx, 0, dz);
+        cells[index + 4] = at(dx, 1, dz);
+    }
+    cells[8] = at(0, 2, 0);
+    cells
+}
+
+/// Whether a cell closes the shelter: a block with a full collision box. A
+/// mob cannot walk into it, an arrow cannot pass it, and the body cannot fall
+/// out through it.
+///
+/// Kept deliberately simple (decision 2026-11-10): anything less than a full
+/// box counts as open, so a slab, fence, door, chest, plant or fluid beside the
+/// body leaves it unsheltered even where a mob could not actually use the gap.
+/// That errs toward building more, never toward a false "safe". `shelter()`
+/// closes exactly the cells this rule calls open, so the fact and the
+/// primitive cannot disagree.
+pub fn closes_shelter(state: BlockState) -> bool {
+    state.is_collision_shape_full()
+}
+
+/// Whether the body is sealed in: the cell above the head and the eight
+/// horizontal neighbours of the feet and head cells all close the shelter
+/// ([`closes_shelter`]). `None` when the position is unknown or a cell
+/// perception cannot answer leaves it open; one known open cell is a definite
+/// `false` whatever the others are.
+///
+/// Every cell borders the body's own feet or head cell, so its face toward the
+/// body is in view: the answers come from sight (or memory), spending rays.
+pub fn sheltered(perception: &mut Perception, world: &World) -> Option<bool> {
+    let feet = feet_cell(*perception.own_position(world).value()?);
+    let mut unknown = false;
+    for cell in shelter_cells(feet) {
+        match perception.block(Caller::Other, world, cell).value() {
+            Some(fact) if !closes_shelter(fact.state) => return Some(false),
+            Some(_) => {}
+            None => unknown = true,
+        }
+    }
+    (!unknown).then_some(true)
 }
 
 /// Minecraft night, by the overworld clock (the sky darkens at 12542 and

@@ -150,6 +150,82 @@ skill s()
     }
 
     #[test]
+    fn the_shelter_fact_and_primitive_check_with_no_arguments() {
+        // Decision 2026-11-10 "A sealed shelter now": `take_shelter` is
+        // "until morning: not sheltered -> shelter, else wait".
+        let program = load(
+            "skill s()\n  rules:\n    not is_night() -> done\n    sheltered() -> wait(40)\n    true -> shelter()\n",
+        )
+        .unwrap();
+        assert_eq!(program.skill("s").unwrap().rules.len(), 3);
+        let errors = |source: &str| {
+            load(source)
+                .unwrap_err()
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let arity = errors("skill s()\n  rules:\n    true -> shelter(dirt)\n");
+        assert!(arity.contains("takes 0 arguments"), "{arity}");
+        let arity = errors("skill s()\n  rules:\n    sheltered(dirt) -> done\n    true -> done\n");
+        assert!(arity.contains("takes 0 arguments"), "{arity}");
+        // A bool fact, not an int.
+        assert!(!errors("skill s()\n  rules:\n    sheltered() >= 1 -> done\n").is_empty());
+    }
+
+    #[test]
+    fn the_morning_exit_checks_with_no_arguments() {
+        // Decision 2026-11-10 "Shelter shape and exit": at morning a sealed
+        // body leaves its shelter before the skill ends (the shipped form:
+        // from sunrise, and done only once known to be out).
+        let program = load(
+            "skill s()\n  rules:\n    time_of_day() < 12000 and sheltered() -> leave_shelter()\n    not is_night() and not sheltered() -> done\n    sheltered() -> wait(40)\n    is_night() -> shelter()\n",
+        )
+        .unwrap();
+        assert_eq!(program.skill("s").unwrap().rules.len(), 4);
+        let errors = load("skill s()\n  rules:\n    true -> leave_shelter(dirt)\n")
+            .unwrap_err()
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(errors.contains("takes 0 arguments"), "{errors}");
+    }
+
+    #[test]
+    fn hunt_attacks_inside_the_shared_melee_reach() {
+        // Decision 2026-11-10 "The skill that started a fight owns it": the
+        // attack reach of `hunt` and the melee reflex trigger come from one
+        // constant. The skill language has no constants, so the literal in
+        // `hunt.skill`'s attack guard is pinned to it here.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/hunt.skill");
+        let source = std::fs::read_to_string(&path).expect("hunt.skill");
+        let skills = parse(&source).expect("hunt.skill parses");
+        let hunt = skills.iter().find(|skill| skill.name == "hunt").expect("skill hunt");
+        let reaches: Vec<i64> = hunt
+            .rules
+            .iter()
+            .filter(|rule| {
+                matches!(&rule.action.kind, ActionKind::Primitive { name, .. } if name == "attack")
+            })
+            .filter_map(|rule| match &rule.guard.kind {
+                ExprKind::Call { name, args } if name == "near_entity" => match args.get(1)?.kind {
+                    ExprKind::Int(reach) => Some(reach),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reaches.len(), 1, "one `near_entity($mob, N) -> attack($mob)` rule");
+        assert_eq!(
+            reaches[0] as f64,
+            praxion_gamedata::MELEE_REACH,
+            "hunt.skill's attack reach must be praxion_gamedata::MELEE_REACH"
+        );
+    }
+
+    #[test]
     fn namespace_is_optional() {
         let program = load(
             "skill s()\n  rules:\n    has(minecraft:stick) -> mine(minecraft:stone)\n    true -> done\n",

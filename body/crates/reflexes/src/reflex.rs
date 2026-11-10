@@ -15,7 +15,7 @@ use praxion_planner::KnownBlocks;
 use praxion_world::{BlockPos, Vec3};
 
 use crate::settings::{HUMAN_FLOOR_TICKS, Settings};
-use crate::view::{ArrowMemory, View};
+use crate::view::{ArrowMemory, EntityView, View};
 
 /// Vanilla air supply, in ticks.
 pub const FULL_AIR_TICKS: u32 = 300;
@@ -23,6 +23,16 @@ pub const FULL_AIR_TICKS: u32 = 300;
 /// A creeper inside this many blocks is an immediate threat and may act on the
 /// first tick (`lethal_fast`).
 pub const CREEPER_LETHAL_RANGE: f64 = 3.0;
+
+/// A running melee reflex holds the body until its mob is this much farther
+/// than `melee_range` (horizontal, blocks). Without the margin a mob that
+/// strafes on the trigger line ends and restarts the reflex every few ticks
+/// (run 9, decision 2026-11-10 "The skill that started a fight owns it").
+pub const MELEE_EXIT_MARGIN: f64 = 2.0;
+
+/// After any melee reflex ends, it may not start again for this many ticks, so
+/// the skill underneath gets the body back for at least a second.
+pub const MELEE_COOLDOWN_TICKS: u64 = 20;
 
 /// The two latency classes of architecture §3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,10 +145,25 @@ impl ReflexKind {
             ReflexKind::Fire => state.burning() || view.on_fire,
             ReflexKind::Creeper => view.threat_within(view.creeper, settings.creeper_flee_range),
             ReflexKind::Arrow => view.incoming_arrow().is_some(),
-            ReflexKind::Melee => view.threat_within(view.melee, settings.melee_range),
+            ReflexKind::Melee => melee_target(view, state, settings)
+                .is_some_and(|mob| view.horizontal_to(mob) <= f64::from(settings.melee_range)),
             ReflexKind::Starvation => view
                 .food
                 .is_some_and(|food| food <= settings.eat_hard_threshold),
+        }
+    }
+
+    /// Whether a *running* reflex of this kind still has its trigger. The same
+    /// as [`ReflexKind::triggered`] except for melee, which keeps the body
+    /// until its mob is [`MELEE_EXIT_MARGIN`] beyond the trigger range: the
+    /// start and the end of a fight are two different lines, so a mob on the
+    /// trigger line cannot flip the owner every few ticks.
+    pub fn holds(self, view: &View, state: &ReflexState, settings: &Settings) -> bool {
+        match self {
+            ReflexKind::Melee => melee_target(view, state, settings).is_some_and(|mob| {
+                view.horizontal_to(mob) <= f64::from(settings.melee_range) + MELEE_EXIT_MARGIN
+            }),
+            _ => self.triggered(view, state, settings),
         }
     }
 }
@@ -186,6 +211,11 @@ pub struct ReflexState {
     /// The last cell where the player stood safely; `StepBack` returns here.
     pub last_safe_cell: Option<BlockPos>,
     pub arrows: ArrowMemory,
+    /// The mob kind the running skill is fighting or walking to (its in-flight
+    /// primitive is `attack` or `move_to` of that kind), without the
+    /// `minecraft:` namespace. The arbiter sets it from the interpreter's
+    /// decisions; `None` when the skill is engaged with no mob.
+    engaged: Option<String>,
 }
 
 impl Default for ReflexState {
@@ -204,7 +234,34 @@ impl ReflexState {
             own_burning: None,
             last_safe_cell: None,
             arrows: ArrowMemory::default(),
+            engaged: None,
         }
+    }
+
+    /// The running skill's engagement: the mob kind its in-flight `attack` or
+    /// `move_to` names, or `None`. A namespace is dropped, so `zombie` and
+    /// `minecraft:zombie` are the same engagement.
+    pub fn set_engagement(&mut self, mob: Option<&str>) {
+        self.engaged = mob.map(|name| strip_namespace(name).to_owned());
+    }
+
+    /// The mob kind the running skill is engaged with, if any.
+    pub fn engagement(&self) -> Option<&str> {
+        self.engaged.as_deref()
+    }
+
+    /// Whether the melee reflex leaves `mob` to the running skill: the skill is
+    /// engaged with that kind and health is above `fight_min_health`. At or
+    /// below it the reflex takes the body again, so a low-health flee is never
+    /// held back by a skill (decision 2026-11-10 "The skill that started a fight
+    /// owns it"). An unknown health is not "above".
+    pub fn leaves_to_skill(&self, mob: EntityView, view: &View, settings: &Settings) -> bool {
+        self.engaged
+            .as_deref()
+            .is_some_and(|engaged| engaged == strip_namespace(mob.kind.to_str()))
+            && view
+                .health
+                .is_some_and(|health| health > settings.fight_min_health)
     }
 
     /// Record this tick's own-entity facts, as perception answered them.
@@ -317,6 +374,18 @@ pub fn evaluate(
     if !kind.triggered(view, state, settings) {
         return None;
     }
+    action_for(kind, view, state, settings)
+}
+
+/// What a reflex of `kind` does about this view, without asking whether its
+/// trigger is present. The engine uses it to renew a running reflex in place,
+/// whose trigger is the wider [`ReflexKind::holds`] test.
+pub fn action_for(
+    kind: ReflexKind,
+    view: &View,
+    state: &ReflexState,
+    settings: &Settings,
+) -> Option<ReflexAction> {
     match kind {
         ReflexKind::Lava => {
             let fallback = away_from(view.feet, view.lava.as_ref().map(|lava| lava.pos));
@@ -348,8 +417,16 @@ pub fn evaluate(
             right: arrow.strafe_right,
         }),
         ReflexKind::Melee => {
-            let mob = view.melee?;
-            let fight = view.health.is_some_and(|health| health > settings.fight_min_health);
+            let mob = melee_target(view, state, settings)?;
+            let healthy = view.health.is_some_and(|health| health > settings.fight_min_health);
+            // Unarmed, a flee only helps against a mob the sprinting body
+            // outruns; against a spider or a skeleton it only turns the back
+            // to it, so the body fights back (decision 2026-11-10 "Unarmed at
+            // night: avoid contact"). Armed, low health still flees. Armed
+            // means a sword, as in `night_watch` and the brain: an axe alone
+            // is unarmed, though the body still hits with it.
+            let armed = view.best_weapon.is_some_and(|weapon| weapon.is_sword());
+            let fight = healthy || (!armed && !sprint_outruns(mob.kind));
             Some(if fight {
                 ReflexAction::Attack {
                     target: mob.id,
@@ -367,6 +444,17 @@ pub fn evaluate(
             item: food.kind,
         }),
     }
+}
+
+/// The mob the melee reflex is about: the nearest tracked zombie, skeleton or
+/// spider (horizontally) that is not left to the running skill. Only the
+/// engaged kind is skipped, so a skill fighting a zombie never hides a spider
+/// next to it from the reflex. The range test is the caller's: the trigger
+/// and the exit range differ.
+fn melee_target(view: &View, state: &ReflexState, settings: &Settings) -> Option<EntityView> {
+    view.melee_mobs()
+        .filter(|mob| !state.leaves_to_skill(*mob, view, settings))
+        .min_by(|a, b| view.horizontal_to(*a).total_cmp(&view.horizontal_to(*b)))
 }
 
 /// Evaluate the whole set in priority order. Returns the first action whose
@@ -404,6 +492,72 @@ fn away_from(feet: BlockPos, threat: Option<BlockPos>) -> BlockPos {
     } else {
         feet.south(dz.signum())
     }
+}
+
+/// One log line for a reflex that started or renewed (decision 2026-11-10:
+/// run 9 logged only `owner_changed reflex:melee`, never what the reflex did):
+/// `reflex_action kind=<kind> action=<action> target=<id|-> distance=<blocks|-> renewed=<bool>`.
+///
+/// The target is the entity the action is about (the attacked or fled mob, the
+/// dodged arrow); the distance is horizontal from the body to it, or to the
+/// cell a step-back, a walk to water or a step off fire goes to.
+pub fn action_note(kind: ReflexKind, action: ReflexAction, view: &View, renewed: bool) -> String {
+    let mob = |from: Vec3| match kind {
+        ReflexKind::Creeper => view.creeper,
+        _ => view.melee_mobs().find(|mob| mob.position == from),
+    };
+    let (name, target, distance) = match action {
+        ReflexAction::Attack { target, .. } => {
+            let seen = view
+                .melee_mob(target)
+                .or_else(|| view.creeper.filter(|mob| mob.id == target));
+            ("attack", Some(target), seen.map(|mob| view.horizontal_to(mob)))
+        }
+        ReflexAction::Flee { from, .. } => {
+            let dx = view.position.x - from.x;
+            let dz = view.position.z - from.z;
+            ("flee", mob(from).map(|mob| mob.id), Some((dx * dx + dz * dz).sqrt()))
+        }
+        ReflexAction::Strafe { .. } => {
+            let arrow = view.incoming_arrow();
+            ("strafe", arrow.map(|arrow| arrow.id), arrow.map(|arrow| arrow.distance))
+        }
+        ReflexAction::StepBack { to } => ("step_back", None, Some(view.horizontal_to_block(to))),
+        ReflexAction::SwimUp => ("swim_up", None, None),
+        ReflexAction::ToWater { pos } => ("to_water", None, Some(view.horizontal_to_block(pos))),
+        ReflexAction::OffFire { to } => ("off_fire", None, Some(view.horizontal_to_block(to))),
+        ReflexAction::Eat { .. } => ("eat", None, None),
+    };
+    let target = target.map_or_else(|| "-".to_owned(), |id| id.to_string());
+    let distance = distance.map_or_else(|| "-".to_owned(), |d| format!("{d:.2}"));
+    format!(
+        "reflex_action kind={} action={name} target={target} distance={distance} renewed={renewed}",
+        kind.name()
+    )
+}
+
+/// Whether a sprinting player outruns a mob of `kind` on open ground, so
+/// fleeing it ends the fight. The one table of mob speed the reflexes use.
+///
+/// Vanilla `movement_speed` attribute values (26.3 mob attributes) are noted
+/// for each kind; a player's own sprint is the walk attribute 0.1 times 1.3.
+/// The two scales are not directly comparable (a mob's ground speed and a
+/// player's input speed go through different code), so the classification
+/// below is the decision's, not a computed one:
+///
+/// * zombie 0.23, husk 0.23, drowned 0.23 (on land): slower, flee works;
+/// * spider 0.3: not outrun. TO BE MEASURED on the live server (decision
+///   2026-11-10: "spider speed is to be measured");
+/// * skeleton 0.25: a ranged mob, a flee in the open keeps it shooting.
+///
+/// Every other kind answers `false`: fight back rather than turn away.
+pub fn sprint_outruns(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned)
+}
+
+/// `minecraft:zombie` and `zombie` name the same kind.
+fn strip_namespace(name: &str) -> &str {
+    name.strip_prefix("minecraft:").unwrap_or(name)
 }
 
 /// The entity kinds the melee reflex fights.

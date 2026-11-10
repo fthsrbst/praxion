@@ -40,7 +40,7 @@ use azalea_protocol::packets::game::{
     s_interact::InteractionHand,
     s_use_item_on::BlockHit,
 };
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{EntityKind, ItemKind};
 
 use crate::frame::{Click, ControlFrame, MenuAction, MenuMode};
 use crate::physics::{Blocks, Body};
@@ -72,6 +72,11 @@ pub struct ActuatorState {
     last_use: bool,
     using_item: bool,
     attack_cooldown: u32,
+    /// The main-hand item the attack cooldown is counting for. A different
+    /// item restarts the count, as vanilla's `resetAttackStrengthTicker` does
+    /// on a held-item change; `None` before the first frame and after a
+    /// respawn.
+    attack_item: Option<ItemKind>,
     last_selected_slot: Option<u8>,
     /// Ticks before a new destroy may start after a finished one (vanilla's
     /// `mine_delay = 5`, `mining.rs:690`).
@@ -156,6 +161,7 @@ impl ActuatorState {
         self.last_use = false;
         self.using_item = false;
         self.attack_cooldown = 0;
+        self.attack_item = None;
         self.last_selected_slot = None;
         self.mine_delay = 0;
     }
@@ -403,6 +409,13 @@ pub fn plan(
     };
     state.attack_cooldown = state.attack_cooldown.saturating_add(1);
     state.mine_delay = state.mine_delay.saturating_sub(1);
+    // The attack cadence is the held item's: a swing waits for full charge
+    // with whatever is in the main hand now, and switching items restarts it.
+    let main_hand = held_item(world);
+    if state.attack_item != Some(main_hand.kind()) {
+        state.attack_item = Some(main_hand.kind());
+        state.attack_cooldown = 0;
+    }
 
     let attack = frame.clicks.contains(&Click::Attack);
     let use_click = frame.clicks.contains(&Click::Use);
@@ -420,7 +433,7 @@ pub fn plan(
             if state.mining.take().is_some() {
                 abort_destroy(state, &mut packets);
             }
-            if state.attack_cooldown >= body.attack_cooldown_ticks() {
+            if state.attack_cooldown >= body.attack_cooldown_ticks_holding(&main_hand) {
                 packets.push(Outgoing::Packet(Box::new(
                     ServerboundAttack {
                         entity_id: azalea_core::entity_id::MinecraftEntityId(entity.id),
@@ -800,6 +813,105 @@ mod tests {
             state.next_seq() > before,
             "the server acks the highest sequence per connection; a reset would go unacked"
         );
+    }
+
+    /// A world with a zombie two blocks in front of a body at the origin
+    /// (yaw 0 faces +z) and `held` in hotbar slot 0.
+    fn zombie_ahead(held: Option<ItemKind>) -> praxion_world::World {
+        use azalea_core::{delta::LpVec3, entity_id::MinecraftEntityId};
+        use azalea_protocol::packets::game::{
+            ClientboundAddEntity, ClientboundContainerSetSlot, ClientboundGamePacket,
+        };
+        let mut world = praxion_world::World::new();
+        world.follow(0);
+        world.apply_clientbound_play(
+            0,
+            &ClientboundGamePacket::AddEntity(ClientboundAddEntity {
+                id: MinecraftEntityId(42),
+                uuid: uuid::Uuid::from_u128(42),
+                entity_type: EntityKind::Zombie,
+                position: Vec3::new(0.5, 64.0, 2.5),
+                movement: LpVec3::Zero,
+                x_rot: 0,
+                y_rot: 0,
+                y_head_rot: 0,
+                data: 0,
+            }),
+        );
+        if let Some(item) = held {
+            world.apply_clientbound_play(
+                0,
+                &ClientboundGamePacket::ContainerSetSlot(ClientboundContainerSetSlot {
+                    container_id: 0,
+                    state_id: 0,
+                    slot: 36,
+                    item_stack: ItemStack::new(item, 1),
+                }),
+            );
+        }
+        world
+    }
+
+    /// The ticks at which an attack packet left, holding the attack button on
+    /// the zombie for `ticks` ticks.
+    fn attack_ticks(held: Option<ItemKind>, ticks: u64) -> Vec<u64> {
+        let world = zombie_ahead(held);
+        assert_eq!(held_item(&world).kind(), held.unwrap_or(ItemKind::Air));
+        let body = grounded_body();
+        let mut state = ActuatorState::default();
+        let mut sent = Vec::new();
+        for tick in 0..ticks {
+            let mut frame = ControlFrame::new(tick, body.generation(), crate::frame::Held::NONE);
+            frame.clicks.push(Click::Attack);
+            let (_, report) = plan(&mut state, &body, &world, &frame, 0);
+            if report.attack_entity == Some(42) {
+                sent.push(tick);
+            }
+        }
+        sent
+    }
+
+    fn gaps(ticks: &[u64]) -> Vec<u64> {
+        ticks.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    }
+
+    #[test]
+    fn the_attack_cadence_follows_the_held_item() {
+        // Run 9: the cooldown was the empty hand's 5 ticks for every item, so a
+        // sword swung at about 40% charge. Vanilla 26.3: hand 4.0 attacks a
+        // second (5 ticks), a sword 1.6 (12.5, so 13), an axe 0.8 (25).
+        let body = grounded_body();
+        assert_eq!(body.attack_cooldown_ticks(), 5);
+        let cases = [
+            (None, 5),
+            (Some(ItemKind::WoodenSword), 13),
+            (Some(ItemKind::StoneSword), 13),
+            (Some(ItemKind::DiamondSword), 13),
+            (Some(ItemKind::StoneAxe), 25),
+            (Some(ItemKind::IronAxe), 23),
+            (Some(ItemKind::DiamondAxe), 20),
+            (Some(ItemKind::WoodenPickaxe), 17),
+            (Some(ItemKind::WoodenShovel), 20),
+            (Some(ItemKind::Stick), 5),
+        ];
+        for (item, expected) in cases {
+            let stack = item.map_or(ItemStack::Empty, |kind| ItemStack::new(kind, 1));
+            assert_eq!(
+                body.attack_cooldown_ticks_holding(&stack),
+                expected,
+                "{item:?}"
+            );
+        }
+        let hand = attack_ticks(None, 40);
+        assert!(hand.len() >= 3, "{hand:?}");
+        assert!(gaps(&hand).iter().all(|gap| *gap == 5), "fists: {hand:?}");
+        let sword = attack_ticks(Some(ItemKind::StoneSword), 60);
+        assert!(sword.len() >= 3, "{sword:?}");
+        assert!(
+            gaps(&sword).iter().all(|gap| *gap == 13),
+            "a sword waits for full charge: {sword:?}"
+        );
+        assert!(sword[0] >= 13, "the first swing also waits a full charge: {sword:?}");
     }
 
     #[test]

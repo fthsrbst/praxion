@@ -10,8 +10,8 @@ use praxion_planner::center;
 use praxion_world::BlockState;
 
 use crate::common::{
-    HandSelect, ToolStep, aim_precise, block_target_where, hold_tool, idle, pickup_frame,
-    walk_point,
+    HandSelect, ToolStep, aim_precise, block_target_where, cell_centre, choose_aim, hold_tool,
+    idle, pickup_frame, walk_point,
 };
 use crate::frontier::nearest_known_block;
 use crate::runner::{Ctx, IntentSpec};
@@ -124,6 +124,14 @@ pub(crate) struct Mine {
     pub(crate) blocked: u32,
     /// Ticks spent walking toward a target higher than reach.
     pub(crate) uphill: u32,
+    /// Targets this call found no crosshair point on and could not dig
+    /// through: every later search of the call skips them (run 9: each retry
+    /// picked the same hidden log again).
+    pub(crate) rejected: Vec<BlockPos>,
+    /// The failure kind of the last rejected target: `no_sight`, or
+    /// `out_of_reach` for one two or more blocks above the feet. The call
+    /// fails with it once no candidate is left.
+    pub(crate) rejected_kind: Option<&'static str>,
 }
 
 /// Aligned ticks without the crosshair on the target before the call gives up.
@@ -187,6 +195,72 @@ impl Mine {
         }
     }
 
+    /// No crosshair point lands on `target` from here. `centre_hit` is the
+    /// cell the pick toward its centre lands on instead: dig it when it is a
+    /// soft occluder [`through_decision`] allows (not the support, no drop, no
+    /// fluid) and the call is under [`MAX_OCCLUDERS`], take it when it is a
+    /// wanted block itself, else reject the target for the rest of the call.
+    ///
+    /// The cells the decision reads come through perception, not the raw
+    /// store (architecture §5.1): the hit cell by sight (the pick met it, so
+    /// it is in view), its neighbours and the cells under the feet from
+    /// perception's memory. A cell perception cannot answer is no fluid and no
+    /// drop, as the shared [`exposes_fluid`] rule reads an unanswered cell.
+    fn unseen_target(&mut self, ctx: &mut Ctx<'_>, target: BlockPos, centre_hit: Option<BlockPos>) {
+        let feet = ctx.body.position().to_block_pos_floor();
+        let occluders = self.dig_through.as_ref().map_or(0, |dig| dig.occluders);
+        let hit = centre_hit.and_then(|cell| {
+            ctx.perception
+                .block(Caller::Other, ctx.world, cell)
+                .value()
+                .map(|fact| (cell, fact.state))
+        });
+        let perception = &*ctx.perception;
+        let lookup = |pos: BlockPos| match hit {
+            Some((cell, state)) if cell == pos => Some(state),
+            _ => perception.known(pos).map(|seen| seen.state),
+        };
+        match through_decision(&self.name, feet, centre_hit, lookup) {
+            DigThrough::Target(cell) if !self.rejected.contains(&cell) => {
+                log::debug!(
+                    "mine: {:?} at {:?} is hidden; the crosshair meets the wanted {:?} first",
+                    self.name,
+                    target,
+                    cell
+                );
+                self.set_target(cell, false);
+            }
+            DigThrough::Occluder(cell) if occluders < MAX_OCCLUDERS => {
+                log::debug!(
+                    "mine: dig through {:?} at {:?} to reach {:?} at {:?}",
+                    hit.map(|(_, state)| BlockKind::from(state)),
+                    cell,
+                    self.name,
+                    target
+                );
+                let dig = self.dig_through.get_or_insert_with(DigState::default);
+                dig.occluders += 1;
+                self.set_target(cell, true);
+            }
+            _ => self.reject(feet, target),
+        }
+    }
+
+    /// Give up on `target` for the rest of the call and select again; the
+    /// call fails with this kind only once no candidate is left.
+    fn reject(&mut self, feet: BlockPos, target: BlockPos) {
+        let kind = if target.y >= feet.y + 2 {
+            "out_of_reach"
+        } else {
+            "no_sight"
+        };
+        log::debug!("mine: rejected {:?} at {:?} ({kind})", self.name, target);
+        self.rejected.push(target);
+        self.rejected_kind = Some(kind);
+        self.blocked = 0;
+        self.forget_target();
+    }
+
     pub(crate) fn tick(
         &mut self,
         ctx: &mut Ctx<'_>,
@@ -237,9 +311,13 @@ impl Mine {
             // (seed 202 live run 2026-11-08). `near`, `explore` and this search
             // ask the same `workable` rule, so a search cannot end on a cell
             // this call would then refuse.
+            //
+            // A target this call already rejected (no crosshair point lands on
+            // it and nothing soft hides it) is skipped by every search below.
             let world = ctx.world;
+            let rejected = &self.rejected;
             let accept = |pos: BlockPos, state: BlockState| {
-                workable(pos, state, |cell| world.block_state(cell))
+                !rejected.contains(&pos) && workable(pos, state, |cell| world.block_state(cell))
             };
             if let Some(target) = block_target_where(ctx, &self.name, 5, accept) {
                 self.set_target(target, false);
@@ -256,7 +334,7 @@ impl Mine {
                 // where the sight ray meets first: the wanted block itself or
                 // a soft block hiding it.
                 if let Some((cell, _)) =
-                    nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &[])
+                    nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &self.rejected)
                 {
                     // No reach check on the hidden cell itself: the block to
                     // dig is the first one the ray meets, which is nearer, and
@@ -268,9 +346,8 @@ impl Mine {
                         let blocking =
                             ctx.perception
                                 .first_blocking_cell(Caller::Other, ctx.world, eye, cell);
-                        let decision = through_decision(&self.name, feet, blocking, |pos| {
-                            ctx.world.block_state(pos)
-                        });
+                        let decision =
+                            through_decision(&self.name, feet, blocking, |pos| ctx.world.block_state(pos));
                         match decision {
                             DigThrough::Target(target) => {
                                 log::debug!(
@@ -317,7 +394,7 @@ impl Mine {
                     // `craft` does for its table (`Station`); only a block the
                     // known map lost too is gone.
                     if let Some((cell, _)) =
-                        nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &[])
+                        nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &self.rejected)
                     {
                         if self.waited > 80 {
                             log::debug!(
@@ -330,6 +407,12 @@ impl Mine {
                         }
                         let feet = ctx.body.position().to_block_pos_floor();
                         return (pickup_frame(ctx, walk_point(feet, cell)), None, None);
+                    }
+                    // Every candidate left was rejected in this call: fail
+                    // with the rejection's own kind at once, not `no_block`
+                    // after a wait (no candidate is coming back).
+                    if let Some(kind) = self.rejected_kind {
+                        return (frame, None, Some(Outcome::Failed(kind.into())));
                     }
                     if self.waited > 40 {
                         return (frame, None, Some(Outcome::Failed("no_block".into())));
@@ -383,6 +466,26 @@ impl Mine {
             Some(dig) => dig.target_started,
             None => started,
         };
+        // Aim where the crosshair lands on the target: its centre, else the
+        // nearest inset face point whose pick lands on it (run 9: perception
+        // saw a log through one of its seven points while the click aimed at a
+        // point another block hid). With no such point the call digs through
+        // what hides it, or rejects the target and picks another; a dig under
+        // way keeps going.
+        let aim = choose_aim(ctx, target);
+        let point = match aim.point {
+            Some(point) => point,
+            // A pick that meets nothing (the chunk not loaded, a ray just
+            // missing) is no proof of a hiding block: aim at the centre and
+            // let the crosshair check below decide, as before.
+            None if target_started || aim.centre_hit.is_none() => cell_centre(target),
+            None => {
+                if ctx.body.on_ground() {
+                    self.unseen_target(ctx, target, aim.centre_hit);
+                }
+                return (frame, None, None);
+            }
+        };
         if !target_started && let Some(state) = ctx.world.block_state(target) {
             match hold_tool(ctx, state, &mut self.hand, &mut self.tool_waited, &mut frame) {
                 ToolStep::Ready => {}
@@ -392,7 +495,7 @@ impl Mine {
                 }
             }
         }
-        let (look, aligned) = aim_precise(ctx, center(target));
+        let (look, aligned) = aim_precise(ctx, point);
         frame.look = look;
         if !aligned {
             return (frame, None, None);
@@ -411,19 +514,14 @@ impl Mine {
         if on_other && !target_started {
             self.blocked += 1;
             if self.blocked > BLOCKED_TICKS {
-                let feet = ctx.body.position().to_block_pos_floor();
-                let kind = if target.y >= feet.y + 2 {
-                    "out_of_reach"
-                } else {
-                    "no_sight"
-                };
                 log::debug!(
-                    "mine: crosshair never reached {:?} at {:?}: {kind}; pick {:?}",
+                    "mine: crosshair never reached {:?} at {:?}; pick {:?}",
                     self.name,
                     target,
                     pick.block.as_ref().map(|hit| (hit.block_pos, hit.miss))
                 );
-                return (frame, None, Some(Outcome::Failed(kind.into())));
+                let feet = ctx.body.position().to_block_pos_floor();
+                self.reject(feet, target);
             }
             return (frame, None, None);
         }
@@ -895,6 +993,8 @@ mod tests {
             dig_through,
             blocked: 0,
             uphill: 0,
+            rejected: Vec::new(),
+            rejected_kind: None,
         }
     }
 
@@ -1090,6 +1190,8 @@ mod tests {
             dig_through: None,
             blocked: 0,
             uphill: 0,
+            rejected: Vec::new(),
+            rejected_kind: None,
         };
         let mut ctx = Ctx {
             tick: 0,
@@ -1234,6 +1336,8 @@ mod tests {
             dig_through: None,
             blocked: 0,
             uphill: 0,
+            rejected: Vec::new(),
+            rejected_kind: None,
         }
     }
 
@@ -1315,29 +1419,144 @@ mod tests {
         assert!(horizontal <= UNDER_TARGET_RADIUS, "it ends under the log: {horizontal}");
     }
 
+    /// A stone floor at y 63 over chunk (0, 0); the test sets the rest.
+    fn floor_world() -> World {
+        crate::test_world::world_with(1, 63, |_| BlockState::from(BlockKind::Stone))
+    }
+
+    /// A body standing on the floor at the test feet cell.
+    fn standing_body(world: &World) -> Body {
+        let mut body = Body::new(crate::test_world::feet());
+        for _ in 0..5 {
+            body.step(&praxion_headless::Held::NONE, world);
+        }
+        assert!(body.on_ground(), "the body stands on the floor");
+        body
+    }
+
+    /// Tick `mine` until it emits a dig spec or ends; the look is applied, the
+    /// body does not move.
+    fn first_dig(
+        mine: &mut Mine,
+        world: &World,
+        perception: &mut Perception,
+        body: &mut Body,
+        max: u64,
+    ) -> (Option<BlockPos>, Option<Outcome>) {
+        for tick in 0..max {
+            let (pending, outcome) = run_mine_tick(mine, tick, false, body, world, perception);
+            if let Some(IntentSpec::Dig { pos, .. }) = pending {
+                return (Some(pos), None);
+            }
+            if outcome.is_some() {
+                return (None, outcome);
+            }
+        }
+        (None, None)
+    }
+
     #[test]
-    fn a_target_behind_another_block_fails_typed_after_ten_aligned_ticks() {
-        use crate::test_world::{feet, set_block, swept, world};
-        for (target, wall, kind) in [
+    fn a_log_whose_floor_centre_is_hidden_is_dug_where_the_crosshair_lands() {
+        use crate::test_world::{set_block, swept};
+        // Run 9 diagnosis: `mine` aimed only at the floor centre of its target
+        // and failed `no_sight` when that point was hidden, although the log's
+        // top was in plain view. Here a stone in front hides the floor centre;
+        // the cell centre is still reachable over it.
+        let target = BlockPos::new(0, 64, 2);
+        let wall = BlockPos::new(0, 64, 1);
+        let mut world = floor_world();
+        set_block(&mut world, target, BlockState::from(BlockKind::OakLog));
+        set_block(&mut world, wall, BlockState::from(BlockKind::Stone));
+        let mut perception = swept(&world);
+        let mut body = standing_body(&world);
+        let eye = body.eye_position();
+        let (yaw, pitch) = praxion_planner::aim(eye, center(target));
+        let old_point = praxion_headless::pick_block_looking(&world, &body, yaw, pitch)
+            .map(|hit| hit.block_pos);
+        assert_eq!(old_point, Some(wall), "the old aim point is hidden by the stone");
+
+        let mut mine = fresh_mine("#logs", Some(target));
+        let (dug, outcome) = first_dig(&mut mine, &world, &mut perception, &mut body, 40);
+        assert_eq!(outcome, None);
+        assert_eq!(dug, Some(target), "the log is dug through the point the crosshair reaches");
+        assert!(mine.rejected.is_empty());
+    }
+
+    #[test]
+    fn leaves_hiding_every_point_of_a_log_are_dug_through_first() {
+        use crate::test_world::{set_block, swept};
+        // Run 9: a canopy log behind leaves. No crosshair point lands on the
+        // log; the pick toward its centre meets a leaf block, which is soft,
+        // not the support, opens no drop and holds back no fluid: it is dug as
+        // an occluder (dig-through used to run only when no target was found).
+        let target = BlockPos::new(0, 64, 2);
+        let mut world = floor_world();
+        set_block(&mut world, target, BlockState::from(BlockKind::OakLog));
+        for y in [64, 65] {
+            set_block(&mut world, BlockPos::new(0, y, 1), BlockState::from(BlockKind::OakLeaves));
+        }
+        let mut perception = swept(&world);
+        let mut body = standing_body(&world);
+        let mut mine = fresh_mine("#logs", Some(target));
+        let (dug, outcome) = first_dig(&mut mine, &world, &mut perception, &mut body, 40);
+        assert_eq!(outcome, None);
+        assert_eq!(dug, Some(BlockPos::new(0, 65, 1)), "the leaf block is dug first");
+        let dig = mine.dig_through.as_ref().expect("a dig-through");
+        assert_eq!(dig.occluders, 1);
+        assert!(dig.digging_occluder);
+        assert!(mine.rejected.is_empty(), "an occluder is not a rejection");
+    }
+
+    #[test]
+    fn a_log_no_crosshair_point_reaches_is_rejected_and_another_is_mined() {
+        use crate::test_world::{set_block, swept};
+        // Stone hides every point of the nearer log; nothing soft to dig. The
+        // call rejects it for the rest of the call and mines the other log
+        // instead of retrying the same cell (run 9).
+        let hidden = BlockPos::new(0, 64, 2);
+        let other = BlockPos::new(2, 64, 0);
+        let mut world = floor_world();
+        set_block(&mut world, hidden, BlockState::from(BlockKind::OakLog));
+        set_block(&mut world, other, BlockState::from(BlockKind::OakLog));
+        for y in [64, 65] {
+            set_block(&mut world, BlockPos::new(0, y, 1), BlockState::from(BlockKind::Stone));
+        }
+        let mut perception = swept(&world);
+        let mut body = standing_body(&world);
+        let mut mine = fresh_mine("#logs", Some(hidden));
+        let (dug, outcome) = first_dig(&mut mine, &world, &mut perception, &mut body, 40);
+        assert_eq!(outcome, None);
+        assert_eq!(dug, Some(other), "the other log is mined");
+        assert_eq!(mine.rejected, vec![hidden]);
+    }
+
+    #[test]
+    fn with_every_candidate_rejected_the_call_fails_typed_at_once() {
+        use crate::test_world::{set_block, swept};
+        for (target, walls, kind) in [
             // Level with the head: nothing to climb to, the view is blocked.
-            (BlockPos::new(0, 64, 2), BlockPos::new(0, 64, 1), "no_sight"),
+            (
+                BlockPos::new(0, 64, 2),
+                vec![BlockPos::new(0, 64, 1), BlockPos::new(0, 65, 1)],
+                "no_sight",
+            ),
             // Overhead (feet + 3): climbing could change the angle.
-            (BlockPos::new(0, 67, 2), BlockPos::new(0, 66, 1), "out_of_reach"),
+            (BlockPos::new(0, 67, 2), vec![BlockPos::new(0, 66, 1)], "out_of_reach"),
         ] {
-            let mut world = world();
+            let mut world = floor_world();
             set_block(&mut world, target, BlockState::from(BlockKind::OakLog));
-            set_block(&mut world, wall, BlockState::from(BlockKind::Stone));
+            for wall in &walls {
+                set_block(&mut world, *wall, BlockState::from(BlockKind::Stone));
+            }
             let mut perception = swept(&world);
-            let mut body = Body::new(feet());
+            let mut body = standing_body(&world);
             let mut mine = fresh_mine("#logs", Some(target));
             let (tick, outcome) =
                 run_to_outcome(&mut mine, &world, &mut perception, &mut body, 60)
                     .unwrap_or_else(|| panic!("{kind}: it never failed"));
-            assert_eq!(outcome, Outcome::Failed(kind.into()), "{target:?} behind {wall:?}");
-            assert!(
-                (BLOCKED_TICKS as u64..=BLOCKED_TICKS as u64 + 6).contains(&tick),
-                "{kind}: failed on tick {tick}, about {BLOCKED_TICKS} aligned ticks"
-            );
+            assert_eq!(outcome, Outcome::Failed(kind.into()), "{target:?} behind {walls:?}");
+            assert!(tick <= 3, "{kind}: no candidate is left, so no wait: tick {tick}");
+            assert_eq!(mine.rejected, vec![target]);
         }
     }
 

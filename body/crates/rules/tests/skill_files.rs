@@ -55,6 +55,7 @@ fn every_skill_file_loads_together() {
         "get_stone_sword",
         "hunt",
         "get_food",
+        "hunt_food",
         "cook_food",
         "take_shelter",
         "night_watch",

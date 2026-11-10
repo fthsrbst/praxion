@@ -12,6 +12,9 @@ path = "src/lib.rs"
 
 [dependencies]
 azalea-inventory = { path = "../../../third_party/azalea/azalea-inventory" }
+# The collision shape behind `closes_shelter` (the same table perception and
+# the planner read).
+azalea-physics = { path = "../../../third_party/azalea/azalea-physics" }
 azalea-registry = { path = "../../../third_party/azalea/azalea-registry" }
 praxion-gamedata = { path = "../gamedata" }
 praxion-interpreter = { path = "../interpreter" }

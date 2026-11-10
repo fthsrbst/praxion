@@ -268,6 +268,7 @@ fn common_view() -> praxion_reflexes::View {
         next_drop: 0,
         creeper: None,
         melee: None,
+        melee_others: [None; praxion_reflexes::MAX_MELEE_OTHERS],
         endermen: [None; praxion_reflexes::MAX_ENDERMEN],
         enderman_count: 0,
         arrows: [None; praxion_reflexes::MAX_ARROWS],

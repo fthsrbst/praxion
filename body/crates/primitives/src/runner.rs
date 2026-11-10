@@ -24,6 +24,7 @@ use crate::move_to::Move;
 use crate::pickup::PickupItem;
 use crate::pillar::Pillar;
 use crate::place::Place;
+use crate::shelter::Shelter;
 use crate::small::{Attack, Eat, Equip, EquipStage, Observe, Wait};
 use crate::smelt::Smelt;
 
@@ -127,6 +128,7 @@ enum Active {
     Dig(Digger),
     Place(Place),
     Pillar(Pillar),
+    Shelter(Shelter),
     Craft(Craft),
     Smelt(Smelt),
     Pickup(PickupItem),
@@ -146,7 +148,9 @@ impl Active {
     /// crafting table, and `move_to` treats "unrefuted" as "not corrected",
     /// not as "arrived": the follower's own goal check ends it. `dig_down`
     /// and `branch_mine` dig many blocks, one receipt each, and end on their
-    /// own stop rule.
+    /// own stop rule; `shelter` digs and places several blocks, one receipt
+    /// each, and ends when the body is sealed in (`leave_shelter`, the same
+    /// machine, when it is out).
     ///
     /// `craft` is the one exception to the confirmed gate: it enters its close
     /// path on any receipt, so `Runner::settle` keeps it active; `Runner::tick`
@@ -156,7 +160,11 @@ impl Active {
             Active::Craft(craft) => craft.close_outcome.is_some(),
             Active::Smelt(smelt) => smelt.close_outcome.is_some(),
             Active::Mine(mine) => *outcome == Outcome::Confirmed && mine.pickup.is_some(),
-            Active::Move(_) | Active::Explore(_) | Active::Attack(_) | Active::Dig(_) => {
+            Active::Move(_)
+            | Active::Explore(_)
+            | Active::Attack(_)
+            | Active::Dig(_)
+            | Active::Shelter(_) => {
                 *outcome == Outcome::Confirmed
             }
             _ => false,
@@ -193,6 +201,8 @@ impl Runner {
                 dig_through: None,
                 blocked: 0,
                 uphill: 0,
+                rejected: Vec::new(),
+                rejected_kind: None,
             }),
             "dig_down" => Active::Dig(Digger::dig_down(arg)),
             "branch_mine" => Active::Dig(Digger::branch_mine(arg)),
@@ -206,6 +216,8 @@ impl Runner {
                 clear_clicks: 0,
             }),
             "pillar" => Active::Pillar(Pillar::new(arg)),
+            "shelter" => Active::Shelter(Shelter::new()),
+            "leave_shelter" => Active::Shelter(Shelter::leave()),
             "craft" => Active::Craft(Craft::new(arg)?),
             "smelt" => Active::Smelt(Smelt::new(arg)),
             "pickup" => Active::Pickup(PickupItem::new(arg)),
@@ -287,6 +299,7 @@ impl Runner {
                 // stands: the pillar marks its cell as scaffolding here, not
                 // when it clicks (review finding 3).
                 Active::Pillar(pillar) if outcome == Outcome::Confirmed => pillar.note_settled(),
+                Active::Shelter(shelter) if outcome == Outcome::Confirmed => shelter.note_settled(),
                 _ => {}
             }
         }
@@ -309,6 +322,7 @@ impl Runner {
         match &mut self.active {
             Some(Active::Mine(mine)) => mine.note_registered(),
             Some(Active::Dig(dig)) => dig.note_registered(),
+            Some(Active::Shelter(shelter)) => shelter.note_registered(),
             _ => {}
         }
     }
@@ -393,6 +407,7 @@ impl Runner {
             Active::Dig(state) => state.tick(ctx),
             Active::Place(state) => state.tick(ctx, self.started),
             Active::Pillar(state) => state.tick(ctx, self.started),
+            Active::Shelter(state) => state.tick(ctx),
             Active::Craft(state) => state.tick(ctx, self.started),
             Active::Smelt(state) => state.tick(ctx, self.started),
             Active::Pickup(state) => state.tick(ctx, self.started),

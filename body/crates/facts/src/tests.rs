@@ -543,7 +543,7 @@ fn unknown_helper_facts_propagate() {
     perception.begin_tick(&world);
     let mut facts = Facts::new(&mut perception, &world);
 
-    for name in ["health", "food", "air", "burning", "is_night"] {
+    for name in ["health", "food", "air", "burning", "is_night", "sheltered"] {
         assert_eq!(
             facts.bool_fact(&call(name, vec![])),
             Truth::Unknown(call(name, vec![])),
@@ -599,4 +599,131 @@ fn the_crafting_result_slot_is_not_owned() {
         IntValue::Known(1),
         "grid items are still owned: closing the grid returns them"
     );
+}
+
+/// A world with the body's feet at (8, 64, 8), the middle of the loaded chunk,
+/// and stone in every cell `sheltered()` checks except `open`.
+fn shelter_world(open: &[BlockPos]) -> World {
+    let mut world = world();
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
+            pos: Vec3::new(8.5, 64.0, 8.5),
+            flags: azalea_protocol::common::movements::MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    for cell in shelter_cells(BlockPos::new(8, 64, 8)) {
+        if !open.contains(&cell) {
+            set_block(&mut world, cell, praxion_world::BlockState::from(BlockKind::Stone));
+        }
+    }
+    world
+}
+
+fn sheltered_fact(world: &World) -> Truth {
+    let mut perception = Perception::new(Config::default());
+    perception.begin_tick(world);
+    Facts::new(&mut perception, world).bool_fact(&call("sheltered", vec![]))
+}
+
+#[test]
+fn shelter_cells_are_the_eight_sides_then_the_cell_over_the_head() {
+    let cells = shelter_cells(BlockPos::new(8, 64, 8));
+    let feet_level: Vec<_> = cells[..4].iter().map(|cell| cell.y).collect();
+    let head_level: Vec<_> = cells[4..8].iter().map(|cell| cell.y).collect();
+    assert_eq!(feet_level, [64; 4], "feet-level sides first: walls go bottom up");
+    assert_eq!(head_level, [65; 4]);
+    assert_eq!(cells[8], BlockPos::new(8, 66, 8), "the cover is last");
+    for cell in &cells[..8] {
+        assert_eq!((cell.x - 8).abs() + (cell.z - 8).abs(), 1, "{cell:?} is a side");
+    }
+}
+
+#[test]
+fn sheltered_is_true_only_when_the_cover_and_all_eight_sides_are_full_blocks() {
+    // Decision 2026-11-10 "A sealed shelter now".
+    assert_eq!(sheltered_fact(&shelter_world(&[])), Truth::True, "sealed in");
+
+    // The cover over the head is open: an arrow or a fall reaches the body.
+    assert_eq!(
+        sheltered_fact(&shelter_world(&[BlockPos::new(8, 66, 8)])),
+        Truth::False,
+        "open to the sky"
+    );
+    // One side at head level is open: a mob can walk in.
+    assert_eq!(
+        sheltered_fact(&shelter_world(&[BlockPos::new(7, 65, 8)])),
+        Truth::False,
+        "a gap in the wall"
+    );
+
+    // A slab is not a full block: kept simple, it counts as open.
+    let mut slab = shelter_world(&[]);
+    set_block(
+        &mut slab,
+        BlockPos::new(8, 64, 9),
+        praxion_world::BlockState::from(BlockKind::OakSlab),
+    );
+    assert_eq!(sheltered_fact(&slab), Truth::False, "a slab leaves a gap");
+
+    // In the open the answer is a known false, not unknown, so the skill's
+    // `true -> shelter()` rule runs.
+    let mut world = world();
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
+            pos: Vec3::new(8.5, 64.0, 8.5),
+            flags: azalea_protocol::common::movements::MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    assert_eq!(sheltered_fact(&world), Truth::False);
+}
+
+#[test]
+fn the_feet_cell_on_a_block_lower_than_a_cube_is_above_that_block() {
+    // A dirt path (15/16) or farmland at y 63 puts the feet at 63.9375, soul
+    // sand or mud (14/16) at 63.875: the feet are in cell 64, not in the block.
+    for y in [63.9375, 63.875, 64.0] {
+        assert_eq!(feet_cell(Vec3::new(8.5, y, 8.5)), BlockPos::new(8, 64, 8), "y {y}");
+    }
+    // Below a half block the feet really are in that cell (a carpet).
+    assert_eq!(feet_cell(Vec3::new(8.5, 64.0625, 8.5)), BlockPos::new(8, 64, 8));
+    assert_eq!(feet_cell(Vec3::new(-0.5, 64.0, -7.5)), BlockPos::new(-1, 64, -8));
+}
+
+#[test]
+fn a_body_standing_on_a_dirt_path_is_sheltered_by_the_cells_around_its_feet() {
+    // `floor(y)` took the path block itself for the feet cell: the fact then
+    // checked the walls one cell too low and the feet cell as the cover, so a
+    // body sealed in on a path was "open" and `shelter()` tried to fill its
+    // own head cell.
+    let mut world = shelter_world(&[]);
+    set_block(
+        &mut world,
+        BlockPos::new(8, 63, 8),
+        praxion_world::BlockState::from(BlockKind::DirtPath),
+    );
+    // Open the cells one below the shelter, which a floor(y) feet cell checks.
+    for cell in shelter_cells(BlockPos::new(8, 63, 8)) {
+        if cell.y < 64 {
+            set_block(&mut world, cell, praxion_world::BlockState::AIR);
+        }
+    }
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
+            pos: Vec3::new(8.5, 63.9375, 8.5),
+            flags: azalea_protocol::common::movements::MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    assert_eq!(sheltered_fact(&world), Truth::True);
 }

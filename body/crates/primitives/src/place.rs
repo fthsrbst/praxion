@@ -12,7 +12,9 @@ use praxion_perception::{BlockFilter, BlockRegion, Caller};
 use praxion_planner::center;
 use praxion_world::{BlockDescription, BlockState};
 
-use crate::common::{HandSelect, Selecting, aim_precise, count_item, hotbar_index, idle};
+use crate::common::{
+    HandSelect, Selecting, aim_precise, cell_centre, count_item, hotbar_index, idle,
+};
 use crate::runner::{Ctx, IntentSpec};
 
 #[derive(Debug)]
@@ -175,7 +177,7 @@ pub(crate) fn place_support(state: BlockState) -> bool {
 /// touches the cell's face does not block the placement. A full cube is
 /// assumed, which is exact for the crafting table, the only block skills place
 /// today; a slab or a torch would need its real collision shape.
-fn overlaps_body(body_box: &azalea_core::aabb::Aabb, cell: BlockPos) -> bool {
+pub(crate) fn overlaps_body(body_box: &azalea_core::aabb::Aabb, cell: BlockPos) -> bool {
     let min = Vec3::new(f64::from(cell.x), f64::from(cell.y), f64::from(cell.z));
     // Vanilla inflates the entity query by 1e-7, so a box lying exactly on a
     // face still blocks; inflate the body box the same.
@@ -187,17 +189,6 @@ fn overlaps_body(body_box: &azalea_core::aabb::Aabb, cell: BlockPos) -> bool {
         min,
         max: min + Vec3::new(1., 1., 1.),
     })
-}
-
-/// The true centre of a cell. `praxion_planner::center` is the centre of the
-/// cell's floor (the point a body standing in it occupies), which aimed
-/// `place` at a side face's bottom edge.
-pub(crate) fn cell_centre(pos: BlockPos) -> Vec3 {
-    Vec3::new(
-        f64::from(pos.x) + 0.5,
-        f64::from(pos.y) + 0.5,
-        f64::from(pos.z) + 0.5,
-    )
 }
 
 /// Attack clicks `place` may spend breaking a plant that stands between the

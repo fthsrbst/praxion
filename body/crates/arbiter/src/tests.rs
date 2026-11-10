@@ -12,7 +12,8 @@ use praxion_interpreter::{
 };
 use praxion_planner::{TestWorld, aim};
 use praxion_reflexes::{
-    EntityView, FoodChoice, MAX_ARROWS, MAX_ENDERMEN, ReflexKind, Settings, View, WeaponChoice,
+    EntityView, FoodChoice, MAX_ARROWS, MAX_ENDERMEN, MAX_MELEE_OTHERS, ReflexKind, Settings, View,
+    WeaponChoice,
 };
 use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::Vec3;
@@ -174,6 +175,7 @@ fn bare_view(feet: Vec3, health: f32, food: u32) -> View {
         next_drop: 0,
         creeper: None,
         melee: None,
+        melee_others: [None; MAX_MELEE_OTHERS],
         endermen: [None; MAX_ENDERMEN],
         enderman_count: 0,
         arrows: [None; MAX_ARROWS],
@@ -1084,4 +1086,139 @@ fn tiers_sort_highest_first() {
     assert!(Tier::Survival < Tier::Command);
     assert!(Tier::Command < Tier::Maintenance);
     assert!(Tier::Maintenance < Tier::Projects);
+}
+
+// ---------------------------------------------------------------------------
+// The skill that started a fight owns it (decision 2026-11-10)
+// ---------------------------------------------------------------------------
+
+fn with_melee(mut view: View, id: i32, kind: EntityKind, position: Vec3) -> View {
+    view.melee = Some(EntityView {
+        id,
+        kind,
+        position,
+        distance: view.eye.distance_to(position),
+    });
+    view
+}
+
+fn fight_program() -> Program {
+    program(
+        r#"
+skill fight()
+  rules:
+    true -> attack(zombie)
+
+skill close_in()
+  rules:
+    true -> move_to(zombie)
+"#,
+    )
+}
+
+/// Run `ticks` arbiter ticks on one view and return every owner seen and every
+/// event logged.
+fn run_view(rig: &mut Rig, view: &View, ticks: u64) -> (Vec<Owner>, Vec<EventKind>) {
+    let mut owners = Vec::new();
+    let mut events = Vec::new();
+    let health = view.health.unwrap_or(20.0);
+    for tick in 0..ticks {
+        let out = rig.tick(tick, view, Needs { health, food: 20 }, &Settings::default());
+        owners.push(out.owner);
+        events.extend(out.events);
+    }
+    (owners, events)
+}
+
+#[test]
+fn an_attack_in_flight_keeps_its_mob_from_the_melee_reflex() {
+    // Run 9: the reflex took the skeleton from `hunt` every few ticks and the
+    // skill's own attack almost never ran.
+    let mut rig = Rig::new(fight_program());
+    rig.actuator = Mock::with_duration(100);
+    rig.command("fight");
+    let feet = Vec3::new(0.5, 64.0, 0.5);
+    let view = with_melee(bare_view(feet, 20.0, 20), 5, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+    let (owners, _) = run_view(&mut rig, &view, 12);
+    assert!(
+        owners.iter().all(|owner| *owner == Owner::Skill { intent_id: 1 }),
+        "the skill keeps the fight it started: {owners:?}"
+    );
+    assert_eq!(rig.arbiter.engine().state().engagement(), Some("zombie"));
+    assert_eq!(rig.actuator.cancels, 0, "the attack was never preempted");
+}
+
+#[test]
+fn a_continuous_move_to_a_mob_is_an_engagement_too() {
+    let mut rig = Rig::new(fight_program());
+    rig.command("close_in");
+    let feet = Vec3::new(0.5, 64.0, 0.5);
+    let view = with_melee(bare_view(feet, 20.0, 20), 5, EntityKind::Zombie, Vec3::new(0.5, 64.0, 3.5));
+    let (owners, _) = run_view(&mut rig, &view, 12);
+    assert!(
+        owners.iter().all(|owner| *owner == Owner::Skill { intent_id: 1 }),
+        "{owners:?}"
+    );
+    assert_eq!(rig.arbiter.engine().state().engagement(), Some("zombie"));
+}
+
+#[test]
+fn another_mob_still_takes_the_body_from_an_engaged_skill() {
+    let mut rig = Rig::new(fight_program());
+    rig.actuator = Mock::with_duration(100);
+    rig.command("fight");
+    let feet = Vec3::new(0.5, 64.0, 0.5);
+    let view = with_melee(bare_view(feet, 20.0, 20), 6, EntityKind::Spider, Vec3::new(0.5, 64.0, 2.5));
+    let (owners, _) = run_view(&mut rig, &view, 6);
+    assert!(
+        owners.contains(&Owner::Reflex(ReflexKind::Melee)),
+        "a spider the skill is not fighting is the reflex's: {owners:?}"
+    );
+}
+
+#[test]
+fn low_health_flees_even_from_the_engaged_mob() {
+    let mut rig = Rig::new(fight_program());
+    rig.actuator = Mock::with_duration(100);
+    rig.command("fight");
+    let feet = Vec3::new(0.5, 64.0, 0.5);
+    let mut view = with_melee(bare_view(feet, 6.0, 20), 5, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+    view.best_weapon = Some(WeaponChoice {
+        slot: 36,
+        kind: ItemKind::StoneSword,
+        rank: 4,
+    });
+    let (owners, _) = run_view(&mut rig, &view, 6);
+    assert!(owners.contains(&Owner::Reflex(ReflexKind::Melee)), "{owners:?}");
+    assert!(
+        matches!(
+            rig.arbiter.engine().active_action(),
+            Some(praxion_reflexes::ReflexAction::Flee { .. })
+        ),
+        "{:?}",
+        rig.arbiter.engine().active_action()
+    );
+}
+
+#[test]
+fn a_reflex_start_logs_its_action_target_and_distance() {
+    // Run 9 logged only `owner_changed reflex:melee`.
+    let mut rig = Rig::new(continuous_program());
+    rig.command("work");
+    let feet = Vec3::new(0.5, 64.0, 0.5);
+    let view = with_melee(bare_view(feet, 20.0, 20), 5, EntityKind::Zombie, Vec3::new(0.5, 64.0, 2.5));
+    let (owners, events) = run_view(&mut rig, &view, 4);
+    assert!(owners.contains(&Owner::Reflex(ReflexKind::Melee)), "{owners:?}");
+    let notes: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            EventKind::Note { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        vec!["reflex_action kind=melee action=attack target=5 distance=2.00 renewed=false"],
+        "{events:?}"
+    );
 }

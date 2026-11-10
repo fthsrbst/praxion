@@ -37,6 +37,7 @@ CORE_NAMES = {
     "get_wooden_axe",
     "get_wooden_pickaxe",
     "hunt",
+    "hunt_food",
     "night_watch",
     "search_surface",
     "take_shelter",
@@ -80,11 +81,13 @@ def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
         "dig_down",
         "eat",
         "explore",
+        "leave_shelter",
         "mine",
         "move_to",
         "pickup",
         "pillar",
         "place",
+        "shelter",
         "smelt",
         "wait",
     ]
@@ -98,6 +101,8 @@ def test_primitive_and_fact_lists_come_from_the_core_skills() -> None:
         "is_night",
         "near",
         "near_entity",
+        "sheltered",
+        "time_of_day",
     ]
 
 

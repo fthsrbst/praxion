@@ -10,7 +10,10 @@ use praxion_planner::KnownBlocks;
 use praxion_world::BlockPos;
 
 use crate::motion::Motion;
-use crate::reflex::{LatencyClass, ReflexAction, ReflexKind, ReflexState, evaluate};
+use crate::reflex::{
+    LatencyClass, MELEE_COOLDOWN_TICKS, ReflexAction, ReflexKind, ReflexState, action_for,
+    evaluate,
+};
 use crate::settings::Settings;
 use crate::view::View;
 
@@ -95,6 +98,15 @@ pub enum ReflexTick {
         kind: ReflexKind,
         frame: ControlFrame,
     },
+    /// The same reflex continues with a new action, in place: its window was
+    /// renewed (another 30 ticks of attack) or it changed what it does (an
+    /// attack became a flee at low health, or a new target). No generation
+    /// bump and no new owner: the body never left the reflex.
+    Renewed {
+        kind: ReflexKind,
+        action: ReflexAction,
+        frame: ControlFrame,
+    },
     /// The reflex ended this tick; the body may go back to a skill.
     Ended {
         kind: ReflexKind,
@@ -107,7 +119,9 @@ pub enum ReflexTick {
 impl ReflexTick {
     pub fn frame(&self) -> Option<&ControlFrame> {
         match self {
-            ReflexTick::Started { frame, .. } | ReflexTick::Running { frame, .. } => Some(frame),
+            ReflexTick::Started { frame, .. }
+            | ReflexTick::Running { frame, .. }
+            | ReflexTick::Renewed { frame, .. } => Some(frame),
             ReflexTick::Idle | ReflexTick::Ended { .. } => None,
         }
     }
@@ -116,6 +130,7 @@ impl ReflexTick {
         match self {
             ReflexTick::Started { kind, .. }
             | ReflexTick::Running { kind, .. }
+            | ReflexTick::Renewed { kind, .. }
             | ReflexTick::Ended { kind, .. } => Some(*kind),
             ReflexTick::Idle => None,
         }
@@ -162,6 +177,13 @@ impl Engine {
         self.active.as_ref().map(|active| active.action)
     }
 
+    /// Tell the reflexes which mob the running skill is engaged with (see
+    /// [`ReflexState::set_engagement`]). The arbiter calls this whenever the
+    /// skill's in-flight primitive changes.
+    pub fn set_engagement(&mut self, mob: Option<&str>) {
+        self.state.set_engagement(mob);
+    }
+
     /// Run one tick. The caller must have started perception's tick and built
     /// the [`View`] from it.
     ///
@@ -177,6 +199,20 @@ impl Engine {
         blocks: &mut dyn KnownBlocks,
     ) -> ReflexTick {
         self.state.observe(tick, view, settings, blocks);
+
+        // A higher-priority trigger takes the body from a running lower one:
+        // an arrow or a creeper must not wait for a fight to end (decision
+        // 2026-11-10). The preempted routine is dropped without a cooldown: it
+        // did not end on its own, and it may come back once the higher one
+        // ends.
+        if let Some(active) = &self.active {
+            let above = active.kind.priority();
+            if let Some(started) = self.try_start(view, settings, body, tick, blocks, |kind| {
+                kind.priority() > above
+            }) {
+                return started;
+            }
+        }
 
         if let Some(active) = &mut self.active {
             let ran_ticks = active.ran_for(tick);
@@ -245,12 +281,35 @@ impl Engine {
             // The reflex's own end condition: its trigger is gone. A flee that
             // reached the goal, a fire that went out and a creeper that left
             // the range all end here, not only at the routine's own boundary.
-            let trigger_gone = !active.kind.triggered(view, &self.state, settings);
+            // Melee holds until its exit range (`ReflexKind::holds`).
+            let trigger_gone = !active.kind.holds(view, &self.state, settings);
+
+            // A melee reflex whose trigger still holds renews in place: a
+            // finished attack window gets another one, and an attack becomes a
+            // flee the tick health falls to the threshold. Ending and
+            // re-acquiring instead bumped the generation, moved the gaze and
+            // handed the skill one tick at a time (run 9).
+            let mut renewed = None;
+            if active.kind == ReflexKind::Melee
+                && !timed_out
+                && !trigger_gone
+                && let Some(wanted) = action_for(active.kind, view, &self.state, settings)
+                && (!same_variant(wanted, active.action) || active.motion.ended(tick, view, body))
+                && let Some(motion) = Motion::start(wanted, view, settings, body, tick, blocks)
+            {
+                active.motion = motion;
+                active.action = wanted;
+                renewed = Some(wanted);
+            }
 
             if timed_out || trigger_gone || active.motion.ended(tick, view, body) {
                 let kind = active.kind;
                 self.active = None;
-                if timed_out {
+                if kind == ReflexKind::Melee {
+                    // Any end of a fight leaves the body to the skill for a
+                    // second before the reflex may take it again.
+                    self.state.set_cooldown(kind, tick + MELEE_COOLDOWN_TICKS);
+                } else if timed_out {
                     // Do not immediately re-acquire the same reflex: give the
                     // skill a few ticks or the threat a chance to move.
                     self.state.set_cooldown(kind, tick + 20);
@@ -264,14 +323,40 @@ impl Engine {
             let frame = active
                 .motion
                 .step(tick, body.generation(), body, view, settings);
-            return ReflexTick::Running {
-                kind: active.kind,
-                frame,
+            return match renewed {
+                Some(action) => ReflexTick::Renewed {
+                    kind: active.kind,
+                    action,
+                    frame,
+                },
+                None => ReflexTick::Running {
+                    kind: active.kind,
+                    frame,
+                },
             };
         }
 
+        self.try_start(view, settings, body, tick, blocks, |_| true)
+            .unwrap_or(ReflexTick::Idle)
+    }
+
+    /// Start the first reflex, in priority order, that `eligible` admits and
+    /// whose trigger is present, off cooldown and past its latency gate. A
+    /// started reflex replaces whatever was running.
+    fn try_start(
+        &mut self,
+        view: &View,
+        settings: &Settings,
+        body: &mut Body,
+        tick: u64,
+        blocks: &mut dyn KnownBlocks,
+        eligible: impl Fn(ReflexKind) -> bool,
+    ) -> Option<ReflexTick> {
         for kind in ReflexKind::ALL {
-            if self.state.on_cooldown(kind, tick) || !kind.triggered(view, &self.state, settings) {
+            if !eligible(kind)
+                || self.state.on_cooldown(kind, tick)
+                || !kind.triggered(view, &self.state, settings)
+            {
                 continue;
             }
             let class = kind.latency_class(view);
@@ -299,15 +384,21 @@ impl Engine {
                 air_target,
                 air_best: air_target.map(|cell| distance_to_cell(body, cell)),
             });
-            return ReflexTick::Started {
+            return Some(ReflexTick::Started {
                 kind,
                 action,
                 frame,
-            };
+            });
         }
 
-        ReflexTick::Idle
+        None
     }
+}
+
+/// Whether two actions are the same kind of thing (an attack and an attack,
+/// a flee and a flee), whatever their targets.
+fn same_variant(a: ReflexAction, b: ReflexAction) -> bool {
+    std::mem::discriminant(&a) == std::mem::discriminant(&b)
 }
 
 /// The human-floor gate as a number, for logs and tests: two ticks of prior

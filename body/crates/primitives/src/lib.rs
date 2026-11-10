@@ -17,6 +17,7 @@ mod pickup;
 mod pillar;
 mod place;
 mod runner;
+mod shelter;
 mod small;
 mod smelt;
 mod station;

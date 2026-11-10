@@ -5,8 +5,8 @@
 //! over the resulting value. Nothing here reads the world directly: the world
 //! enters only through `praxion_perception`.
 //!
-//! The view is fixed-size where the hot path allows it: the nearest mob of
-//! each kind, up to four Endermen and up to eight arrows. The inventory is the
+//! The view is fixed-size where the hot path allows it: the nearest creeper,
+//! up to eight melee mobs, up to four Endermen and up to eight arrows. The inventory is the
 //! one exception, because the perception API returns a `Vec` and cloning it is
 //! its price; only the best food and the best weapon survive into the view.
 //!
@@ -36,6 +36,12 @@ pub const MAX_ENDERMEN: usize = 4;
 
 /// Arrows tracked for the stray-arrow reflex.
 pub const MAX_ARROWS: usize = 8;
+
+/// Melee mobs tracked beyond the nearest one ([`View::melee_others`]). The
+/// nearest mob alone is not enough: when the running skill is engaged with it,
+/// a second mob of another kind must still reach the melee trigger (decision
+/// 2026-11-10 "The skill that started a fight owns it").
+pub const MAX_MELEE_OTHERS: usize = 7;
 
 /// Entities beyond this are not threats yet; the sight range itself is 64.
 const THREAT_RADIUS: u32 = 64;
@@ -182,6 +188,17 @@ pub struct WeaponChoice {
     pub rank: u8,
 }
 
+impl WeaponChoice {
+    /// Whether the weapon is a sword (item tag `#swords`). "Armed" means a
+    /// sword, the same test as `night_watch` and the brain (decision 2026-11-10
+    /// "Unarmed at night: avoid contact"); an axe is still the best thing to
+    /// hit with, but it does not make the body armed.
+    pub fn is_sword(&self) -> bool {
+        let name = praxion_gamedata::normalize(self.kind.to_str());
+        praxion_gamedata::item_tag("swords").is_some_and(|swords| swords.contains(&name))
+    }
+}
+
 /// Everything the reflex set sees this tick.
 #[derive(Clone, Debug)]
 pub struct View {
@@ -226,6 +243,9 @@ pub struct View {
     pub creeper: Option<EntityView>,
     /// The nearest zombie, skeleton or spider.
     pub melee: Option<EntityView>,
+    /// The next nearest zombies, skeletons and spiders after [`View::melee`],
+    /// nearest first; see [`View::melee_mobs`].
+    pub melee_others: [Option<EntityView>; MAX_MELEE_OTHERS],
     pub endermen: [Option<EntityView>; MAX_ENDERMEN],
     pub enderman_count: usize,
     pub arrows: [Option<ArrowView>; MAX_ARROWS],
@@ -321,6 +341,7 @@ impl View {
             next_drop,
             creeper: None,
             melee: None,
+            melee_others: [None; MAX_MELEE_OTHERS],
             endermen: [None; MAX_ENDERMEN],
             enderman_count: 0,
             arrows: [None; MAX_ARROWS],
@@ -354,7 +375,7 @@ impl View {
             match entity.kind {
                 EntityKind::Creeper => keep_nearest(&mut self.creeper, view),
                 EntityKind::Zombie | EntityKind::Skeleton | EntityKind::Spider => {
-                    keep_nearest(&mut self.melee, view)
+                    self.keep_melee(view)
                 }
                 EntityKind::Enderman => {
                     if self.enderman_count < MAX_ENDERMEN {
@@ -417,6 +438,34 @@ impl View {
                 if self.best_weapon.is_none_or(|best| choice.rank > best.rank) {
                     self.best_weapon = Some(choice);
                 }
+            }
+        }
+    }
+
+    /// Every tracked zombie, skeleton and spider, nearest first.
+    pub fn melee_mobs(&self) -> impl Iterator<Item = EntityView> + '_ {
+        self.melee
+            .into_iter()
+            .chain(self.melee_others.iter().flatten().copied())
+    }
+
+    /// The tracked melee mob with entity id `id`.
+    pub fn melee_mob(&self, id: i32) -> Option<EntityView> {
+        self.melee_mobs().find(|mob| mob.id == id)
+    }
+
+    /// Insert a melee mob into [`View::melee`] and [`View::melee_others`],
+    /// which together stay sorted nearest first; the farthest falls off when
+    /// all slots are full.
+    fn keep_melee(&mut self, candidate: EntityView) {
+        let mut carry = Some(candidate);
+        let slots = std::iter::once(&mut self.melee).chain(self.melee_others.iter_mut());
+        for slot in slots {
+            let Some(mob) = carry else {
+                break;
+            };
+            if slot.is_none_or(|current| mob.distance < current.distance) {
+                carry = slot.replace(mob);
             }
         }
     }

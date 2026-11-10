@@ -91,8 +91,8 @@ pub enum PublishOutcome {
 pub struct PortStats {
     /// Events discarded since the last connection or the last `dropped(n)`.
     pub dropped: u64,
-    /// True when the brain must be resynchronised: the driver should call
-    /// [`PortServer::publish_snapshot`] with a fresh state.
+    /// True when the brain must be resynchronised or asked for a snapshot: the
+    /// driver should call [`PortServer::publish_snapshot`] with a fresh state.
     pub needs_snapshot: bool,
 }
 
@@ -256,8 +256,9 @@ impl PortServer {
         ConnectionState::from_raw(self.shared.state.load(Ordering::Acquire))
     }
 
-    /// True when events were dropped or the brain asked for a resync, and the
-    /// driver must publish a fresh snapshot at or after the drop point.
+    /// True when events were dropped (the driver must publish a fresh snapshot
+    /// at or after the drop point) or the brain sent a `resync_request` (the
+    /// driver must publish a fresh snapshot; no queued event is lost).
     pub fn needs_snapshot(&self) -> bool {
         self.shared.needs_snapshot()
     }
@@ -283,14 +284,34 @@ impl Drop for PortServer {
 /// Overflow and resync bookkeeping, in one lock so a drop that races with a
 /// snapshot cannot be lost. The driver touches it only on a failed `try_send`
 /// (and once per tick for `stats`), never on the queued fast path.
+///
+/// Two different things ask for a snapshot. A real overflow (`resync`) lost
+/// events: the queue is drained and counted until a snapshot covers them, and
+/// the brain gets `dropped(n)`. A brain `resync_request` (`requested`) lost
+/// nothing: queued events keep flowing and the next snapshot published after
+/// the request is cut at the last sent event, like a wake snapshot. Run 9 lost
+/// a goal's settled receipt because a request used to drain the queue.
 struct Pending {
     /// Events discarded since the last `dropped(n)`.
     dropped: u64,
     /// Smallest snapshot `seq` that may follow: the highest discarded event
-    /// `seq`, or the last event the brain saw after a `resync_request`.
+    /// `seq`.
     floor: u64,
-    /// A `dropped(n)` and/or snapshot must be sent.
+    /// Events overflowed: a `dropped(n)` and a covering snapshot must be sent.
     resync: bool,
+    /// The brain sent a `resync_request`: a fresh snapshot must be sent.
+    requested: bool,
+}
+
+impl Pending {
+    const fn empty() -> Self {
+        Self {
+            dropped: 0,
+            floor: 0,
+            resync: false,
+            requested: false,
+        }
+    }
 }
 
 /// State shared by the driver thread, the accept thread and the connection
@@ -311,11 +332,7 @@ impl Shared {
     fn new() -> Self {
         Self {
             snapshot: Mutex::new(None),
-            pending: Mutex::new(Pending {
-                dropped: 0,
-                floor: 0,
-                resync: false,
-            }),
+            pending: Mutex::new(Pending::empty()),
             latest_seq: AtomicU64::new(0),
             latest_tick: AtomicU64::new(0),
             snapshot_owed: AtomicBool::new(false),
@@ -352,21 +369,40 @@ impl Shared {
         pending.resync = true;
     }
 
-    /// A `resync_request` cuts at the last event the brain has seen.
-    fn request_resync(&self, last_sent: u64) {
+    /// A `resync_request` asks for a snapshot published after it. A snapshot
+    /// already owed was published before the request, so it no longer counts:
+    /// the driver sees `needs_snapshot` and publishes a fresh one.
+    fn request_resync(&self) {
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        pending.floor = pending.floor.max(last_sent);
-        pending.resync = true;
+        pending.requested = true;
+        self.snapshot_owed.store(false, Ordering::Release);
     }
 
     fn needs_snapshot(&self) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        pending.resync || pending.requested
+    }
+
+    /// True only after a real overflow: the queue must be drained and counted.
+    fn overflowed(&self) -> bool {
         self.pending
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .resync
+    }
+
+    /// Clear a brain request once a snapshot answered it.
+    fn answer_request(&self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .requested = false;
     }
 
     fn dropped(&self) -> u64 {
@@ -388,9 +424,8 @@ impl Shared {
             return None;
         }
         let dropped = pending.dropped;
-        pending.dropped = 0;
-        pending.floor = 0;
-        pending.resync = false;
+        // The covering snapshot answers a brain request as well.
+        *pending = Pending::empty();
         Some(dropped)
     }
 
@@ -401,11 +436,7 @@ impl Shared {
             .pending
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        *pending = Pending {
-            dropped: 0,
-            floor: 0,
-            resync: false,
-        };
+        *pending = Pending::empty();
         self.snapshot_owed.store(false, Ordering::Release);
     }
 }
@@ -633,7 +664,6 @@ fn pump(stream: TcpStream, session: &Session) -> Result<(), FrameError> {
                         &mut writer,
                         &session.shared,
                         &session.incoming,
-                        sent_seq,
                     )? {
                         closed = true;
                         break;
@@ -669,7 +699,6 @@ fn handle_brain_message(
     writer: &mut TcpStream,
     shared: &Shared,
     incoming: &SyncSender<BrainMessage>,
-    last_sent: Option<u64>,
 ) -> Result<bool, FrameError> {
     shared.note_brain_message();
     match message {
@@ -683,9 +712,9 @@ fn handle_brain_message(
             )?;
         }
         BrainMessage::ResyncRequest => {
-            // The snapshot may cut at the last event the brain has seen: the
-            // state at that seq plus every later event is a complete view.
-            shared.request_resync(last_sent.unwrap_or(0));
+            // Nothing is lost: the answer is the next snapshot the driver
+            // publishes, cut at the last sent event, and queued events follow.
+            shared.request_resync();
         }
         // A repeated hello is harmless.
         BrainMessage::Hello { .. } => {}
@@ -703,13 +732,15 @@ fn handle_brain_message(
 /// Send `dropped(n)` and/or a snapshot when one is owed or the connection has
 /// to resynchronise. A snapshot that does not cover the discarded events is
 /// held back: the driver publishes a fresh one after seeing `needs_snapshot`.
+/// A brain request is answered by the next owed snapshot, through the wake
+/// branch.
 fn service_snapshot(
     writer: &mut TcpStream,
     shared: &Shared,
     sent_seq: &mut Option<u64>,
 ) -> Result<(), FrameError> {
     let owed = shared.snapshot_owed.swap(false, Ordering::AcqRel);
-    if !owed && !shared.needs_snapshot() {
+    if !owed && !shared.overflowed() {
         return Ok(());
     }
     let Some(snapshot) = shared.latest_snapshot() else {
@@ -728,22 +759,25 @@ fn service_snapshot(
         }
         write_frame(writer, &BodyMessage::Snapshot(snapshot.clone()))?;
         *sent_seq = Some(sent_seq.map_or(snapshot.seq, |sent| sent.max(snapshot.seq)));
-    } else if owed && !shared.needs_snapshot() && snapshot.seq >= sent_seq.unwrap_or(0) {
-        // A wake snapshot must not rewind the brain below an event it has, and
-        // must not swallow an event it has not been sent yet: cut it at the
-        // last sent event, so the queued receipts still follow it.
+    } else if owed && !shared.overflowed() && snapshot.seq >= sent_seq.unwrap_or(0) {
+        // A wake snapshot, or the answer to a brain request, must not rewind
+        // the brain below an event it has, and must not swallow an event it has
+        // not been sent yet: cut it at the last sent event, so the queued
+        // receipts still follow it.
         let mut snapshot = snapshot.clone();
         if let Some(sent) = *sent_seq {
             snapshot.seq = sent;
         }
         write_frame(writer, &BodyMessage::Snapshot(snapshot.clone()))?;
         *sent_seq = Some(sent_seq.map_or(snapshot.seq, |sent| sent.max(snapshot.seq)));
+        shared.answer_request();
     }
     Ok(())
 }
 
-/// Forward queued events in `seq` order. While a resync is pending, queued
-/// events are discarded and counted as drops: the coming snapshot covers them.
+/// Forward queued events in `seq` order. After a real overflow, queued events
+/// are discarded and counted as drops: the coming snapshot covers them. A
+/// brain `resync_request` discards nothing.
 /// Returns `Ok(true)` when the writer failed.
 fn service_events(
     writer: &mut TcpStream,
@@ -755,7 +789,7 @@ fn service_events(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
 
-    if session.shared.needs_snapshot() {
+    if session.shared.overflowed() {
         while let Ok(event) = outbound.try_recv() {
             session.shared.record_drop(event.seq);
         }

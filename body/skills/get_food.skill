@@ -1,24 +1,23 @@
-# Collect raw meat from passive animals. A core skill so the brain can set
-# "have food" as a goal (the arbiter's hunger need wakes the brain when no food
-# is held, see arbiter.rs): hunting runs for minutes, so it is a goal with a
-# budget, not a need that takes the body at the survival tier.
+# Have food: leave a shelter if the body is sealed in, then hunt. A core skill
+# so the brain can set "have food" as a goal (the arbiter's hunger need wakes
+# the brain when no food is held, see arbiter.rs): hunting runs for minutes, so
+# it is a goal with a budget, not a need that takes the body at the survival
+# tier. At night the brain sets it only when the food bar is critical
+# (decision 2026-11-10 "Hungry at night: hunt only when it is critical").
 #
-# Why the rules are ordered this way: the goal check is on top. Then the animal
-# that is in sight is hunted, cow first (the most meat), then pig, sheep and
-# chicken; `hunt` ends by itself when the kill and the pickup are done, and this
-# skill looks again. Raw meat counts as food: `eat_food` eats whatever the arbiter
-# chooses, and cooking (`cook_food`) is a separate goal because it needs a furnace.
-# With no animal in sight the body explores for a cow; an animal that comes into
-# sight on the way is hunted on the next tick, because every tick starts at the
-# top. `explore` ends when a cow is within 24 blocks; a failed search ends the
-# skill `not_found` after the usual three tries, and the brain may try again
-# elsewhere or at dawn.
+# Why the rules are ordered this way: the goal check is on top, so a body that
+# already holds n food items stays where it is, sealed in or not. Next, a body
+# sealed in (`sheltered()`) opens the shelter and climbs out first
+# (`leave_shelter`): no animal is in sight from inside, and a hunt that starts
+# there fails and leaves the body shut in (run 9, third review). A shelter that
+# cannot be left (`no_exit`, `unsafe`) is retried and fails the skill after the
+# third failure; the caller decides what then. An open body, or one whose
+# `sheltered()` perception cannot answer (an unknown guard never fires), hunts
+# with `hunt_food`, which holds the hunting rules: the six-rule limit leaves
+# no room for them here.
 skill get_food(n: int = 2)
-  doc "Have n food items: hunt cows, pigs, sheep and chickens in sight and pick up the meat."
+  doc "Have n food items: leave a shelter if sealed in, then hunt animals for meat."
   rules:
     count_food() >= $n -> done
-    near_entity(cow, 24) -> do hunt(cow, beef)
-    near_entity(pig, 24) -> do hunt(pig, porkchop)
-    near_entity(sheep, 24) -> do hunt(sheep, mutton)
-    near_entity(chicken, 24) -> do hunt(chicken, chicken)
-    true -> explore(cow)
+    sheltered() -> leave_shelter()
+    true -> do hunt_food($n)

@@ -487,7 +487,7 @@ def _setup_cow_arena(fixture, referee, run: BodyRun) -> None:
 
 
 def test_get_food_hunts_a_summoned_cow_and_collects_beef() -> None:
-    """Decision 2026-11-09 "Five next areas": ``get_food`` -> ``hunt``.
+    """Decision 2026-11-09 "Five next areas": ``get_food`` -> ``hunt_food`` -> ``hunt``.
 
     The body walks to the cow, hits it with the sword in hand, picks up the
     beef and the goal ends ``done``; the referee, not the body, decides that
@@ -559,6 +559,129 @@ def test_night_watch_kills_a_zombie_with_the_sword_and_survives() -> None:
         context = _context(run, summary)
 
         assert not _zombie_alive(run), "the zombie is still alive\n" + context
+        assert run.referee.death_count(BODY) == 0, "the referee saw a death\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+SHELTER_TIMEOUT = 180.0
+
+
+def _setup_frozen_night_with_dirt(fixture, referee, run: BodyRun) -> None:
+    """Frozen night, no natural spawns, dirt to build with.
+
+    Twelve covers the worst case, a wall-in on open ground (eight walls, the
+    helper on a wall and the cover); a dig down needs none.
+    """
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(14000)
+    fixture.give(BODY, "dirt", 12)
+
+
+def test_take_shelter_seals_the_body_in_at_night() -> None:
+    """Decision 2026-11-10 "A sealed shelter now".
+
+    At night ``take_shelter`` calls ``shelter()``: the body digs three cells
+    down and closes the cell over its head, or walls itself in where the ground
+    may not be dug. The clock is frozen at night, so the skill then waits and
+    never ends: the test watches for the confirmed ``shelter`` finish, and the
+    referee, not the body, checks a solid block over the body's head and that
+    the body is alive. Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "take_shelter",
+        setup=_setup_frozen_night_with_dirt,
+        max_ticks=6000,
+        start_delay_ticks=80,
+    ) as run:
+        deadline = time.monotonic() + SHELTER_TIMEOUT
+        sealed: List[dict] = []
+        while time.monotonic() < deadline:
+            sealed = [
+                e for e in _finished(run.events(), "shelter") if e.get("outcome") == "confirmed"
+            ]
+            if sealed or run.process.poll() is not None:
+                break
+            time.sleep(1.0)
+        events = run.events()
+        x, y, z = _feet_cell(run.referee)
+        cover = (x, y + 2, z)
+        context = "\n".join(
+            [
+                f"run dir: {run.run_dir}",
+                f"feet {(x, y, z)}, cover cell {cover}: {run.referee.block_at(*cover)!r}",
+                f"shelter finishes: {_finished(events, 'shelter')}",
+                f"body output tail:\n{run.output()[-2000:]}",
+            ]
+        )
+        assert sealed, "shelter() never confirmed\n" + context
+        assert not run.referee.block_is(*cover, "air"), "the sky is open over the head\n" + context
+        assert run.referee.block_is(*cover, "dirt"), "the cover is not the given dirt\n" + context
+        assert run.referee.death_count(BODY) == 0, "the referee saw a death\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+#: Mine the cover and climb out: three pillar steps or a two-block door.
+LEAVE_TIMEOUT = 120.0
+
+
+def test_take_shelter_climbs_out_in_the_morning() -> None:
+    """Decision 2026-11-10 "Shelter shape and exit".
+
+    The body seals itself in at a frozen night as above; then the clock is set
+    to morning, and ``take_shelter`` calls ``leave_shelter()`` before it ends:
+    the body mines its cover and climbs out (pillar steps out of the hole, or a
+    door in the wall-in box). The referee checks the body stands on the surface
+    level it started from with open air over its head, and is alive. Written
+    for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "take_shelter",
+        setup=_setup_frozen_night_with_dirt,
+        max_ticks=8000,
+        start_delay_ticks=80,
+    ) as run:
+        start_y = _feet_cell(run.referee)[1]
+        deadline = time.monotonic() + SHELTER_TIMEOUT
+        sealed: List[dict] = []
+        while time.monotonic() < deadline:
+            sealed = [
+                e for e in _finished(run.events(), "shelter") if e.get("outcome") == "confirmed"
+            ]
+            if sealed or run.process.poll() is not None:
+                break
+            time.sleep(1.0)
+        assert sealed, "shelter() never confirmed\n" + run.output()[-2000:]
+        run.fixture.time_set(1000)
+        deadline = time.monotonic() + LEAVE_TIMEOUT
+        left: List[dict] = []
+        while time.monotonic() < deadline:
+            left = [
+                e
+                for e in _finished(run.events(), "leave_shelter")
+                if e.get("outcome") == "confirmed"
+            ]
+            if left or run.process.poll() is not None:
+                break
+            time.sleep(1.0)
+        events = run.events()
+        x, y, z = _feet_cell(run.referee)
+        over = (x, y + 2, z)
+        context = "\n".join(
+            [
+                f"run dir: {run.run_dir}",
+                f"start feet y {start_y}, feet now {(x, y, z)}, over head {over}: "
+                f"{run.referee.block_at(*over)!r}",
+                f"shelter finishes: {_finished(events, 'shelter')}",
+                f"leave_shelter finishes: {_finished(events, 'leave_shelter')}",
+                f"body output tail:\n{run.output()[-2000:]}",
+            ]
+        )
+        assert left, "leave_shelter() never confirmed\n" + context
+        assert y >= start_y, "the body is still below the surface\n" + context
+        assert run.referee.block_is(*over, "air"), "something is over the head\n" + context
         assert run.referee.death_count(BODY) == 0, "the referee saw a death\n" + context
         assert run.referee.player_health(BODY) > 0.0, context
 

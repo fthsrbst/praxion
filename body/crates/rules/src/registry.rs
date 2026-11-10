@@ -95,6 +95,10 @@ impl Facts {
             ("time_of_day", ValueType::Int),
             // The edible items held, raw or cooked (`get_food` ends on it).
             ("count_food", ValueType::Int),
+            // The body is sealed in: the cell over the head and the eight
+            // sides of the feet and head cells are full blocks (decision
+            // 2026-11-10 "A sealed shelter now"; `praxion_facts::sheltered`).
+            ("sheltered", ValueType::Bool),
         ] {
             facts.add(FactSig {
                 name,
@@ -175,7 +179,7 @@ pub enum BlockRef {
     /// The block or item named by argument `index`.
     Param(usize),
     /// Any breakable ground block (`dig_down` and `branch_mine` remove
-    /// whatever lies in their way).
+    /// whatever lies in their way), or any building block `shelter` places.
     Any,
 }
 
@@ -399,6 +403,72 @@ impl Primitives {
                     from: BlockRef::Air,
                     to: BlockRef::Param(0),
                 }],
+            },
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::BlockStateChanged,
+        });
+
+        // `shelter()`: seal the body in for the night (decision 2026-11-10 "A
+        // sealed shelter now"). Dig three cells straight down and close the
+        // cell over the head, or, where the ground may not be dug, wall the
+        // body in where it stands. Each dug or placed block has its own
+        // receipt; the blocks dug and the block placed are chosen at run time
+        // (the dug dirt, else any carried building block), so the effects name
+        // no item. The budget covers the primitive's own 600-tick bound
+        // (`primitives/src/shelter.rs`), so its typed failure comes first.
+        primitives.add(PrimitiveRecord {
+            name: "shelter",
+            version: 1,
+            params: Vec::new(),
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            default_max_ticks: 640,
+            effects: Effects {
+                produces: Vec::new(),
+                drops: Vec::new(),
+                consumes: Vec::new(),
+                changes: vec![
+                    BlockChange {
+                        from: BlockRef::Any,
+                        to: BlockRef::Air,
+                    },
+                    BlockChange {
+                        from: BlockRef::Air,
+                        to: BlockRef::Any,
+                    },
+                ],
+            },
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::BlockStateChanged,
+        });
+
+        // `leave_shelter()`: open the shelter in the morning and climb out
+        // (decision 2026-11-10 "Shelter shape and exit"). Mine the cover, then
+        // a door in a wall or one pillar block at a time, each with its own
+        // receipt; the blocks are chosen at run time, so the effects name no
+        // item. The budget covers the primitive's own 720-tick bound
+        // (`primitives/src/shelter/leave.rs`), so its typed failure comes first.
+        primitives.add(PrimitiveRecord {
+            name: "leave_shelter",
+            version: 1,
+            params: Vec::new(),
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            default_max_ticks: 760,
+            effects: Effects {
+                produces: Vec::new(),
+                drops: Vec::new(),
+                consumes: Vec::new(),
+                changes: vec![
+                    BlockChange {
+                        from: BlockRef::Any,
+                        to: BlockRef::Air,
+                    },
+                    BlockChange {
+                        from: BlockRef::Air,
+                        to: BlockRef::Any,
+                    },
+                ],
             },
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::BlockStateChanged,
@@ -835,6 +905,8 @@ mod tests {
             "branch_mine",
             "place",
             "pillar",
+            "shelter",
+            "leave_shelter",
             "craft",
             "smelt",
             "eat",
@@ -878,6 +950,44 @@ mod tests {
             pillar.default_max_ticks >= 165,
             "outlasts the primitive's own two-jump bound (review finding 6)"
         );
+    }
+
+    #[test]
+    fn shelter_takes_no_argument_and_outlasts_its_own_bound() {
+        // Decision 2026-11-10 "A sealed shelter now".
+        let p = Primitives::standard();
+        let shelter = p.get("shelter").expect("shelter is registered");
+        assert!(shelter.params.is_empty(), "shelter()");
+        assert_eq!(shelter.kind, PrimitiveKind::Discrete);
+        assert_eq!(shelter.cancellation, CancellationClass::Interruptible);
+        assert_eq!(shelter.evidence, EvidenceKind::BlockStateChanged);
+        assert!(
+            shelter.default_max_ticks > 600,
+            "outlasts the primitive's own 600-tick bound, so its typed failure comes first"
+        );
+        let changes = &shelter.effects.changes;
+        assert!(changes.contains(&BlockChange { from: BlockRef::Any, to: BlockRef::Air }), "digs");
+        assert!(changes.contains(&BlockChange { from: BlockRef::Air, to: BlockRef::Any }), "places");
+        assert!(shelter.effects.consumes.is_empty(), "the block is chosen at run time");
+    }
+
+    #[test]
+    fn leave_shelter_takes_no_argument_and_outlasts_its_own_bound() {
+        // Decision 2026-11-10 "Shelter shape and exit".
+        let p = Primitives::standard();
+        let leave = p.get("leave_shelter").expect("leave_shelter is registered");
+        assert!(leave.params.is_empty(), "leave_shelter()");
+        assert_eq!(leave.kind, PrimitiveKind::Discrete);
+        assert_eq!(leave.cancellation, CancellationClass::Interruptible);
+        assert_eq!(leave.evidence, EvidenceKind::BlockStateChanged);
+        assert!(
+            leave.default_max_ticks > 720,
+            "outlasts the primitive's own 720-tick bound, so its typed failure comes first"
+        );
+        let changes = &leave.effects.changes;
+        assert!(changes.contains(&BlockChange { from: BlockRef::Any, to: BlockRef::Air }), "mines");
+        assert!(changes.contains(&BlockChange { from: BlockRef::Air, to: BlockRef::Any }), "climbs");
+        assert!(leave.effects.consumes.is_empty(), "the block is chosen at run time");
     }
 
     #[test]
@@ -985,6 +1095,7 @@ mod tests {
             ("time_of_day", ValueType::Int),
             ("count_food", ValueType::Int),
             ("is_night", ValueType::Bool),
+            ("sheltered", ValueType::Bool),
         ] {
             let sig = f.get(name).unwrap_or_else(|| panic!("{name} is declared"));
             assert!(sig.params.is_empty(), "{name} takes no arguments");

@@ -15,11 +15,10 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
   2026-10-31: results in `docs/sessions/02-body-connection.md` "2.7 Windows runs"; Demo-0's experiments
   passed. Spikes and their one-command setup: `spikes/` (`python setup.py`, `SETUP.md`).
   Agreed decisions go to `docs/decisions.md`; per-session notes go to `docs/sessions/NN-topic.md`.
-  Now (2026-11-09): Demo-2 nearly done: the autonomous loop (brain + body port + web console) plays a fresh world to
-  the furnace with a self-written skill (runs 4, 5). Open: run 6 to verify `find_ore`/`branch_mine` for coal and
-  iron, then a `smelt` primitive (`backlog.md` NEXT items). Next: Demo-3, the building and fighting bot (decisions
-  2026-11-08), then the rest of Demo-1. The remaining hands experiments (E8, E10, E11, E12, E15, E16) gate
-  Demo-1 only (`backlog.md`).
+  Now (2026-11-10): the Demo-2 loop plays survival runs on macOS. Runs 8 and 9 found and fixed the 26.3 explode
+  desync, the world clock, brain idling, the death event, fight ownership and the sealed shelter. Next: run 10 to
+  verify them live, then Demo-3 building (decisions 2026-11-08), then the rest of Demo-1. The remaining hands
+  experiments (E8, E10, E11, E12, E15, E16) gate Demo-1 only (`backlog.md`).
 - Demo-0 product code is allowed (decision 2026-11-01). Do not write Demo-1 code (SendInput actuator,
   take-over, indicator) until E8, E10, E11, E12, E15 and E16 have passed. Experiment code in `spikes/`
   is allowed.

@@ -89,11 +89,6 @@ const NIGHT_FALLBACK_SKILL: &str = "night_watch";
 /// rules parser is the only guard language (no second evaluator).
 const CONDITION_SKILL: &str = "__condition";
 
-/// How old a `PlayerCombatKill` message may be and still name the death the
-/// body handles (5 s): the message and the session's `Died` event race on two
-/// threads, and a message from an earlier life must never name a later death.
-const DEATH_MESSAGE_TICKS: u64 = 100;
-
 /// The body driver's settings.
 pub struct BodyOptions {
     /// The `--goal` skill, injected as command [`CLI_COMMAND_ID`]. `None` in a
@@ -211,12 +206,10 @@ pub struct BodyDriver {
     /// The session reported a death (`on_death`); the next frame handles it,
     /// with the world at hand to settle the running command.
     death_pending: bool,
-    /// The newest own `PlayerCombatKill` message and the tick it was seen on.
-    death_message: Option<(u64, String)>,
-    /// The tick of the last death handled without a message. Its message may
-    /// still arrive on a later frame (the two race on two threads); such a
-    /// late message is that death's and must never name the next one.
-    death_unlabelled: Option<u64>,
+    /// The pending death's message, from the session's own
+    /// `PlayerCombatKill` (it arrives with `on_death`, so it can only name the
+    /// death it came with; run 9's tee-based lookup found none).
+    death_message: Option<String>,
     /// Consecutive ticks the body was idle at night (no intent, no owner).
     night_idle_ticks: u32,
     /// Fallback goals the body started itself, for their command ids.
@@ -367,7 +360,6 @@ impl BodyDriver {
             halted: false,
             death_pending: false,
             death_message: None,
-            death_unlabelled: None,
             night_idle_ticks: 0,
             night_fallbacks: 0,
             chat_operators: Operators::new(&options_own, &options_operators),
@@ -930,12 +922,7 @@ impl BodyDriver {
             },
         );
 
-        let message = self
-            .death_message
-            .take()
-            .filter(|(seen, _)| tick.saturating_sub(*seen) <= DEATH_MESSAGE_TICKS)
-            .map(|(_, message)| message);
-        self.death_unlabelled = message.is_none().then_some(tick);
+        let message = self.death_message.take();
         self.record(
             tick,
             ts_ns,
@@ -970,49 +957,6 @@ impl BodyDriver {
             },
         );
         self.publish_state(world, tick);
-    }
-
-    /// Keep the newest own death message the tee saw. Only the dying player
-    /// gets `PlayerCombatKill`; the id check is a guard, skipped while the
-    /// login that names the own entity is not yet seen.
-    ///
-    /// The server sends one message per death. The first one within
-    /// [`DEATH_MESSAGE_TICKS`] after a death handled without a message is
-    /// that death's, arriving late: it is noted and dropped, never kept to
-    /// name the next death (review finding 7). A message on the frame that
-    /// handles a pending death is that death's own.
-    fn note_death_message(&mut self, view: &TickView<'_>, world: &World) {
-        for observed in view.packets {
-            let Packet::PlayClientbound(ClientboundGamePacket::PlayerCombatKill(kill)) =
-                &observed.packet
-            else {
-                continue;
-            };
-            if world
-                .own_entity_id()
-                .is_some_and(|own| own != kill.player_id.0)
-            {
-                continue;
-            }
-            let message = kill.message.to_string();
-            // A message on the frame that handles a death is that death's.
-            let late = !self.death_pending
-                && self
-                    .death_unlabelled
-                    .take()
-                    .is_some_and(|died| view.tick.saturating_sub(died) <= DEATH_MESSAGE_TICKS);
-            if late {
-                self.record(
-                    view.tick,
-                    now_ns(),
-                    EventKind::Note {
-                        text: format!("death_message_late {message}"),
-                    },
-                );
-            } else {
-                self.death_message = Some((view.tick, message));
-            }
-        }
     }
 
     /// A brain `pop` releases an intent. Stop and cancel always work
@@ -1291,13 +1235,14 @@ impl BodyDriver {
                 state: entry.state.name().to_owned(),
             })
             .collect();
+        let facts = snapshot_facts(world, &mut lock(&self.perception));
         port.publish_snapshot(Snapshot {
             seq: self.log.next_seq().saturating_sub(1),
             tick,
             generation: self.arbiter.generation(),
             owner: self.arbiter.owner().name(),
             stack,
-            facts: port_facts(world),
+            facts,
             stale_ticks: 0,
         });
     }
@@ -1932,7 +1877,6 @@ impl Driver for BodyDriver {
 
         // A death is handled before this tick's packets register anything for
         // the old life (the primitive's pending intent is dropped with it).
-        self.note_death_message(view, world);
         if std::mem::take(&mut self.death_pending) {
             self.handle_death(view.tick, ts_ns, world);
         }
@@ -2184,11 +2128,12 @@ impl Driver for BodyDriver {
         matches!(self.cli, CliGoal::Settled)
     }
 
-    /// The session's `Died` arrives on the owner's thread, between frames.
-    /// The next frame handles it: it has the world the settle and the
-    /// snapshot need, and the tee's `PlayerCombatKill` message by then.
-    fn on_death(&mut self) {
+    /// The session's `Died` arrives on the owner's thread, between frames,
+    /// with the message of its own `PlayerCombatKill`. The next frame handles
+    /// it: it has the world the settle and the snapshot need.
+    fn on_death(&mut self, message: Option<String>) {
         self.death_pending = true;
+        self.death_message = message;
     }
 
     fn summary_json(&self) -> Option<String> {
@@ -2445,7 +2390,19 @@ fn port_facts(world: &World) -> PortFacts {
             .filter(|slot| *slot <= 8),
         slots,
         world_valid: world.status().is_valid(),
+        // Needs perception: set where the snapshot is published.
+        sheltered: false,
     }
+}
+
+/// The facts a published snapshot carries: [`port_facts`] plus the ones that
+/// need perception. `sheltered` is the skill fact `sheltered()` itself, so the
+/// brain and `take_shelter` can never disagree (run 9, third review); an
+/// unknown answer is sent as not sheltered.
+fn snapshot_facts(world: &World, perception: &mut Perception) -> PortFacts {
+    let mut facts = port_facts(world);
+    facts.sheltered = praxion_facts::sheltered(perception, world) == Some(true);
+    facts
 }
 
 /// An item id without the `minecraft:` namespace, as the briefing uses it.
@@ -2801,6 +2758,7 @@ skill stall()
             next_drop: 0,
             creeper: None,
             melee: None,
+            melee_others: Default::default(),
             endermen: [None; MAX_ENDERMEN],
             enderman_count: 0,
             arrows: [None; MAX_ARROWS],
@@ -3390,7 +3348,7 @@ skill stall()
         harness.run(3);
         // The session reports the death between frames; the next frame
         // handles it.
-        harness.driver.on_death();
+        harness.driver.on_death(None);
         assert!(death_lines(&mut harness).is_empty(), "nothing before the frame");
         harness.step();
 
@@ -3412,7 +3370,7 @@ skill stall()
     #[test]
     fn a_death_with_no_command_is_still_an_event_and_a_wake() {
         let mut harness = harness();
-        harness.driver.on_death();
+        harness.driver.on_death(None);
         harness.step();
         assert_eq!(
             death_lines(&mut harness),
@@ -3466,73 +3424,42 @@ skill stall()
     }
 
     #[test]
-    fn a_death_carries_the_death_message_the_tee_saw() {
+    fn a_death_carries_the_sessions_own_message() {
         let mut harness = harness();
         accept(&mut harness, command("c-1", "stall"));
-        // The message may reach the driver a frame before the session's
-        // `Died`, or on the same frame.
-        harness.step_with(&[combat_kill(7, "Praxion was blown up by Creeper")]);
-        harness.driver.on_death();
+        harness
+            .driver
+            .on_death(Some("Praxion was shot by Skeleton".to_owned()));
         harness.step();
         let lines = death_lines(&mut harness);
         assert_eq!(
             lines.first(),
-            Some(&("died".to_owned(), "Praxion was blown up by Creeper".to_owned()))
+            Some(&("died".to_owned(), "Praxion was shot by Skeleton".to_owned()))
         );
         assert_eq!(
             lines.last(),
-            Some(&("wake:died".to_owned(), "Praxion was blown up by Creeper".to_owned()))
+            Some(&("wake:died".to_owned(), "Praxion was shot by Skeleton".to_owned()))
         );
-        // The message is spent: a later death without one says nothing.
-        harness.driver.on_death();
+        // The message belongs to its own death: the next death without one
+        // says nothing.
+        harness.driver.on_death(None);
         harness.step();
         let lines = death_lines(&mut harness);
         assert_eq!(lines[lines.len() - 2], ("died".to_owned(), "null".to_owned()));
     }
 
     #[test]
-    fn an_old_death_message_never_names_a_later_death() {
+    fn a_tee_kill_packet_never_names_a_death() {
+        // Run 9: the tee-based lookup left `died` without a message. Only the
+        // session's own kill packet, carried by `on_death`, names a death; a
+        // packet the tee saw earlier is not guessed onto it.
         let mut harness = harness();
         harness.step_with(&[combat_kill(7, "Praxion fell from a high place")]);
-        harness.run(DEATH_MESSAGE_TICKS + 1);
-        harness.driver.on_death();
+        harness.driver.on_death(None);
         harness.step();
         assert_eq!(
             death_lines(&mut harness)[0],
             ("died".to_owned(), "null".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_late_death_message_never_names_the_next_death() {
-        // Review finding 7: the message of a death handled without one
-        // arrives a frame later; it must not label a second death that comes
-        // within `DEATH_MESSAGE_TICKS`.
-        let mut harness = harness();
-        harness.driver.on_death();
-        harness.step();
-        harness.step_with(&[combat_kill(7, "Praxion fell from a high place")]);
-        harness.run(10);
-        harness.driver.on_death();
-        harness.step();
-        let died: Vec<String> = death_lines(&mut harness)
-            .into_iter()
-            .filter(|(kind, _)| kind == "died")
-            .map(|(_, message)| message)
-            .collect();
-        assert_eq!(died, vec!["null".to_owned(), "null".to_owned()]);
-        assert_eq!(
-            notes(&harness, "death_message_late"),
-            vec!["death_message_late Praxion fell from a high place".to_owned()]
-        );
-        // A message on the frame that handles a death still names it, even
-        // right after a death without one.
-        harness.driver.on_death();
-        harness.step_with(&[combat_kill(7, "Praxion was slain by Zombie")]);
-        let lines = death_lines(&mut harness);
-        assert_eq!(
-            lines[lines.len() - 2],
-            ("died".to_owned(), "Praxion was slain by Zombie".to_owned())
         );
     }
 
@@ -3668,6 +3595,15 @@ skill stall()
             harness.summary()["goal"]["outcome"],
             "failed(start:world_desync)"
         );
+    }
+
+    #[test]
+    fn a_snapshot_with_no_known_shelter_says_not_sheltered() {
+        // `sheltered()` cannot answer without a position: absent, not true.
+        let world = World::new();
+        let mut perception = Perception::new(PerceptionConfig::default());
+        perception.begin_tick(&world);
+        assert!(!snapshot_facts(&world, &mut perception).sheltered);
     }
 
     #[test]

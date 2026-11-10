@@ -357,7 +357,7 @@ def test_two_deaths_in_night_watch_block_nothing_and_say_it_once(tmp_path) -> No
             finished = [e for e in evidence_entries(loop, "goal_finished") if e["failure_kind"] == "died"]
             assert [e["status"] for e in finished] == ["interrupted", "interrupted"]
             assert loop.memory.is_blocked(survival.NIGHT_CONDITION) is False
-            chosen = survival.choose(facts, {"stone_sword": 1}, loop.catalog, loop.memory)
+            chosen = survival.choose(facts, {"stone_sword": 1}, loop.catalog)
             assert chosen is not None and chosen.skill == "night_watch"
             assert loop._consecutive_failures == 1, "the failure streak is not advanced"
             assert not evidence_entries(loop, "pick_gap"), "no failure gap"
@@ -571,5 +571,72 @@ def test_a_dropped_notice_is_logged_and_never_fails_the_goal(tmp_path) -> None:
             pump(loop, lambda: evidence_entries(loop, "loop_dropped"), what="the dropped line")
             assert evidence_entries(loop, "loop_dropped")[0]["n"] == 3
             assert not evidence_entries(loop, "loop_error")
+        finally:
+            loop.close()
+
+
+def _played_goal(loop, body):
+    loop.start()
+    pump(loop, lambda: body.commands, what="the command")
+    command = body.commands[0]
+    wait_accepted(body, command.id)
+    pump(
+        loop,
+        lambda: loop._open_goal is not None and loop._open_goal.intent_id is not None,
+        what="accepted",
+    )
+    return command
+
+
+def test_a_settled_receipt_lost_to_a_real_overflow_does_not_hang_the_goal(tmp_path) -> None:
+    """Run 9: a `dropped` notice swallowed a goal's settled receipt and the goal
+    stayed open. The snapshot after `dropped(n)` closes it from the stack."""
+    with FakeBody(skills={"get_wood"}, facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *a, **k: proposal("count(oak_log) >= 2", "get logs", "log"),
+            route_fn=lambda *a, **k: Route(kind="play", skill="get_wood"),
+            skills=catalog("get_wood"),
+        )
+        try:
+            command = _played_goal(loop, body)
+            goal_id = loop._open_goal.record.goal_id
+            body.facts["inventory"] = {"oak_log": 2}
+            body.drop_next_events(1)
+            body.settle(command.id, outcome="done", condition="true")
+            body.dropped(1)
+            pump(
+                loop,
+                lambda: any(e["goal_id"] == goal_id for e in evidence_entries(loop, "goal_finished")),
+                what="the goal closed",
+            )
+            finished = [e for e in evidence_entries(loop, "goal_finished") if e["goal_id"] == goal_id]
+            assert finished[0]["status"] == "done", finished
+            lost = evidence_entries(loop, "receipt_lost")
+            assert lost and lost[0]["goal_id"] == goal_id
+        finally:
+            loop.close()
+
+
+def test_a_dropped_notice_leaves_a_live_goal_open(tmp_path) -> None:
+    with FakeBody(skills={"get_wood"}, facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *a, **k: proposal("count(oak_log) >= 2", "get logs", "log"),
+            route_fn=lambda *a, **k: Route(kind="play", skill="get_wood"),
+            skills=catalog("get_wood"),
+        )
+        try:
+            command = _played_goal(loop, body)
+            opened = loop._open_goal
+            body.dropped(2)
+            pump(loop, lambda: evidence_entries(loop, "loop_dropped"), what="the dropped line")
+            for _ in range(10):
+                loop.step(0.02)
+            assert loop._open_goal is opened, "the intent is still running"
+            assert not evidence_entries(loop, "receipt_lost")
+            body.settle(command.id, outcome="done", condition="true")
         finally:
             loop.close()

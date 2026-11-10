@@ -90,7 +90,10 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         }
         match session.recv_event_timeout(TICK) {
             Some(Event::Joined) => println!("joined"),
-            Some(Event::Died) => println!("died"),
+            Some(Event::Died { message }) => match message {
+                Some(message) => println!("died: {message}"),
+                None => println!("died"),
+            },
             Some(Event::Disconnected(reason)) => break Some(reason),
             None => {}
         }

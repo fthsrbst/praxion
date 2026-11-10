@@ -549,9 +549,9 @@ fn a_dead_player_is_reported_once_and_respawned_when_asked() {
         },
     );
     assert_eq!(events.first(), Some(&Event::Joined));
-    assert_eq!(events.get(1), Some(&Event::Died), "events: {events:?}");
+    assert_eq!(events.get(1), Some(&Event::Died { message: None }), "events: {events:?}");
     assert_eq!(
-        events.iter().filter(|event| **event == Event::Died).count(),
+        events.iter().filter(|event| matches!(event, Event::Died { .. })).count(),
         1,
         "one death, one Died: {events:?}"
     );
@@ -576,7 +576,7 @@ fn a_dead_player_stays_dead_without_auto_respawn() {
 
     let events = run_and_wait(addr, ConnectOptions::default());
     assert_eq!(events.first(), Some(&Event::Joined));
-    assert_eq!(events.get(1), Some(&Event::Died), "events: {events:?}");
+    assert_eq!(events.get(1), Some(&Event::Died { message: None }), "events: {events:?}");
     server
         .join()
         .expect("the server thread ends")

@@ -69,7 +69,7 @@ from .admission import (
 from .admission_job import AdmissionJob
 from .briefing import build as build_briefing
 from .cancel import CancelToken
-from .conditions import ConditionError, count_of_condition, item_of_condition
+from .conditions import ConditionError, count_of_condition, evaluate, item_of_condition
 from .console.hub import Console
 from .briefing import heartbeat_change
 from . import survival
@@ -115,10 +115,6 @@ NOTHING_TO_DO_GAP_TICKS = 600
 NOTHING_TO_DO_MAX_GAP_TICKS = 2400
 #: The console state is republished at most this often (seconds).
 PUBLISH_SECONDS = 0.25
-#: While a console viewer is connected, ask the body for a snapshot this often
-#: (decision 2026-11-09 "Console": the page refreshes every second). These
-#: snapshots are display-only: they never feed the heartbeat diff.
-CONSOLE_SNAPSHOT_SECONDS = 1.0
 
 
 class LoopState(str, Enum):
@@ -231,7 +227,6 @@ class Loop:
         self._nothing_gap = False
         self._invalid_proposals = 0
         self._last_heartbeat = self._clock()
-        self._last_watch_snapshot = self._clock()
         self._heartbeat_facts: Optional[dict[str, Any]] = None
         self._was_playing = False
         self._blocked_goals: set[str] = set()
@@ -240,6 +235,12 @@ class Loop:
         self._step_failed = False
         self._consecutive_failures = 0
         self._next_pick_tick = 0
+        #: Survival skill -> body tick before which it is not picked again: a
+        #: failed survival goal backs off instead of being failure-blocked
+        #: (decision 2026-11-10). In memory only, never persisted.
+        self._survival_backoff: dict[str, int] = {}
+        #: Consecutive failures per survival skill (the back-off doubles).
+        self._survival_failures: dict[str, int] = {}
         #: The one admission job in flight; the loop starts no second one.
         self._job: Optional[AdmissionJob] = None
         #: An admitted skill whose goal waits for the next pick.
@@ -296,7 +297,6 @@ class Loop:
         self._step_errors = 0
         self.session.start()
         self._last_heartbeat = self._clock()
-        self._last_watch_snapshot = self._clock()
         self.evidence.write(
             "loop_started",
             world_id=self.world_id,
@@ -419,22 +419,82 @@ class Loop:
     def on_snapshot(self, snapshot: Snapshot, *, cause: Optional[str] = None) -> None:
         """A snapshot arrived: diff the facts, then recover from a fresh connection.
 
-        A console watch snapshot is display-only (critique findings 1-2): it
-        neither writes heartbeat evidence nor moves the wake baseline, so the
-        60 s heartbeat keeps exactly the semantics it was decided with (B8).
+        After a ``dropped(n)`` the snapshot that follows also reconciles the
+        open goals against its stack (:meth:`_reconcile_dropped`).
         """
-        if cause != "watch":
-            facts = (self.session.snapshot or {}).get("facts") or {}
-            playing = any(entry.state == "running" for entry in snapshot.stack)
-            self._check_heartbeat(
-                facts,
-                is_playing=playing,
-                tick=snapshot.tick,
-                heartbeat_pending=cause == "heartbeat",
-            )
+        facts = (self.session.snapshot or {}).get("facts") or {}
+        playing = any(entry.state == "running" for entry in snapshot.stack)
+        self._check_heartbeat(
+            facts,
+            is_playing=playing,
+            tick=snapshot.tick,
+            heartbeat_pending=cause == "heartbeat",
+        )
         recovery = self.session.take_recovery()
         if recovery is not None:
+            # A recovery adopts or settles every open record already.
+            self.session.take_dropped()
             self._recover(snapshot, WakeCause(recovery))
+        elif self.session.take_dropped():
+            self._reconcile_dropped(snapshot)
+
+    def _reconcile_dropped(self, snapshot: Snapshot) -> None:
+        """Close the goals whose receipt a real overflow may have lost.
+
+        The body announced ``dropped(n)`` and this snapshot covers the dropped
+        events. An open or suspended goal whose accepted intent is no longer
+        live on the stack has settled (or was popped) and its receipt is gone:
+        it is closed now from the snapshot, ``done`` when its condition holds
+        and ``interrupted`` (``receipt_lost``, not a failure) otherwise, so the
+        loop does not wait for it forever. A goal whose ``accepted`` receipt
+        never arrived has no intent id to check and is left to its expiry.
+        """
+        live = {
+            entry.intent_id
+            for entry in snapshot.stack
+            if entry.state in survival.LIVE_STATES
+        }
+        goals = [*self._suspended]
+        if self._open_goal is not None:
+            goals.append(self._open_goal)
+        facts = snapshot.facts.model_dump(mode="python")
+        inventory = {str(k): int(v) for k, v in (facts.get("inventory") or {}).items()}
+        for goal in goals:
+            if goal.intent_id is None or goal.intent_id in live:
+                continue
+            if goal.record.status != "open":
+                continue
+            if goal.stop_pending:
+                cause = goal.stop_source
+                status = "interrupted"
+                result = None
+                failure_kind = (
+                    "stopped_by_user" if cause == "console" else f"preempted_by_{cause}"
+                )
+            else:
+                try:
+                    value = evaluate(goal.proposal.condition, inventory, facts)
+                except ConditionError:
+                    value = None
+                result = "unknown" if value is None else ("true" if value else "false")
+                status = "done" if result == "true" else "interrupted"
+                failure_kind = None if status == "done" else "receipt_lost"
+            self.evidence.write(
+                "receipt_lost",
+                goal_id=goal.record.goal_id,
+                command_id=goal.command_id,
+                intent_id=goal.intent_id,
+                status=status,
+                tick=snapshot.tick,
+            )
+            self.records.finish(
+                goal.record,
+                status=status,
+                failure_kind=failure_kind,
+                condition_result=result,
+                ticks=goal.ticks_since(snapshot.tick),
+                source="recovery",
+            )
 
     def on_error(self, error: PortError) -> None:
         """A protocol error is a step error (A6)."""
@@ -482,6 +542,11 @@ class Loop:
 
     def _recover(self, snapshot: Snapshot, cause: WakeCause) -> None:
         """A1/A8: adopt every live intent, then settle what is left open."""
+        # The back-off deadlines are ticks of the body we lost: a new body (a
+        # restarted process, a new session) counts its ticks afresh, and an
+        # old deadline could hold a survival skill for hours.
+        self._survival_backoff.clear()
+        self._survival_failures.clear()
         recovery = self.records.recover(
             snapshot.stack,
             tick=snapshot.tick,
@@ -749,6 +814,7 @@ class Loop:
 
     def _goal_finished(self, record: GoalRecord) -> None:
         """Records closed a goal: idle, wait out a failed goal's gap, pick again."""
+        self._back_off_survival(record)
         was_suspended = any(g.record.goal_id == record.goal_id for g in self._suspended)
         self._suspended = [g for g in self._suspended if g.record.goal_id != record.goal_id]
         self._narrate_finished(record)
@@ -859,6 +925,23 @@ class Loop:
         if self._pick_user_goal(inventory):
             return
         if self._pick_survival(inventory):
+            return
+        hold = self._night_hold()
+        if hold is not None:
+            # Night with no survival goal to start (unarmed, backing off, or
+            # the body's own fallback running), or a body still sealed in by
+            # day whose ``take_shelter`` cannot start now: wait, start no
+            # ladder work.
+            # An admitted skill stays in ``_written`` for the morning.
+            self._pending = None
+            gap = self._nothing_backoff()
+            self.evidence.write(
+                "night_wait",
+                reason=hold,
+                gap_ticks=gap,
+                next_pick_tick=self._next_pick_tick,
+            )
+            self._transition(LoopState.IDLE, reason="night_wait")
             return
         if self._pick_written_goal(inventory):
             return
@@ -1159,8 +1242,45 @@ class Loop:
             self._facts(),
             self._inventory(),
             self.catalog,
-            self.memory,
             stack=(self.session.snapshot or {}).get("stack") or (),
+            backoff=self._survival_backoff,
+            tick=int(self.session.tick or 0),
+        )
+
+    def _night_hold(self) -> Optional[str]:
+        """Why the pick must wait instead of starting ladder work at night."""
+        return survival.night_hold(
+            self._facts(),
+            self._inventory(),
+            stack=(self.session.snapshot or {}).get("stack") or (),
+            backoff=self._survival_backoff,
+            tick=int(self.session.tick or 0),
+            failures=self._survival_failures,
+        )
+
+    def _back_off_survival(self, record: GoalRecord) -> None:
+        """A failed survival goal: its skill waits, it is never blocked."""
+        if record.origin != "survival" or not record.skill:
+            return
+        if record.status == "done":
+            self._survival_failures.pop(record.skill, None)
+            return
+        if record.status != "failed":
+            return
+        failures = self._survival_failures.get(record.skill, 0) + 1
+        self._survival_failures[record.skill] = failures
+        gap = min(
+            survival.SURVIVAL_BACKOFF_TICKS * 2 ** (failures - 1),
+            survival.SURVIVAL_BACKOFF_MAX_TICKS,
+        )
+        until = int(self.session.tick or 0) + gap
+        self._survival_backoff[record.skill] = until
+        self.evidence.write(
+            "survival_backoff",
+            skill=record.skill,
+            goal_id=record.goal_id,
+            failure_kind=record.failure_kind,
+            until_tick=until,
         )
 
     def _pick_survival(self, inventory: dict[str, int]) -> bool:
@@ -1206,7 +1326,8 @@ class Loop:
         night fallback covers a silent brain. A survival goal of ours does yield
         to a queued user goal, exactly as the body's fallback yields to a user
         command: the user's projects come first (architecture §1) and the night
-        fallback takes the night again when their goal settles.
+        fallback takes the night again when their goal settles. A night goal of
+        ours yields to ``get_food`` only when food is critical.
         """
         if self._paused or self.session.snapshot is None or self._world_desync is not None:
             return
@@ -1224,7 +1345,26 @@ class Loop:
                 self._interrupt_goal("user", reason="user goal waiting")
                 return
             if opened.survival:
-                # A survival goal is never interrupted by another survival goal.
+                # A survival goal is never interrupted by another survival goal,
+                # with one exception: critical food stops a night goal so
+                # ``get_food`` can hunt (decision 2026-11-10 "Hungry at night:
+                # hunt only when it is critical"). ``get_food`` opens a sealed
+                # shelter itself (its own ``sheltered() -> leave_shelter()``
+                # rule; ``hunt_food`` only hunts). Food above critical waits
+                # for dawn. ``due`` honours the back-off, which doubles on each
+                # failure (600, 1200, 2400 ... ticks), so a failed night hunt
+                # does not reopen the shelter every 600 ticks.
+                if opened.skill in survival.NIGHT_SKILLS and survival.critical_food(
+                    self._facts()
+                ):
+                    due = self._due_survival()
+                    if due is not None and due.kind == "food":
+                        self._interrupt_goal(
+                            "survival",
+                            survival=due.kind,
+                            reason=due.reason,
+                            interrupted_skill=opened.skill,
+                        )
                 return
             due = self._due_survival()
             if due is not None:
@@ -2384,41 +2524,22 @@ class Loop:
             return []
 
     def _maybe_heartbeat(self) -> None:
-        """Ask for a snapshot on the heartbeat clock, or for a watching console.
+        """Ask for a snapshot on the 60 s heartbeat clock.
 
-        The two clocks are independent: the 60 s heartbeat keeps its evidence
-        and its wake diff, while a watch snapshot is display-only read-side
-        traffic with no evidence line (critique findings 1-2).
-
-        A resync is not free (critique finding 7): while a snapshot is owed the
-        body discards the events still queued for the brain and announces them
-        as ``dropped(n)`` (port ``server.rs`` ``service_events``), so at 1 Hz a
-        watch can cost one step's worth of events. They are announced, never
-        silent, and the snapshot that follows supersedes them, which is why the
-        display refresh accepts the trade. If the talk work ever needs receipt
-        latency below a second, skip the watch request while a command receipt
-        is pending.
+        A watching console asks for nothing: the body pushes a snapshot every
+        20 ticks and the console shows ``session.snapshot`` (run 9: the 1 Hz
+        watch request was the source of every ``dropped`` notice, and one of
+        them lost a goal's settled receipt).
         """
         if self.session.awaiting_snapshot:
             return
         now = self._clock()
-        heartbeat_due = now - self._last_heartbeat >= self.heartbeat_seconds
-        watch_due = (
-            self._console is not None
-            and self._console.watchers > 0
-            and now - self._last_watch_snapshot >= CONSOLE_SNAPSHOT_SECONDS
-        )
-        if not (heartbeat_due or watch_due):
+        if now - self._last_heartbeat < self.heartbeat_seconds:
             return
-        if heartbeat_due:
-            self._last_heartbeat = now
-        if watch_due:
-            self._last_watch_snapshot = now
-        cause = "heartbeat" if heartbeat_due else "watch"
-        if not self.session.request_snapshot(cause=cause):
+        self._last_heartbeat = now
+        if not self.session.request_snapshot(cause="heartbeat"):
             return
-        if heartbeat_due:
-            self.evidence.write("heartbeat_requested", tick=self.session.tick)
+        self.evidence.write("heartbeat_requested", tick=self.session.tick)
 
     def _inventory(self) -> dict[str, int]:
         facts = (self.session.snapshot or {}).get("facts") or {}

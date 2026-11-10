@@ -161,6 +161,48 @@ pub(crate) fn world_with(chunks: i32, top: i32, fill: impl Fn(BlockPos) -> Block
     world
 }
 
+/// Like [`world_with`], but every chunk packet also carries the
+/// `WorldSurface` heightmap a server sends, computed from `fill`, so the
+/// privileged column read (`Perception::privileged_column`) answers and later
+/// block updates move the surface as on a live server.
+pub(crate) fn world_with_surface(
+    chunks: i32,
+    top: i32,
+    fill: impl Fn(BlockPos) -> BlockState,
+) -> World {
+    use azalea_core::heightmap_kind::HeightmapKind;
+    use azalea_world::heightmap::Heightmap;
+
+    let mut world = World::new();
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    let min_y = world.min_y().expect("the login resolves a dimension");
+    for x in 0..chunks {
+        for z in 0..chunks {
+            let chunk = chunk_with_blocks(min_y, x, z, top, &fill);
+            // 256 columns at ceil(log2(384 + 1)) = 9 bits pack into 36 words.
+            let mut heightmap =
+                Heightmap::new(HeightmapKind::WorldSurface, 384, min_y, vec![0u64; 36].into());
+            for lx in 0..16u8 {
+                for lz in 0..16u8 {
+                    let (bx, bz) = (x * 16 + i32::from(lx), z * 16 + i32::from(lz));
+                    let surface = (min_y..=top)
+                        .rev()
+                        .find(|y| !fill(BlockPos::new(bx, *y, bz)).is_air())
+                        .map_or(min_y, |y| y + 1);
+                    heightmap.set_height(lx, lz, surface);
+                }
+            }
+            let mut packet = chunk_packet_with(x, z, &chunk);
+            packet.chunk_data.heightmaps =
+                vec![(HeightmapKind::WorldSurface, heightmap.data.data.clone())];
+            world.apply_clientbound_play(0, &ClientboundGamePacket::LevelChunkWithLight(packet));
+        }
+    }
+    move_player(&mut world, BlockPos::new(0, 64, 0));
+    world
+}
+
 /// Move the followed player's feet to `feet`, as a server position packet does.
 pub(crate) fn move_player(world: &mut World, feet: BlockPos) {
     world.apply_serverbound_play(
@@ -218,6 +260,18 @@ pub(crate) fn set_block(world: &mut World, pos: BlockPos, state: BlockState) {
         &ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
             pos,
             block_state: state,
+        }),
+    );
+}
+
+/// Set the followed player's health (full food), as a server health update.
+pub(crate) fn set_health(world: &mut World, health: f32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetHealth(azalea_protocol::packets::game::ClientboundSetHealth {
+            health,
+            food: 20,
+            saturation: 5.0,
         }),
     );
 }

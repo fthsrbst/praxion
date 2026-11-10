@@ -66,14 +66,17 @@ use azalea_entity::{
     ActiveEffects, Attributes, LookDirection, Physics, PlayerAbilities, Pose, Position,
     dimensions::{EntityDimensions, calculate_dimensions},
 };
-use azalea_inventory::{ItemStack, components::Tool};
+use azalea_inventory::{
+    ItemStack,
+    components::{self, EquipmentSlotGroup, Tool},
+};
 use azalea_physics::{
     collision::{BLOCK_SHAPE, BlockWithShape, Shapes, VoxelShape, legacy_blocks_motion},
     get_block_pos_below_that_affects_movement,
     travel::fluid_jump_threshold,
 };
 use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{Attribute, EntityKind};
 
 use crate::frame::Held;
 
@@ -319,13 +322,41 @@ impl Body {
         self.attributes.entity_interaction_range.calculate()
     }
 
-    /// Ticks between two full-strength attacks (`20 / attack_speed`).
+    /// Ticks between two full-strength attacks with an empty hand
+    /// (`20 / attack_speed`, 5 ticks).
     pub fn attack_cooldown_ticks(&self) -> u32 {
-        let speed = self.attributes.attack_speed.calculate();
+        self.attack_cooldown_ticks_holding(&ItemStack::Empty)
+    }
+
+    /// Ticks between two full-strength attacks with `held` in the main hand:
+    /// `ceil(20 / attack_speed)`, where the attack speed is the player's
+    /// (base 4.0) plus the item's own main-hand `attack_speed` modifiers. The
+    /// modifiers come from the item's `attribute_modifiers` component (the
+    /// 26.3 defaults azalea generates, or the stack's own patch): a sword is
+    /// -2.4 (1.6, 13 ticks), an axe -3.2 to -3.0, a pickaxe -2.8, a shovel -3.0,
+    /// an empty hand none (5 ticks). Swinging any sooner hits at partial charge
+    /// (run 9: every item swung on the hand's 5 ticks, a sword at ~40%).
+    pub fn attack_cooldown_ticks_holding(&self, held: &ItemStack) -> u32 {
+        let mut speed = self.attributes.attack_speed.clone();
+        if let Some(modifiers) = held.get_component::<components::AttributeModifiers>() {
+            for entry in &modifiers.modifiers {
+                let main_hand = matches!(
+                    entry.slot,
+                    EquipmentSlotGroup::Mainhand | EquipmentSlotGroup::Hand | EquipmentSlotGroup::Any
+                );
+                if main_hand && entry.kind == Attribute::AttackSpeed {
+                    speed.insert(entry.modifier.clone());
+                }
+            }
+        }
+        let speed = speed.calculate();
         if speed <= 0. {
             return 20;
         }
-        ((1. / speed) * 20.).ceil() as u32
+        // The item amounts are `f32` values widened to `f64` (-3.2 is
+        // -3.2000000477), so an exact 25 ticks computes as 25.0000015; the
+        // small tolerance keeps that from rounding up to 26.
+        ((20. / speed) - 1.0e-4).ceil() as u32
     }
 
     /// How much destroy progress one tick adds to `block` with `held`.

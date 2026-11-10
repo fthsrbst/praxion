@@ -108,6 +108,14 @@ pub struct Facts {
     /// additively").
     #[serde(default = "valid", skip_serializing_if = "is_valid")]
     pub world_valid: bool,
+    /// Whether the body is sealed in a shelter: the skill fact `sheltered()`
+    /// answered `true` (decision 2026-11-10 "A sealed shelter now"). The brain
+    /// reads it to leave the shelter before a goal that needs the open (run 9,
+    /// third review). Sent only when `true`; absent reads as `false`, which is
+    /// also what an unknown answer becomes, so a healthy open-air snapshot
+    /// stays byte-identical and `PORT_VERSION` stays 0.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sheltered: bool,
 }
 
 impl Default for Facts {
@@ -126,6 +134,7 @@ impl Default for Facts {
             selected_hotbar_slot: None,
             slots: Vec::new(),
             world_valid: true,
+            sheltered: false,
         }
     }
 }
@@ -136,6 +145,10 @@ fn valid() -> bool {
 
 fn is_valid(world_valid: &bool) -> bool {
     *world_valid
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// State on demand: connect, `resync_request` and every wake.

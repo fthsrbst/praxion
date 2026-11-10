@@ -8,9 +8,11 @@ use azalea_registry::builtin::{BlockKind, MenuKind};
 use praxion_headless::{Click, ControlFrame};
 use praxion_perception::Caller;
 
-use crate::common::{aim_precise, block_target, idle, pickup_frame, walk_point};
+use crate::common::{
+    aim_precise, block_target, cell_centre, choose_aim, idle, pickup_frame, walk_point,
+};
 use crate::frontier::nearest_known_block;
-use crate::place::{cell_centre, place_support};
+use crate::place::place_support;
 use crate::runner::Ctx;
 
 /// How far from the eye a station is looked for in the known map.
@@ -22,16 +24,6 @@ const OPEN_TICKS: u32 = 60;
 /// Ticks between two clicks while the menu has not opened.
 const CLICK_INTERVAL: u32 = 10;
 
-/// Offsets from a cell's centre to the six face points, inset 0.05 into the
-/// cell so a ray aimed there still enters it.
-const FACE_OFFSETS: [(f64, f64, f64); 6] = [
-    (-0.45, 0.0, 0.0),
-    (0.45, 0.0, 0.0),
-    (0.0, -0.45, 0.0),
-    (0.0, 0.45, 0.0),
-    (0.0, 0.0, -0.45),
-    (0.0, 0.0, 0.45),
-];
 /// How far from a cell the body stands when it backs off from a blocked view.
 const BACK_OFF_RADIUS: f64 = 2.5;
 
@@ -146,39 +138,21 @@ impl Station {
         StationStep::Pending(frame)
     }
 
-    /// Where to aim. A player clicks the face they can see: try the cell's
-    /// centre, then the centre of each face (inset a little), nearest to the
-    /// eye first, and take the first whose ray first hits the cell. The centre
-    /// ray can enter the cell's column in the layer above it (a roof over a
-    /// table next to the body), which only a face point gets around.
+    /// Where to aim: a point whose pick lands on the cell
+    /// ([`choose_aim`]), else the centre when a plant hides it (the plant is
+    /// broken first), else nothing.
     fn choose_aim(&self, ctx: &Ctx<'_>, cell: BlockPos) -> Aim {
-        let eye = ctx.body.eye_position();
-        let hit_at = |point: Vec3| {
-            let (yaw, pitch) = praxion_planner::aim(eye, point);
-            praxion_headless::pick_block_looking(ctx.world, ctx.body, yaw, pitch)
-                .filter(|hit| !hit.miss)
-                .map(|hit| hit.block_pos)
-        };
-        let centre = cell_centre(cell);
-        let centre_hit = hit_at(centre);
-        if centre_hit == Some(cell) {
-            return Aim::Point(centre);
-        }
-        let mut faces: Vec<Vec3> = FACE_OFFSETS
-            .iter()
-            .map(|(dx, dy, dz)| Vec3::new(centre.x + dx, centre.y + dy, centre.z + dz))
-            .collect();
-        faces.sort_by(|a, b| eye.distance_to(*a).total_cmp(&eye.distance_to(*b)));
-        if let Some(point) = faces.into_iter().find(|point| hit_at(*point) == Some(cell)) {
+        let aim = choose_aim(ctx, cell);
+        if let Some(point) = aim.point {
             return Aim::Point(point);
         }
-        let plant_in_the_way = centre_hit.is_some_and(|pos| {
+        let plant_in_the_way = aim.centre_hit.is_some_and(|pos| {
             ctx.world
                 .block_state(pos)
                 .is_some_and(|state| !state.is_air() && !place_support(state))
         });
         if plant_in_the_way {
-            Aim::Plant(centre)
+            Aim::Plant(cell_centre(cell))
         } else {
             Aim::Blocked
         }

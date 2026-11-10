@@ -22,6 +22,7 @@ use azalea_entity::LookDirection;
 use azalea_protocol::connect::WriteConnection;
 use azalea_protocol::packets::Packet;
 use azalea_protocol::packets::ProtocolPacket;
+use azalea_protocol::packets::game::c_player_combat_kill::ClientboundPlayerCombatKill;
 use azalea_protocol::packets::game::{
     ClientboundGamePacket, ServerboundAcceptTeleportation, ServerboundChunkBatchReceived,
     ServerboundClientCommand, ServerboundClientTickEnd, ServerboundConfigurationAcknowledged,
@@ -611,14 +612,17 @@ async fn handle(
         }
         ClientboundGamePacket::SetHealth(p) => {
             if p.health <= 0.0 {
-                die(state, writer, ctx).await?;
+                // Vanilla sends the kill packet first, inside `die`; the
+                // health update follows on the player's tick. A zero health
+                // seen first still ends the life, without a message.
+                die(state, writer, ctx, None).await?;
             } else {
                 state.dead = false;
             }
         }
         ClientboundGamePacket::PlayerCombatKill(p) => {
             if state.own_entity_id == Some(p.player_id.0) {
-                die(state, writer, ctx).await?;
+                die(state, writer, ctx, death_message(&p)).await?;
             }
         }
         ClientboundGamePacket::Respawn(_) => {
@@ -664,17 +668,30 @@ async fn handle(
     Ok(Flow::Continue)
 }
 
-/// Death: tell the owner once, and respawn if asked to.
+/// The plain-text death message of a kill packet, `None` when it is empty.
+///
+/// `FormattedText`'s `Display` resolves a translation key through azalea's
+/// bundled `en_us` table and fills in its arguments, so a vanilla
+/// `death.attack.arrow` reads "Praxion was shot by Skeleton", not the key.
+/// An unknown key falls back to the server's fallback text or the key itself.
+fn death_message(kill: &ClientboundPlayerCombatKill) -> Option<String> {
+    let message = kill.message.to_string();
+    (!message.trim().is_empty()).then_some(message)
+}
+
+/// Death: tell the owner once, with the message when the kill packet named
+/// it, and respawn if asked to.
 async fn die(
     state: &mut PlayState,
     writer: &mut WriteConnection<ServerboundGamePacket>,
     ctx: &Context<'_>,
+    message: Option<String>,
 ) -> Result<(), Error> {
     if state.dead {
         return Ok(());
     }
     state.dead = true;
-    let _ = ctx.events.send(Event::Died);
+    let _ = ctx.events.send(Event::Died { message });
     if state.auto_respawn {
         login::send(
             writer,
@@ -715,6 +732,33 @@ mod tests {
             };
             Some(packet.slot)
         })
+    }
+
+    fn kill(json: &str) -> ClientboundPlayerCombatKill {
+        ClientboundPlayerCombatKill {
+            player_id: MinecraftEntityId(7),
+            message: serde_json::from_str(json).expect("a chat component"),
+        }
+    }
+
+    #[test]
+    fn a_death_message_is_rendered_english_not_a_translation_key() {
+        // Run 9: `died` carried no message. The server sends the vanilla
+        // translation; the event must carry readable text.
+        let arrow = kill(
+            r#"{"translate":"death.attack.arrow","with":[{"text":"Praxion"},{"translate":"entity.minecraft.skeleton"}]}"#,
+        );
+        assert_eq!(
+            death_message(&arrow).as_deref(),
+            Some("Praxion was shot by Skeleton")
+        );
+        let fall = kill(r#"{"translate":"death.attack.fall","with":["Praxion"]}"#);
+        assert_eq!(
+            death_message(&fall).as_deref(),
+            Some("Praxion hit the ground too hard")
+        );
+        // `showDeathMessages` off sends an empty component.
+        assert_eq!(death_message(&kill(r#"{"text":""}"#)), None);
     }
 
     #[test]

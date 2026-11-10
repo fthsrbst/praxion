@@ -192,14 +192,75 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 - Pointers: `runs/test-body-e83d1bea80fc485895e6d958a73de976` (303 done), `runs/test-body-6df7c6bd11304710b9656ecc034e9830`
   (101 pit), `notes.md` 2026-11-02 and 2026-11-03.
 
-### Sealed shelter: `sheltered` fact and a `shelter()` primitive
-- Source: survival slice 2 review (`logs/mac1109/review-survival2.answer.txt`, finding 5), 2026-11-09
-- State: `take_shelter` digs a staircase with `dig_down` and waits; on ground that is already
-  stone at the surface (`near(stone, 5)` true) the rule never fires and the body waits in the open.
-- Remaining: the designed fix (survival design §3.6) is a sealed shelter: dig a hole, cover it, and
-  a `sheltered` body/perception fact so `night_watch` can tell cover from open sky. Needs the
-  `shelter()` primitive and the fact; not in slice 2.
-- Pointers: `body/skills/take_shelter.skill` (its "What is left" note), `docs/decisions.md` 2026-11-09.
+### Sealed shelter: live verification and leftovers
+- Source: survival slice 2 review (finding 5), 2026-11-09; built for run 9 (decisions 2026-11-10 "A sealed
+  shelter now", "Shelter shape and exit"); run 9 review items 1-3, 2026-11-10
+- State: built and unit-tested, not yet run live. `sheltered()` (facts, feet cell rounded half a block up so
+  a dirt path or soul sand is not the feet cell), `shelter()` (dig three down and cover, else wall in; a dig
+  starts only with a guaranteed cover and never through sand, gravel or concrete powder),
+  `leave_shelter()` (mine the cover, then a door in a wall or pillar steps out of the hole),
+  `take_shelter.skill` leaves at morning before `done`. Third review (2026-11-10): `shelter()` runs
+  `leave_shelter`'s exit checks (`leave::exit_check`) over the finished shape before it digs or places anything
+  (a hole it could not leave walls in instead; a box it could not leave fails `no_exit`, too few blocks
+  `no_blocks`) and builds only with blocks it can mine back; `get_food` leaves a shelter before it hunts
+  (`hunt_food` holds the hunt rules); the port snapshot carries `sheltered` (sent only when true).
+- Remaining: (1) run `harness/tests/test_body_smoke.py::test_take_shelter_seals_the_body_in_at_night` and
+  `::test_take_shelter_climbs_out_in_the_morning` live (written, never run); (2) `leave_shelter` leaves its
+  pillar column and the wall-in box's other seven walls standing (only the cover and the door come back);
+  (3) `shelter()` no longer builds with a block it cannot mine back, but a cover that drops nothing with any
+  carried tool for another reason (the pickaxe broke or was dropped during the night) still fails `no_exit`
+  instead of breaking it bare-handed (200 ticks, over the 160-tick dig window); (4) `leave_shelter` now checks
+  the climb (blocks, headroom, support, fluid, column limit) before it mines the cover, but a pillar step that
+  fails later for a reason not known in advance (burning, a refused click, a cell over the cover unknown from
+  inside the hole) still leaves the hole open; `take_shelter` then waits (not `done`) only while
+  `sheltered()` is unknown.
+- Pointers: `body/crates/primitives/src/shelter.rs`, `body/crates/primitives/src/shelter/leave.rs`,
+  `body/crates/facts/src/lib.rs` (`feet_cell`, `sheltered`), `body/skills/take_shelter.skill`.
+
+### Run 9 review leftovers (2026-11-10)
+- Source: run 9 review items 3 to 6, 2026-11-10
+- Done: (a) item 3, body side: `get_food` is now "done; `sheltered() -> leave_shelter()`; `do hunt_food($n)`",
+  and the new core skill `hunt_food(n)` holds the four hunt rules and the explore (third review, 2026-11-10).
+- Remaining:
+  (b) item 4: the melee reflex leaves a whole mob kind to the engaged skill (`ReflexState::leaves_to_skill`), so
+  a second zombie next to the one `attack` is locked on is ignored too. Skip only the locked entity id: the
+  arbiter's `track_engagement` sees only the interpreter's decision (kind), so the id must come from the
+  primitives runner (`Attack.entity`, `IntentSpec::Attack { entity_id }`) through the arbiter into
+  `set_engagement`.
+  (c) the reflex and the brain can disagree on "armed" when an axe outranks the only sword: the reflex view
+  needs a `has_sword` field instead of reading the best weapon.
+  (d) the dawn exit cannot wait for nearby hostiles: `near_entity` is true or unknown, never false, so
+  `not near_entity(zombie, 8)` never holds; `take_shelter` leaves on the clock alone (`time_of_day()` 0 to 12000).
+  (e) the brain's night goal condition is `not is_night()` (true from 23000), while `take_shelter` now stays
+  sealed until sunrise (24000): check the brain does not settle or replace the goal in that window.
+  (f) the port snapshot's `stack` lists only the arbiter's root intents (`night_watch`, `get_food`): the skills
+  they call (`take_shelter` under `night_watch`, `hunt_food` under `get_food`) are invisible to the brain, which
+  therefore cannot tell a body sheltering from one hunting under the same root. Publish the interpreter's frame
+  stack (or the running child) per entry, additively like `slots`.
+- Pointers: `body/skills/get_food.skill`, `body/skills/hunt_food.skill`, `body/crates/body/src/driver.rs`
+  (`publish_state`), `body/crates/reflexes/src/reflex.rs` (`leaves_to_skill`),
+  `body/crates/arbiter/src/arbiter.rs` (`track_engagement`), `body/crates/reflexes/src/view.rs`,
+  `brain/praxion_brain/survival.py` (`NIGHT_CONDITION`).
+
+  (g) fourth review: `leave_shelter` should mine the cover or a door cell by hand as a last resort when no tool
+  can recover the block (a broken pickaxe under a cobblestone cover fails `no_exit`); the brain now releases the
+  sealed-by-day hold after `LEAVE_GIVE_UP` (3) failed leaves, so a ladder goal can try instead.
+  (h) fourth review: `sealed_by_day` also fires for an enclosure the body did not build (gravel behind it in a
+  tunnel, a natural pocket); count only a shelter `shelter()` built (a body-side flag), or accept the risk.
+  (i) a wall-in leave takes back only the cover and the door, not the other walls, so repeated wall-ins in one night
+  run out of blocks.
+### Arrow reflex cannot fire live
+- Source: run 9 review, 2026-11-10
+- State: the world mirror ignores `ClientboundAddEntity.movement` (`body/crates/world/src/lib.rs`, the
+  `AddEntity` arm), and perception's `EntityFact` carries no velocity (id, kind, position, distance). The
+  reflex view (`body/crates/reflexes/src/view.rs` `classify_entities`) derives an arrow's motion from two
+  sightings; the review reports the server syncs arrow positions only about every 20 ticks, so `toward`
+  stays false and the arrow reflex never fires (not measured here).
+- Remaining: store the `AddEntity` movement as the entity's velocity in the mirror, carry it in
+  `EntityFact` (or advance projectiles per tick in the mirror), and use it in `classify_entities` for
+  `toward`; pin with a view test from an `AddEntity` packet alone, then verify live with a skeleton.
+- Pointers: `body/crates/world/src/lib.rs`, `body/crates/perception/src/lib.rs` (`EntityFact`),
+  `body/crates/reflexes/src/view.rs`.
 
 ### Design the thin Demo-2 slice with the user (after Demo-0)
 - Source: Claude Opus 5.5, 2026-11-03 (order decided by the user, `docs/decisions.md`)

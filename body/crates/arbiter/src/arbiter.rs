@@ -23,7 +23,9 @@ use praxion_eventlog::EventKind;
 use praxion_headless::{Body, ControlFrame, Held};
 use praxion_interpreter::{Actuator, Decision, Facts, Interpreter};
 use praxion_planner::KnownBlocks;
-use praxion_reflexes::{EndermanGuard, Engine, ReflexKind, ReflexTick, Settings, View};
+use praxion_reflexes::{
+    EndermanGuard, Engine, ReflexKind, ReflexTick, Settings, View, action_note,
+};
 use praxion_rules::{ArgValue, PrimitiveKind};
 
 use crate::tier::{IntentStack, IntentState, NeedKind, Needs, Tier, arg_to_string};
@@ -256,6 +258,9 @@ impl Arbiter {
             return Err(CommandError::Skill(refusal));
         }
 
+        // The interpreter holds a new skill, engaged with nothing yet.
+        self.engine.set_engagement(None);
+
         // The command is accepted: the meal is over, not paused, because the
         // interpreter no longer holds its skill. The need comes back on its
         // own if still hungry.
@@ -400,9 +405,30 @@ impl Arbiter {
         // 1. Reflexes always win. The engine bumps the body generation on a
         // start; the arbiter mirrors it and emits one owner change.
         match self.engine.poll(view, settings, body, tick, blocks) {
-            ReflexTick::Started { kind, frame, .. } => {
+            ReflexTick::Started {
+                kind,
+                action,
+                frame,
+            } => {
                 self.preempt_for_reflex(interpreter, actuator);
                 self.set_owner(Owner::Reflex(kind), body.generation(), tick);
+                self.events.push(EventKind::Note {
+                    text: action_note(kind, action, view, false),
+                });
+                let frame = self.guard(frame, body, view);
+                return self.result(FrameSource::Reflex(frame), Some(kind), None, None);
+            }
+            ReflexTick::Renewed {
+                kind,
+                action,
+                frame,
+            } => {
+                // Renewed in place: same owner, same generation, one log line
+                // saying what the reflex does now.
+                self.events.push(EventKind::Note {
+                    text: action_note(kind, action, view, true),
+                });
+                self.maybe_wake(kind, tick, settings, needs);
                 let frame = self.guard(frame, body, view);
                 return self.result(FrameSource::Reflex(frame), Some(kind), None, None);
             }
@@ -443,6 +469,7 @@ impl Arbiter {
                 .set_cooldown(ReflexKind::Starvation, tick + MEAL_COOLDOWN_TICKS);
             let decision = interpreter.tick(facts, actuator);
             self.last_decision = Some(decision.clone());
+            self.track_engagement(&decision);
             self.skill_intent = Some(run.intent_id);
             match &decision {
                 Decision::Done => self.finish_meal(interpreter, body, tick, None),
@@ -511,6 +538,7 @@ impl Arbiter {
             }
             let outcome = interpreter.tick(facts, actuator);
             self.last_decision = Some(outcome.clone());
+            self.track_engagement(&outcome);
             self.skill_intent = Some(intent.intent_id);
             decision = Some(outcome);
         }
@@ -615,6 +643,7 @@ impl Arbiter {
     ) -> Vec<EventKind> {
         self.events.clear();
         self.meal = None;
+        self.engine.set_engagement(None);
         interpreter.preempt(actuator);
         let live: Vec<u64> = self
             .stack
@@ -721,7 +750,39 @@ impl Arbiter {
     }
 
     /// Suspend the current skill and abandon its in-flight discrete action.
+    /// Follow the running skill's engagement from its decisions (decision
+    /// 2026-11-10 "The skill that started a fight owns it"): a skill whose
+    /// in-flight primitive is `attack(<kind>)` or `move_to(<kind>)` is fighting
+    /// or closing on that mob, and the melee reflex leaves that kind to it
+    /// while health is above `fight_min_health`.
+    ///
+    /// A discrete `attack` is chosen once and then reported as `attack in
+    /// flight` (or `retry` after a failed swing) until it settles, so those
+    /// waits keep the engagement; a continuous `move_to` is re-chosen every
+    /// tick. Anything else (another primitive, an observe, a child frame
+    /// ending, done, failed, suspended) ends it. A block name in `move_to`
+    /// never matches a mob, so it needs no special case.
+    fn track_engagement(&mut self, decision: &Decision) {
+        let keep = match decision {
+            Decision::Run { action, .. } => {
+                let mob = matches!(action.primitive.as_str(), "attack" | "move_to")
+                    .then(|| action.args.first().and_then(ArgValue::name))
+                    .flatten();
+                self.engine.set_engagement(mob);
+                return;
+            }
+            Decision::Waiting(message) => message.ends_with(" in flight") || message == "retry",
+            Decision::Observe(_) | Decision::Done | Decision::Failed(_) => false,
+        };
+        if !keep {
+            self.engine.set_engagement(None);
+        }
+    }
+
     fn preempt_for_reflex(&mut self, interpreter: &mut Interpreter, actuator: &mut dyn Actuator) {
+        // The skill's in-flight action is cancelled below: it fights nothing
+        // until it runs again and chooses its next primitive.
+        self.engine.set_engagement(None);
         if let Some(run) = self.meal.take() {
             // The meal is over, not paused: a reflex interrupted it. The body
             // writes `done` for its own intent; `preempt` cancels the `eat`
@@ -856,6 +917,7 @@ impl Arbiter {
         // The safe-point path has no in-flight action; the hard path cancels
         // one and its receipt settles `preempted`.
         interpreter.preempt(actuator);
+        self.engine.set_engagement(None);
         if let Err(refusal) = interpreter.start_skill(skill, vec![ArgValue::Item(item.to_owned())])
         {
             self.stack.rollback(pushed);

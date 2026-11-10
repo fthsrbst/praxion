@@ -23,6 +23,11 @@ pub const MAX_REFLEX_TICKS_LIMIT: u32 = 1_200;
 /// §3). Kept here so the latency gate and its tests name the same number.
 pub const HUMAN_FLOOR_TICKS: u64 = 3;
 
+/// The smallest `melee_range`: the shared melee reach plus the trigger margin
+/// (`praxion_gamedata::MELEE_REACH` + `MELEE_TRIGGER_MARGIN`, 3 + 1).
+pub const MIN_MELEE_RANGE: u32 =
+    (praxion_gamedata::MELEE_REACH + praxion_gamedata::MELEE_TRIGGER_MARGIN) as u32;
+
 /// The typed reflex policy.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +36,9 @@ pub struct Settings {
     pub critical_health: f32,
     /// The melee reflex fights only above this health; at or below it flees.
     pub fight_min_health: f32,
-    /// A zombie, skeleton or spider this close triggers the melee reflex.
+    /// A zombie, skeleton or spider this close (horizontal) triggers the
+    /// melee reflex. At least [`MIN_MELEE_RANGE`]; a running fight holds until
+    /// the mob is `MELEE_EXIT_MARGIN` farther.
     pub melee_range: u32,
     /// A creeper this close triggers the creeper reflex.
     pub creeper_flee_range: u32,
@@ -161,11 +168,14 @@ impl Settings {
         health("critical_health", self.critical_health)?;
         health("fight_min_health", self.fight_min_health)?;
         health("shelter_health", self.shelter_health)?;
-        if !(1..=32).contains(&self.melee_range) {
+        // The trigger must reach past the melee reach (decision 2026-11-10):
+        // a mob the skill can hit is always one the reflex already sees, so
+        // the two ranges cannot nest the wrong way round.
+        if !(MIN_MELEE_RANGE..=32).contains(&self.melee_range) {
             return Err(SettingsError::Invalid {
                 field: "melee_range",
                 value: self.melee_range.to_string(),
-                expected: "1 to 32 blocks",
+                expected: "4 to 32 blocks (at least the melee reach 3 plus 1)",
             });
         }
         if !(1..=32).contains(&self.creeper_flee_range) {
@@ -283,10 +293,24 @@ min_switch_ticks = 100
             SettingsError::Invalid {
                 field: "melee_range",
                 value: "99".to_owned(),
-                expected: "1 to 32 blocks",
+                expected: "4 to 32 blocks (at least the melee reach 3 plus 1)",
             }
         );
         assert!(error.to_string().contains("melee_range"), "{error}");
+    }
+
+    #[test]
+    fn a_melee_range_inside_the_melee_reach_margin_is_refused() {
+        // Decision 2026-11-10: the reflex trigger must reach past the attack
+        // reach the `hunt` skill uses, or the reflex would wake inside a fight
+        // the skill is already winning.
+        assert_eq!(MIN_MELEE_RANGE, 4);
+        let text = MINIMAL.replace("melee_range = 4", "melee_range = 3");
+        let error = Settings::from_toml(&text).unwrap_err();
+        assert!(
+            matches!(error, SettingsError::Invalid { field: "melee_range", .. }),
+            "{error}"
+        );
     }
 
     #[test]

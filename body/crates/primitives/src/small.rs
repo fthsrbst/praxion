@@ -94,8 +94,9 @@ const DEATH_SETTLE_TICKS: u32 = 10;
 
 /// How far the eye may be from the mob's feet and still click it. The same
 /// metric and radius as the `near_entity(mob, 3)` guard that selects `attack`,
-/// so the primitive and the rule that fired it never disagree about reach.
-const ATTACK_REACH: f64 = 3.0;
+/// so the primitive and the rule that fired it never disagree about reach; one
+/// shared constant with the melee reflex (decision 2026-11-10).
+const ATTACK_REACH: f64 = praxion_gamedata::MELEE_REACH;
 
 /// Ticks `attack` waits for a swap to put the best weapon in the hand before
 /// it fights with what it holds. A swap shows only after the server's slot

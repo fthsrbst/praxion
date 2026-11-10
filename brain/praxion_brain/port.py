@@ -151,6 +151,9 @@ class Facts(_Message):
     #: False once the body's world mirror desynchronised (decision 2026-11-10):
     #: every world fact after that is stale. The body sends it only when false.
     world_valid: bool = True
+    #: The body is sealed in its shelter (decision 2026-11-10 "A sealed shelter
+    #: now", ``praxion_facts::sheltered``). The body sends it only when true.
+    sheltered: bool = False
 
 
 class Snapshot(_Message):

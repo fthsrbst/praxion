@@ -64,6 +64,7 @@ fn snapshot(seq: u64) -> Snapshot {
             selected_hotbar_slot: None,
             slots: Vec::new(),
             world_valid: true,
+            sheltered: false,
         },
         stale_ticks: 0,
     }
@@ -316,6 +317,27 @@ fn world_valid_is_sent_only_when_the_world_desynced() {
 }
 
 #[test]
+fn sheltered_is_sent_only_when_the_body_is_sealed_in() {
+    // Run 9, third review: the brain must know the body is shut in before it
+    // starts a goal that needs the open. `false` (or unknown) is the default
+    // and is never written, so every golden frame stays byte-identical.
+    let mut facts = Facts::default();
+    assert!(!facts.sheltered);
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(!json.contains("sheltered"), "{json}");
+    let back: Facts = serde_json::from_str(&json).unwrap();
+    assert!(!back.sheltered, "an absent field reads as not sheltered");
+
+    let golden = serde_json::to_string(&BodyMessage::Snapshot(snapshot(5))).unwrap();
+    assert!(!golden.contains("sheltered"), "{golden}");
+
+    facts.sheltered = true;
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(json.ends_with(r#","sheltered":true}"#), "{json}");
+    assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
+}
+
+#[test]
 fn every_message_round_trips() {
     let body = [
         BodyMessage::Hello {
@@ -554,16 +576,15 @@ fn a_resync_request_is_answered_with_a_snapshot_then_deltas() {
     brain.receive();
 
     brain.send(&BrainMessage::ResyncRequest);
-    // Wait until the connection thread has seen the request. Otherwise the
-    // published snapshot can go out as a wake snapshot, cut at the last sent
-    // event, before the resync cut is known.
     wait_for(|| server.needs_snapshot());
-    // The stored snapshot (seq 5) is the cut; later events must follow it.
-    server.publish_snapshot(snapshot(5));
+    // The answer is the next published snapshot, cut at the last event the
+    // brain has (seq 2): the state plus every later event is a complete view.
+    server.publish_snapshot(snapshot(2));
     assert_eq!(
         brain.receive_until(|message| matches!(message, BodyMessage::Snapshot(_))),
-        BodyMessage::Snapshot(snapshot(5))
+        BodyMessage::Snapshot(snapshot(2))
     );
+    wait_for(|| !server.needs_snapshot());
 
     server.publish(event(6, 60));
     let message = brain.receive_until(|message| matches!(message, BodyMessage::Event { .. }));
@@ -578,6 +599,66 @@ fn a_resync_request_is_answered_with_a_snapshot_then_deltas() {
         ),
         "expected event 6, got {message:?}"
     );
+}
+
+#[test]
+fn a_resync_request_with_queued_events_loses_none() {
+    // Run 9: the console asked for a resync every second, and every request
+    // drained the queue as if it had overflowed; a goal's settled receipt was
+    // lost behind four `dropped` notices. A request discards nothing.
+    let server = server();
+    let mut brain = Brain::connect(&server);
+    server.publish(event(1, 10));
+    assert!(matches!(brain.receive(), BodyMessage::Event { seq: 1, .. }));
+
+    brain.send(&BrainMessage::ResyncRequest);
+    wait_for(|| server.needs_snapshot());
+    // Events published while the request is open, then the answer.
+    server.publish(event(2, 20));
+    server.publish(event(3, 30));
+    server.publish_snapshot(snapshot(3));
+
+    let mut events = Vec::new();
+    let mut snapshot_seq = None;
+    while events.len() < 2 || snapshot_seq.is_none() {
+        match brain.receive() {
+            BodyMessage::Event { seq, .. } => events.push(seq),
+            BodyMessage::Snapshot(state) => {
+                // Cut at the last event sent before it, never past one the
+                // brain has not seen.
+                assert!(
+                    state.seq <= events.last().copied().unwrap_or(1),
+                    "snapshot {} swallowed a queued event (sent {events:?})",
+                    state.seq
+                );
+                snapshot_seq = Some(state.seq);
+            }
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+    assert_eq!(events, vec![2, 3]);
+    wait_for(|| !server.needs_snapshot());
+    assert_eq!(server.stats().dropped, 0);
+}
+
+#[test]
+fn a_resync_request_waits_for_a_snapshot_published_after_it() {
+    let server = server();
+    let mut brain = Brain::connect(&server);
+    server.publish(event(1, 10));
+    assert!(matches!(brain.receive(), BodyMessage::Event { seq: 1, .. }));
+
+    brain.send(&BrainMessage::ResyncRequest);
+    wait_for(|| server.needs_snapshot());
+    // The port keeps asking until the driver publishes.
+    thread::sleep(Duration::from_millis(30));
+    assert!(server.needs_snapshot());
+    server.publish_snapshot(snapshot(1));
+    assert_eq!(
+        brain.receive_until(|message| matches!(message, BodyMessage::Snapshot(_))),
+        BodyMessage::Snapshot(snapshot(1))
+    );
+    wait_for(|| !server.needs_snapshot());
 }
 
 #[test]

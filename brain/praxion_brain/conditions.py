@@ -28,11 +28,12 @@ unknown tag, a bare identifier, a ``$parameter``, or a string argument). A
 is rejected rather than silently treated as unknown.
 
 Survival facts (decision 2026-11-09 "Five next areas", survival slice 3): the
-zero-argument calls ``count_food()``, ``health()``, ``food()`` (ints) and
-``is_night()`` (bool) are decidable when :func:`evaluate` is given the snapshot
-``facts`` next to the inventory, so a food or night goal is *verifiable* and
-its settlement is ``done`` or ``failed``, not ``unverified``. They mirror
-``body/crates/facts/src/lib.rs``; without ``facts`` they stay unknown.
+zero-argument calls ``count_food()``, ``health()``, ``food()`` (ints),
+``is_night()`` and ``sheltered()`` (bools) are decidable when :func:`evaluate`
+is given the snapshot ``facts`` next to the inventory, so a food or night goal
+is *verifiable* and its settlement is ``done`` or ``failed``, not
+``unverified``. They mirror ``body/crates/facts/src/lib.rs``; without ``facts``
+they stay unknown.
 
 Tags: ``#logs`` counts every inventory key ending in ``_log`` and ``#planks``
 every key ending in ``_planks``; these two come from ``body/skills``. Any other
@@ -59,6 +60,9 @@ FACT_CALLS: dict[str, str] = {
     "health": "int",
     "food": "int",
     "is_night": "bool",
+    # The body is sealed in (decision 2026-11-10 "A sealed shelter now"): the
+    # morning ``take_shelter`` goal ends on ``not sheltered()``.
+    "sheltered": "bool",
 }
 
 #: Items that count as food for ``count_food()``: the vanilla edible items a
@@ -611,8 +615,8 @@ def _fact_value(
         return sum(amount for key, amount in inventory.items() if key in FOOD_ITEMS)
     if facts is None:
         return None
-    if name == "is_night":
-        value = facts.get("is_night")
+    if name in ("is_night", "sheltered"):
+        value = facts.get(name)
         return value if isinstance(value, bool) else None
     value = facts.get("health" if name == "health" else "food")
     if isinstance(value, bool) or not isinstance(value, (int, float)):

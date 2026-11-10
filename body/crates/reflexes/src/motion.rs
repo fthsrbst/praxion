@@ -27,6 +27,11 @@ pub const SAFE_DROP: u8 = 3;
 /// How long a strafe or an attack runs at most, in ticks.
 const STRAFE_TICKS: u64 = 8;
 const ATTACK_TICKS: u64 = 30;
+
+/// The horizontal distance to a mob's centre at which the attack swings: the
+/// shared melee reach plus a small mob's half width (0.3) less a margin, so
+/// the crosshair ray (3.0 to the hitbox) still lands.
+const SWING_DISTANCE: f64 = praxion_gamedata::MELEE_REACH + 0.2;
 const EAT_TICKS: u64 = 4;
 
 /// How many connected water cells the drowning reflex explores when it looks
@@ -300,9 +305,9 @@ impl Motion {
                         look_towards(body.look(), view.eye, target_point, WALK_TOLERANCE_DEG);
                     frame.look = look;
                     let reach = view.horizontal_to(mob);
-                    if aligned && reach <= 3.2 {
+                    if aligned && reach <= SWING_DISTANCE {
                         frame.clicks.push(Click::Attack);
-                    } else if reach > 3.2 {
+                    } else if reach > SWING_DISTANCE {
                         frame.held.forward = true;
                         frame.held.sprint = true;
                     }
@@ -457,8 +462,7 @@ fn guard_drop(frame: &mut ControlFrame, view: &View) {
 }
 
 fn attack_target(view: &View, target: i32) -> Option<crate::view::EntityView> {
-    view.melee
-        .filter(|mob| mob.id == target)
+    view.melee_mob(target)
         .or_else(|| view.creeper.filter(|mob| mob.id == target))
 }
 

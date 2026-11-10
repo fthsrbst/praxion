@@ -1,31 +1,42 @@
-# Get under cover for the night: cut a staircase into the ground and wait in it
-# until morning (decision 2026-11-09 "Five next areas"; the simplest shelter the
-# existing primitives allow). A hole is not a sealed room: the entrance stays
-# open, so a mob can still follow and the reflexes fight it in a one-wide tunnel,
-# which is the point. What is left is a sealed shelter and a `sheltered` fact.
+# Get under cover for the night, stay there until morning, then come out
+# (decisions 2026-11-10 "A sealed shelter now" and "Shelter shape and exit";
+# run 9 died in an open staircase dug with the sky above it).
 #
-# Why the rules are ordered this way: the night ends the skill first. Then, if
-# stone is not within five blocks, `dig_down` cuts the stairs until stone is
-# within reach (stone lies three to six blocks under flat ground), which puts
-# the body below the surface. With stone near, the body waits in short steps so
-# the night check runs again. A `dig_down` that fails (water, a drop, no ground)
-# falls through to waiting where the body stands.
+# `shelter()` seals the body in: three cells straight down and a block over the
+# head where the ground may be dug, else walls and a cover where it stands. It
+# is done when `sheltered()` is true, and `sheltered()` checks exactly the
+# cells `shelter()` closes (the cell over the head and the eight sides of the
+# feet and head cells, all full blocks), so the two can never disagree: a
+# `shelter()` that confirms at once is always followed by the wait rule.
 #
-# The radius is five, not three, because `dig_down` stops as soon as the wanted
-# block is known within five blocks — the radius of the `mine` search
-# (`EXPLORE_NEAR_RADIUS`). A rule that dug at three while the primitive stops at
-# five would start a `dig_down` every tick as soon as stone lay four or five
-# blocks off (a hillside, or the wall of a staircase already dug): each call
-# confirms at once, so the night never ends and the body is stuck in that rule
-# (review finding 1). Both sides now use one threshold.
+# `leave_shelter()` opens it again: it mines the cover and climbs out (a door
+# in a wall, or one pillar block at a time out of the hole), picking the blocks
+# back up. A body left sealed in at dawn fails every ladder goal, so
+# `shelter()` checks that way out before it digs or places anything, and walls
+# in (or fails `no_exit`) where the hole could not be left.
 #
-# What is left: on ground that is already stone at the surface the rule never
-# fires and the body waits in the open all night. Cover needs the designed
-# `sheltered` fact and the `shelter()` primitive (survival design §3.6), not
-# `dig_down`; see `backlog.md`.
+# Why the rules are ordered this way: the morning comes first. A body still
+# sealed in at full morning (`time_of_day()` 0 to 12000: the sun is up, the
+# undead burn) leaves; once the cover is gone `sheltered()` is false, so the
+# next rule ends the skill. Between the end of `is_night()` (23000) and sunrise
+# (24000, `time_of_day()` 0) the zombies, skeletons and spiders are still out,
+# so a sealed body keeps waiting there; an open one is done, as `night_watch`
+# is at 23000. The skill is only done when the body is known not to be sealed
+# in: with `sheltered()` unknown in the morning no rule is true and the
+# interpreter observes it, rather than ending the skill with the body still
+# shut in. (Nearby hostiles are not part of the exit rule: `near_entity` is
+# true or unknown, never false, so `not near_entity(...)` could never hold.)
+# A sealed body waits in short steps so the morning check runs again. At
+# night, anything else, an open cell or a `sheltered()` perception cannot
+# answer, builds: an unknown guard never fires, so it falls to `shelter()`,
+# which confirms at once if the body is in fact sealed. A failed `shelter()`
+# or `leave_shelter()` (no blocks, fluid beside the body, no exit, stuck; a
+# refused climb leaves the cover in place) is retried by the interpreter and
+# fails the skill after the third failure; the caller decides what then.
 skill take_shelter()
-  doc "Dig a staircase into the ground and wait in it until the night is over."
+  doc "Seal the body in (dig down and cover, or wall in), wait there until the night is over, then climb out."
   rules:
-    not is_night() -> done
-    not near(stone, 5) -> dig_down(stone)
-    true -> wait(40)
+    time_of_day() < 12000 and sheltered() -> leave_shelter()
+    not is_night() and not sheltered() -> done
+    sheltered() -> wait(40)
+    is_night() -> shelter()

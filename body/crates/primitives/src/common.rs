@@ -301,6 +301,73 @@ pub(crate) fn pickup_frame(ctx: &Ctx<'_>, target: Vec3) -> ControlFrame {
     frame
 }
 
+/// Offsets from a cell's centre to the six face points, inset 0.05 into the
+/// cell so a ray aimed there still enters it.
+const FACE_OFFSETS: [(f64, f64, f64); 6] = [
+    (-0.45, 0.0, 0.0),
+    (0.45, 0.0, 0.0),
+    (0.0, -0.45, 0.0),
+    (0.0, 0.45, 0.0),
+    (0.0, 0.0, -0.45),
+    (0.0, 0.0, 0.45),
+];
+
+/// Where the crosshair can land on one cell from where the body stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CellAim {
+    /// A point whose pick lands on the cell: its centre, else the nearest inset
+    /// face point that does. `None` when no point of the cell can be picked.
+    pub(crate) point: Option<Vec3>,
+    /// The cell the pick toward the cell's centre lands on (`None` for a miss).
+    /// When `point` is `None` this is what hides the cell.
+    pub(crate) centre_hit: Option<BlockPos>,
+}
+
+/// Where to aim at `cell`. A player clicks the face they can see: try the
+/// cell's centre, then the centre of each face (inset a little), nearest to the
+/// eye first, and take the first whose pick lands on the cell. The centre ray
+/// can enter another cell first (a roof over a table next to the body, a log
+/// behind a leaf corner), which only a face point gets around.
+///
+/// This asks the same pick the click will use (`pick_block_looking`, the
+/// client's crosshair), so a chosen point is one the click really lands on;
+/// perception's own visibility test may accept a point this pick does not.
+pub(crate) fn choose_aim(ctx: &Ctx<'_>, cell: BlockPos) -> CellAim {
+    let eye = ctx.body.eye_position();
+    let hit_at = |point: Vec3| {
+        let (yaw, pitch) = praxion_planner::aim(eye, point);
+        praxion_headless::pick_block_looking(ctx.world, ctx.body, yaw, pitch)
+            .filter(|hit| !hit.miss)
+            .map(|hit| hit.block_pos)
+    };
+    let centre = cell_centre(cell);
+    let centre_hit = hit_at(centre);
+    if centre_hit == Some(cell) {
+        return CellAim {
+            point: Some(centre),
+            centre_hit,
+        };
+    }
+    let mut faces: Vec<Vec3> = FACE_OFFSETS
+        .iter()
+        .map(|(dx, dy, dz)| Vec3::new(centre.x + dx, centre.y + dy, centre.z + dz))
+        .collect();
+    faces.sort_by(|a, b| eye.distance_to(*a).total_cmp(&eye.distance_to(*b)));
+    let point = faces.into_iter().find(|point| hit_at(*point) == Some(cell));
+    CellAim { point, centre_hit }
+}
+
+/// The true centre of a cell. `praxion_planner::center` is the centre of the
+/// cell's floor (the point a body standing in it occupies), which aimed
+/// `place` at a side face's bottom edge.
+pub(crate) fn cell_centre(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    )
+}
+
 /// The nearest visible block of `wanted` within `radius`.
 pub(crate) fn block_target(ctx: &mut Ctx<'_>, wanted: &str, radius: u32) -> Option<BlockPos> {
     block_target_where(ctx, wanted, radius, |_, _| true)

@@ -40,13 +40,14 @@ pub use enderman::{
 pub use engine::{Engine, ReflexTick, human_floor_ticks};
 pub use motion::{Motion, SAFE_DROP, yaw_pitch_towards};
 pub use reflex::{
-    CREEPER_LETHAL_RANGE, FULL_AIR_TICKS, LatencyClass, ReflexAction, ReflexKind, ReflexState,
-    evaluate, evaluate_all, is_melee_kind,
+    CREEPER_LETHAL_RANGE, FULL_AIR_TICKS, LatencyClass, MELEE_COOLDOWN_TICKS, MELEE_EXIT_MARGIN,
+    ReflexAction, ReflexKind, ReflexState, action_for, action_note, evaluate, evaluate_all,
+    is_melee_kind, sprint_outruns,
 };
 pub use settings::{HUMAN_FLOOR_TICKS, MAX_REFLEX_TICKS_LIMIT, Settings, SettingsError};
 pub use view::{
-    ArrowMemory, ArrowView, Cell, EntityView, FoodChoice, MAX_ARROWS, MAX_ENDERMEN, View,
-    WeaponChoice,
+    ArrowMemory, ArrowView, Cell, EntityView, FoodChoice, MAX_ARROWS, MAX_ENDERMEN,
+    MAX_MELEE_OTHERS, View, WeaponChoice,
 };
 
 use praxion_perception::{Answer, Caller, Perception};

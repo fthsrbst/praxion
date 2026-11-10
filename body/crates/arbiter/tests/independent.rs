@@ -10,7 +10,7 @@ use praxion_interpreter::{
 };
 use praxion_planner::{TestWorld, aim};
 use praxion_reflexes::{
-    EntityView, FoodChoice, MAX_ARROWS, MAX_ENDERMEN, Settings, View, WeaponChoice,
+    EntityView, FoodChoice, MAX_ARROWS, MAX_ENDERMEN, MAX_MELEE_OTHERS, Settings, View, WeaponChoice,
 };
 use praxion_rules::{ArgValue, FactCall, Program};
 use praxion_world::Vec3;
@@ -152,6 +152,7 @@ fn bare_view(feet: Vec3, health: f32, food: u32) -> View {
         next_drop: 0,
         creeper: None,
         melee: None,
+        melee_others: [None; MAX_MELEE_OTHERS],
         endermen: [None; MAX_ENDERMEN],
         enderman_count: 0,
         arrows: [None; MAX_ARROWS],
