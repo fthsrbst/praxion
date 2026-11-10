@@ -35,6 +35,8 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   (e) one spurious `loop_wake` evidence line after a desync (`_advance` heartbeat before the desync early return).
   (f) the typed `died` event is not forwarded to the brain (`port::forwards`); the brain uses the `died` wake.
   (g) correct `backlog.md` "Body restart in the middle of a game connection": the body does not reconnect on desync.
+  (h) run 9: the body's port queue overflowed (`dropped`) during an ordinary goal; find what floods it (gaze `look`
+  notes are written every turning tick) and whether those notes should reach the port at all.
 - Pointers: `body/crates/primitives/src/mine.rs`, `brain/praxion_brain/loop.py` (`_nothing_backoff`, `_on_died`,
   `_advance`), `body/crates/body/src/driver.rs` (`handle_death`, `halt`).
 

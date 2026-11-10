@@ -550,3 +550,26 @@ def test_a_deferred_write_backs_off_doubling_and_night_still_starts(tmp_path) ->
         finally:
             release.set()
             loop.close()
+
+
+def test_a_dropped_notice_is_logged_and_never_fails_the_goal(tmp_path) -> None:
+    """Run 9: the body's queue overflowed while a goal played; the session read a
+    `tick` the `dropped` message does not have, the loop raised, and a goal the
+    body had finished was recorded failed(loop_error)."""
+    with FakeBody(skills={"get_wood"}, facts={"inventory": {}}) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *a, **k: proposal("count(oak_log) >= 2", "get logs", "log"),
+            route_fn=lambda *a, **k: Route(kind="play", skill="get_wood"),
+            skills=catalog("get_wood"),
+        )
+        try:
+            loop.start()
+            pump(loop, lambda: body.commands, what="the command")
+            body.dropped(3)
+            pump(loop, lambda: evidence_entries(loop, "loop_dropped"), what="the dropped line")
+            assert evidence_entries(loop, "loop_dropped")[0]["n"] == 3
+            assert not evidence_entries(loop, "loop_error")
+        finally:
+            loop.close()

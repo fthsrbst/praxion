@@ -305,7 +305,7 @@ class BodySession:
         if isinstance(message, Bye):
             self._on_bye(message.reason)
         elif isinstance(message, Dropped):
-            self.evidence.write("loop_dropped", n=message.n, tick=message.tick)
+            self.evidence.write("loop_dropped", n=message.n, seq=message.seq)
         return False
 
     def _on_snapshot(self, snapshot: Snapshot) -> None:
