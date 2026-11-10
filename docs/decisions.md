@@ -28,6 +28,14 @@ each the recommended option.
   failure block; a failed survival skill is not picked again for 600 ticks instead. While a night goal is due or backing
   off, the brain starts no ladder goal at night (it waits). Rules out: expiring the block at dawn.
 
+- **Shelter shape and exit (user, after the first review).** The dug shelter is three cells deep (with two there is no
+  face to place the cover against from inside); the wall-in fallback may use one helper jump. At morning `take_shelter`
+  opens the shelter itself before it ends: a `leave_shelter()` step mines the cover and climbs out (pillar or steps),
+  picking the blocks back up. Reason: a body left sealed in at dawn fails every ladder goal.
+- **Hungry at night: hunt only when it is critical (user).** At night, unarmed or sheltered, the bot eats what it
+  carries and does not hunt, unless the food bar is critical (3 or less), when `get_food` may hunt in the dark. Reason:
+  the user accepts that risk over starving down; it overrides "never hunts" for that one case.
+
 Technical fixes with no design choice (Claude): a brain `resync_request` no longer drops queued events (run 9's four
 `dropped` notices lost settled receipts; the console's 1 Hz watch resync is removed, the body pushes a snapshot every
 second anyway); `mine` aims at a reachable face of its target, digs through a soft occluder, and rejects a target it
