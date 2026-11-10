@@ -192,6 +192,7 @@ impl Runner {
                 pickup: None,
                 dig_through: None,
                 blocked: 0,
+                uphill: 0,
             }),
             "dig_down" => Active::Dig(Digger::dig_down(arg)),
             "branch_mine" => Active::Dig(Digger::branch_mine(arg)),

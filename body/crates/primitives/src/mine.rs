@@ -122,10 +122,20 @@ pub(crate) struct Mine {
     /// clicking something else for 160 ticks (decision 2026-11-09 "Five next
     /// areas": run 6 spent 2,358 ticks on logs it could not hit).
     pub(crate) blocked: u32,
+    /// Ticks spent walking toward a target higher than reach.
+    pub(crate) uphill: u32,
 }
 
 /// Aligned ticks without the crosshair on the target before the call gives up.
 const BLOCKED_TICKS: u32 = 10;
+
+/// Horizontal distance (eye to target centre) inside which a target higher than
+/// reach is "right overhead": no walk helps, only a climb.
+const UNDER_TARGET_RADIUS: f64 = 1.5;
+
+/// Ticks `mine` walks toward a target higher than reach, hoping the ground rises
+/// (about three seconds), before it fails `out_of_reach`.
+const UPHILL_WALK_TICKS: u32 = 60;
 
 impl Mine {
     pub(crate) fn begin_pickup(&mut self) {
@@ -334,18 +344,27 @@ impl Mine {
         // of aiming forever at a cell the client will never pick.
         let eye = ctx.body.eye_position();
         let reach = ctx.body.block_interaction_range() - 0.25;
-        // Walking closer shortens the horizontal gap only. A target whose
-        // centre lies higher above the eye than the reach cannot be hit from
-        // under it either: climbing (`pillar`) is the skill's job, and the
-        // typed failure says so at once instead of walking for 80 ticks.
+        // A target whose centre lies higher above the eye than the reach: from
+        // right under it no step helps, and climbing (`pillar`) is the skill's
+        // job, so the typed failure comes at once. From off to the side the
+        // ground may rise toward it (a tree on a slope above a pit, run 8,
+        // 2026-11-10): walk toward it for a bounded time first, jumping the
+        // steps, and fail `out_of_reach` only if it never comes within reach
+        // (user decision 2026-11-10).
         if above_reach(eye.y, target, reach) {
-            log::debug!(
-                "mine: {:?} at {:?} is higher than reach above the eye {:?}",
-                self.name,
-                target,
-                eye
-            );
-            return (frame, None, Some(Outcome::Failed("out_of_reach".into())));
+            let aim = center(target);
+            let horizontal = ((aim.x - eye.x).powi(2) + (aim.z - eye.z).powi(2)).sqrt();
+            self.uphill = self.uphill.saturating_add(1);
+            if horizontal <= UNDER_TARGET_RADIUS || self.uphill > UPHILL_WALK_TICKS {
+                log::debug!(
+                    "mine: {:?} at {:?} is higher than reach above the eye {:?}",
+                    self.name,
+                    target,
+                    eye
+                );
+                return (frame, None, Some(Outcome::Failed("out_of_reach".into())));
+            }
+            return (pickup_frame(ctx, aim), None, None);
         }
         if eye.distance_to(center(target)) > reach {
             self.waited = self.waited.saturating_add(1);
@@ -875,6 +894,7 @@ mod tests {
             pickup: None,
             dig_through,
             blocked: 0,
+            uphill: 0,
         }
     }
 
@@ -1069,6 +1089,7 @@ mod tests {
             pickup: None,
             dig_through: None,
             blocked: 0,
+            uphill: 0,
         };
         let mut ctx = Ctx {
             tick: 0,
@@ -1212,6 +1233,7 @@ mod tests {
             pickup: None,
             dig_through: None,
             blocked: 0,
+            uphill: 0,
         }
     }
 
@@ -1248,6 +1270,49 @@ mod tests {
             .expect("it fails");
         assert_eq!(outcome, Outcome::Failed("out_of_reach".into()));
         assert!(tick <= 3, "fast, not 80 ticks: {tick}");
+    }
+
+    #[test]
+    fn a_high_log_off_to_the_side_is_walked_toward_before_out_of_reach() {
+        use crate::test_world::{feet, set_block, swept, world};
+        // Run 8, 2026-11-10: the body spawned in a pit and every log stood on
+        // the ground above it, five or more blocks over the feet. Off to the
+        // side, the call walks toward the log (jumping the steps) instead of
+        // failing at once. On this flat floor the ground never rises, so it
+        // ends `out_of_reach` once it stands under the log, where `pillar`
+        // can climb straight to it.
+        let mut world = world();
+        let target = BlockPos::new(0, 70, 4);
+        set_block(&mut world, target, BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = fresh_mine("#logs", Some(target));
+        let mut walked = false;
+        let mut result = None;
+        for tick in 0..120u64 {
+            let mut ctx = Ctx {
+                tick,
+                body: &body,
+                world: &world,
+                perception: &mut perception,
+                style: praxion_planner::Personality::default(),
+            };
+            let (frame, _, outcome) = mine.tick(&mut ctx, false);
+            walked |= frame.held.forward;
+            frame.apply(&mut body, tick).expect("the mine frame applies");
+            if let Some(outcome) = outcome {
+                result = Some((tick, outcome));
+                break;
+            }
+            body.step(&frame.held, &world);
+        }
+        let (tick, outcome) = result.expect("it fails in the end");
+        assert!(walked, "the body walked toward the log");
+        assert_eq!(outcome, Outcome::Failed("out_of_reach".into()));
+        assert!(tick > 3, "after a walk, not at once: {tick}");
+        let eye = body.eye_position();
+        let horizontal = ((eye.x - 0.5).powi(2) + (eye.z - 4.5).powi(2)).sqrt();
+        assert!(horizontal <= UNDER_TARGET_RADIUS, "it ends under the log: {horizontal}");
     }
 
     #[test]
