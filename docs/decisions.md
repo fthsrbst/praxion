@@ -3,6 +3,28 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-10
+
+From run 8 (seed 606): a creeper explosion desynchronised the body's world mirror (26.3 `ClientboundExplode` gained a
+trailing `playSound` bool), the body stayed blind and frozen for 36 minutes, served stale facts, and died three times
+at night while the brain idled during a skill admission. All three approved by the user, each the recommended option.
+
+- **A world desync stops the run loudly (user).** The decoder stays strict. On a desync the body marks its facts
+  `world_valid = false`, wakes the brain with cause `world_desync`, and the autonomy harness ends the run at once with
+  the reason. Reason: a silent blind body serving frozen facts cost a whole run and three deaths. Rules out for now:
+  skipping a packet with leftover bytes (can leave the mirror silently wrong) and reconnect-on-desync (larger; stays in
+  the backlog before Demo-1).
+- **Survival goals start during a skill admission (user).** Night and hunger goals are no longer blocked while a skill
+  is written in the background, and a pick that ends with nothing to do backs off (30 s to 2 min) instead of leaving
+  the loop idle with nothing to wake it. Reason: run 8 idled about 20 minutes and never started `night_watch`.
+- **Death is an event (user).** The body logs a typed `died` event, settles the running command `failed(died)`, wakes
+  the brain (cause `died`), and the bot says so in chat. Reason: deaths were only a `death_reset` note; the brain kept
+  trusting its pre-death inventory.
+- **`mine` walks toward a high target off to the side first (user).** A target higher than reach that is not right
+  overhead gets up to 60 ticks of walking (jumping the steps) before `out_of_reach`; right overhead it fails at once so
+  `pillar` can climb. Reason: run 8 (seed 808) spawned in a pit with every log above reach. Rules out: marking the log
+  unreachable and searching for another tree first.
+
 ## 2026-11-09
 
 All four approved by the user (macOS session), each the recommended option; designs from the code scout in
