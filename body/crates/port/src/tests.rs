@@ -63,6 +63,7 @@ fn snapshot(seq: u64) -> Snapshot {
             inventory: [("oak_log".to_owned(), 3)].into_iter().collect(),
             selected_hotbar_slot: None,
             slots: Vec::new(),
+            world_valid: true,
         },
         stale_ticks: 0,
     }
@@ -291,6 +292,26 @@ fn slots_are_optional_so_the_golden_frame_stays_put() {
     let json = serde_json::to_string(&facts).unwrap();
     assert!(json.contains(r#""selected_hotbar_slot":2"#));
     assert!(json.contains(r#""slots":[{"slot":9,"item":"oak_log","count":12}]"#));
+    assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
+}
+
+#[test]
+fn world_valid_is_sent_only_when_the_world_desynced() {
+    // A valid world is the default and is never written, so every existing
+    // golden frame stays byte-identical (decision 2026-11-10).
+    let mut facts = Facts::default();
+    assert!(facts.world_valid);
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(!json.contains("world_valid"), "{json}");
+    let back: Facts = serde_json::from_str(&json).unwrap();
+    assert!(back.world_valid, "an absent field reads as a valid world");
+
+    let golden = serde_json::to_string(&BodyMessage::Snapshot(snapshot(5))).unwrap();
+    assert!(!golden.contains("world_valid"), "{golden}");
+
+    facts.world_valid = false;
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(json.ends_with(r#","world_valid":false}"#), "{json}");
     assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
 }
 

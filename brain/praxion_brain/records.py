@@ -15,7 +15,7 @@ from .conditions import ConditionError, evaluate
 from .curriculum import GoalProposal, Validation
 from .goal import Goal
 from .ladder import progress as ladder_progress
-from .memory import EvidenceSink, GoalRecord, Memory, SkillUse
+from .memory import NOT_FAILURE_KINDS, EvidenceSink, GoalRecord, Memory, SkillUse
 
 #: Stack states that mean "the body still owns a goal" (A1).
 LIVE_INTENT_STATES = ("running", "suspended")
@@ -34,9 +34,17 @@ def settled_status(
     decide (``unknown`` or absent) is ``unverified`` unless the goal was already
     known to be unverifiable (A7). Unverified goals are excluded from the
     success statistics: they are not ``done``.
+
+    A ``failed`` receipt of a :data:`~praxion_brain.memory.NOT_FAILURE_KINDS`
+    kind (``died``, ``world_desync``) is ``interrupted`` with that kind: the
+    goal and its skill are not to blame, so it must not block the goal, count
+    in the failure streak or mark the skill broken (review of run 8 fixes).
     """
     if outcome != "done":
-        return "failed", str(failure_kind or outcome or "failed")
+        kind = str(failure_kind or outcome or "failed")
+        if kind in NOT_FAILURE_KINDS:
+            return "interrupted", kind
+        return "failed", kind
     if condition == "false":
         return "failed", "skill_wrong"
     if condition != "true" and not unverifiable:

@@ -978,6 +978,41 @@ fn a_death_during_a_meal_ends_the_meal_and_returns_the_command() {
 }
 
 #[test]
+fn a_halt_during_a_meal_ends_every_entry_and_leaves_the_body_to_no_one() {
+    // Decision 2026-11-10 "A world desync stops the run loudly": the command
+    // underneath and the meal both end; nothing gets the body back.
+    let (mut rig, settings) = hungry_rig();
+    rig.facts.food = 6;
+    let hungry = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 6);
+    let needs = Needs { health: 20.0, food: 6 };
+    rig.tick(0, &hungry, needs, &settings);
+    rig.tick(1, &hungry, needs, &settings);
+    assert_eq!(rig.arbiter.owner(), &Owner::Maintenance(NeedKind::Eat));
+    let generation = rig.arbiter.generation();
+
+    let events = rig
+        .arbiter
+        .halt(&mut rig.interpreter, &mut rig.actuator, &mut rig.body, 2);
+    assert!(rig.arbiter.generation() > generation, "a new generation");
+    assert_eq!(rig.arbiter.owner(), &Owner::Idle);
+    assert!(
+        rig.arbiter
+            .stack()
+            .entries()
+            .iter()
+            .all(|entry| entry.state == IntentState::Done),
+        "{:?}",
+        rig.arbiter.stack().entries()
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EventKind::OwnerChanged { owner, .. } if owner == "idle")),
+        "{events:?}"
+    );
+}
+
+#[test]
 fn a_death_with_no_owner_still_moves_to_a_new_generation() {
     let mut rig = Rig::new(continuous_program());
     let generation = rig.arbiter.generation();

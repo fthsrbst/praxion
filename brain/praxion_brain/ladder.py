@@ -107,7 +107,8 @@ def code_only_goal(
     """The first unmet rung, if an active or core skill already covers it.
 
     This is the governor's code-only mode: no model is called, and when no
-    known skill covers the next rung the loop stays idle.
+    known skill covers the next rung the pick ends as ``nothing_to_do`` and
+    backs off.
     """
     rung = first_unmet(inventory)
     if rung is None:

@@ -89,6 +89,11 @@ const NIGHT_FALLBACK_SKILL: &str = "night_watch";
 /// rules parser is the only guard language (no second evaluator).
 const CONDITION_SKILL: &str = "__condition";
 
+/// How old a `PlayerCombatKill` message may be and still name the death the
+/// body handles (5 s): the message and the session's `Died` event race on two
+/// threads, and a message from an earlier life must never name a later death.
+const DEATH_MESSAGE_TICKS: u64 = 100;
+
 /// The body driver's settings.
 pub struct BodyOptions {
     /// The `--goal` skill, injected as command [`CLI_COMMAND_ID`]. `None` in a
@@ -171,8 +176,6 @@ pub struct BodyDriver {
     /// popped) can hand the body to an intent the interpreter does not hold;
     /// the driver restarts that record's skill when it sees the mismatch.
     interpreter_intent: Option<u64>,
-    /// The last tick `frame` saw, for events the session reports between frames.
-    last_tick: u64,
     /// The `--goal` command, once the start delay has passed.
     cli: CliGoal,
     /// The port was connected last tick, so the connect edge publishes state.
@@ -201,7 +204,19 @@ pub struct BodyDriver {
     outcome_delivered: bool,
     /// The last `rule_selected` written, so a steady rule costs no events.
     last_rule_logged: Option<(String, usize)>,
-    desync_logged: bool,
+    /// The world desynced: every command is settled `failed(world_desync)`
+    /// and the body holds still for the rest of the session, accepting no new
+    /// command (decision 2026-11-10 "A world desync stops the run loudly").
+    halted: bool,
+    /// The session reported a death (`on_death`); the next frame handles it,
+    /// with the world at hand to settle the running command.
+    death_pending: bool,
+    /// The newest own `PlayerCombatKill` message and the tick it was seen on.
+    death_message: Option<(u64, String)>,
+    /// The tick of the last death handled without a message. Its message may
+    /// still arrive on a later frame (the two race on two threads); such a
+    /// late message is that death's and must never name the next one.
+    death_unlabelled: Option<u64>,
     /// Consecutive ticks the body was idle at night (no intent, no owner).
     night_idle_ticks: u32,
     /// Fallback goals the body started itself, for their command ids.
@@ -333,7 +348,6 @@ impl BodyDriver {
             watch,
             commands: BTreeMap::new(),
             interpreter_intent: None,
-            last_tick: 0,
             cli,
             port_connected: false,
             brain_silent: false,
@@ -350,7 +364,10 @@ impl BodyDriver {
             active_primitive: None,
             outcome_delivered: false,
             last_rule_logged: None,
-            desync_logged: false,
+            halted: false,
+            death_pending: false,
+            death_message: None,
+            death_unlabelled: None,
             night_idle_ticks: 0,
             night_fallbacks: 0,
             chat_operators: Operators::new(&options_own, &options_operators),
@@ -601,6 +618,12 @@ impl BodyDriver {
         let Some(port) = self.port.clone() else {
             return;
         };
+        // A desynced world's facts are frozen: its day time cannot say night
+        // (decision 2026-11-10 "A world desync stops the run loudly").
+        if !world.status().is_valid() {
+            self.night_idle_ticks = 0;
+            return;
+        }
         let night = praxion_facts::is_night(world.day_time());
         let idle = self.arbiter.owner() == &Owner::Idle
             && self
@@ -654,6 +677,11 @@ impl BodyDriver {
         world: &World,
     ) {
         self.receipt(tick, ts_ns, Receipt::new(&command.id, "pending"));
+        // A halted body takes no command: its world's facts are frozen.
+        if self.halted {
+            self.reject(&command.id, "world_desync", tick, ts_ns);
+            return;
+        }
         if tick > command.expires_at_tick {
             self.receipt(tick, ts_ns, Receipt::new(&command.id, "expired"));
             return;
@@ -876,11 +904,11 @@ impl BodyDriver {
     /// The player died and respawned: reset the reflex state, drop a meal and
     /// the primitive in flight, and move to a new generation, so nothing from
     /// the old life drives the new body (decision 2026-11-09 "Five next
-    /// areas", critique finding 11). The running command keeps its intent and
-    /// re-evaluates from the top; settling it `failed(died)` is a later slice.
-    fn handle_death(&mut self) {
-        let tick = self.last_tick;
-        let ts_ns = now_ns();
+    /// areas", critique finding 11). Then death is an event (decision
+    /// 2026-11-10): a typed `died` line, the running command settled
+    /// `failed(died)` through the one settle path, and a `died` wake, in that
+    /// order, so the brain reads the settle before it re-plans.
+    fn handle_death(&mut self, tick: u64, ts_ns: u64, world: &World) {
         let events = self.arbiter.on_death(
             &mut self.interpreter,
             &mut self.bridge,
@@ -901,6 +929,90 @@ impl BodyDriver {
                 text: "death_reset".to_owned(),
             },
         );
+
+        let message = self
+            .death_message
+            .take()
+            .filter(|(seen, _)| tick.saturating_sub(*seen) <= DEATH_MESSAGE_TICKS)
+            .map(|(_, message)| message);
+        self.death_unlabelled = message.is_none().then_some(tick);
+        self.record(
+            tick,
+            ts_ns,
+            EventKind::Died {
+                message: message.clone(),
+            },
+        );
+        // The command that owned the body: after `on_death` a command a reflex
+        // or a meal had suspended is the running entry again.
+        let running = self.arbiter.stack().running().map(|entry| entry.intent_id);
+        if let Some(intent_id) = running
+            && let Some(record) = self.commands.remove(&intent_id)
+        {
+            // No guard: the goal ended by death, not by its own rule.
+            self.close_goal(
+                intent_id,
+                record,
+                "failed",
+                Some("died".to_owned()),
+                None,
+                tick,
+                ts_ns,
+                world,
+            );
+        }
+        self.record(
+            tick,
+            ts_ns,
+            EventKind::WakeBrain {
+                cause: "died".to_owned(),
+                detail: message.unwrap_or_default(),
+            },
+        );
+        self.publish_state(world, tick);
+    }
+
+    /// Keep the newest own death message the tee saw. Only the dying player
+    /// gets `PlayerCombatKill`; the id check is a guard, skipped while the
+    /// login that names the own entity is not yet seen.
+    ///
+    /// The server sends one message per death. The first one within
+    /// [`DEATH_MESSAGE_TICKS`] after a death handled without a message is
+    /// that death's, arriving late: it is noted and dropped, never kept to
+    /// name the next death (review finding 7). A message on the frame that
+    /// handles a pending death is that death's own.
+    fn note_death_message(&mut self, view: &TickView<'_>, world: &World) {
+        for observed in view.packets {
+            let Packet::PlayClientbound(ClientboundGamePacket::PlayerCombatKill(kill)) =
+                &observed.packet
+            else {
+                continue;
+            };
+            if world
+                .own_entity_id()
+                .is_some_and(|own| own != kill.player_id.0)
+            {
+                continue;
+            }
+            let message = kill.message.to_string();
+            // A message on the frame that handles a death is that death's.
+            let late = !self.death_pending
+                && self
+                    .death_unlabelled
+                    .take()
+                    .is_some_and(|died| view.tick.saturating_sub(died) <= DEATH_MESSAGE_TICKS);
+            if late {
+                self.record(
+                    view.tick,
+                    now_ns(),
+                    EventKind::Note {
+                        text: format!("death_message_late {message}"),
+                    },
+                );
+            } else {
+                self.death_message = Some((view.tick, message));
+            }
+        }
     }
 
     /// A brain `pop` releases an intent. Stop and cancel always work
@@ -1652,12 +1764,129 @@ impl BodyDriver {
         stage.elapsed().as_nanos() as u64
     }
 
+    /// Stop acting for the rest of the session: nothing may act on a desynced
+    /// world's frozen facts (decision 2026-11-10 "A world desync stops the run
+    /// loudly", review finding 3). Every live command settles
+    /// `failed(world_desync)` through the one settle path, the running one
+    /// first, so the brain reads the settles before the wake. Then the arbiter
+    /// ends whatever is left (a reflex, a meal) and leaves the body to no one.
+    /// From here on every frame is [`BodyDriver::halted_frame`].
+    fn halt(&mut self, tick: u64, ts_ns: u64, world: &World) {
+        self.halted = true;
+        loop {
+            let running = self.arbiter.stack().running().map(|entry| entry.intent_id);
+            let next = running
+                .filter(|intent_id| self.commands.contains_key(intent_id))
+                .or_else(|| self.commands.keys().next().copied());
+            let Some(intent_id) = next else {
+                break;
+            };
+            let Some(record) = self.commands.remove(&intent_id) else {
+                break;
+            };
+            // No guard: the goal ended because the world broke, not by its
+            // own rule.
+            self.close_goal(
+                intent_id,
+                record,
+                "failed",
+                Some("world_desync".to_owned()),
+                None,
+                tick,
+                ts_ns,
+                world,
+            );
+        }
+        let events = self.arbiter.halt(
+            &mut self.interpreter,
+            &mut self.bridge,
+            &mut self.mirror,
+            tick,
+        );
+        self.log_events(tick, ts_ns, events);
+        self.abandon_flight();
+        self.pending = None;
+        self.interpreter_intent = None;
+        self.night_idle_ticks = 0;
+    }
+
+    /// One frame of a halted body: every control up, no click, no look, no
+    /// reflex and no night fallback. The port is still read so a command is
+    /// refused with `world_desync` (and a waiting `--goal` with it, so a CLI
+    /// run ends now), chat still answers, and a primitive the halt abandoned
+    /// is ended here (a discrete one may close its menu).
+    fn halted_frame(
+        &mut self,
+        view: &TickView<'_>,
+        world: &World,
+        work_start: Instant,
+        ts_ns: u64,
+    ) -> ControlFrame {
+        self.note_world(world, view.tick, ts_ns);
+        if matches!(self.cli, CliGoal::Waiting(_)) {
+            self.inject_cli(view.tick, ts_ns, world);
+        }
+        self.poll_port(view.tick, ts_ns, world);
+        let mut frame = ControlFrame::new(view.tick, view.body.generation(), Held::NONE);
+        self.bridge.start = None;
+        self.bridge.continuous = None;
+        self.bridge.released = false;
+        self.bridge.cancelled = false;
+        self.deferred_start = None;
+        if self.runner.is_continuous() {
+            self.runner.cancel();
+            self.finish_active_primitive(view.tick, ts_ns, Some(Outcome::Preempted));
+            self.outcome_delivered = true;
+        } else if let Some(cleanup) = self.cancel_primitive(view, world) {
+            frame.menu = cleanup.menu;
+            frame.menu_mode = cleanup.menu_mode;
+        }
+        self.publish_if_due(world, view.tick, false);
+        let _ = self.log.flush();
+        self.finish_tick(view, frame, work_start, ts_ns, Cue::Continue)
+    }
+
+    /// Publish a snapshot when one is due: once per second, on a wake, on the
+    /// connect edge and whenever the port asks for a fresh one after a drop
+    /// (proposal §2.5). A disconnected port needs none: rebuilding one every
+    /// tick was the review's finding 7.
+    fn publish_if_due(&mut self, world: &World, tick: u64, wake: bool) {
+        let connected = self
+            .port
+            .as_ref()
+            .is_some_and(|port| port.connection_state() == ConnectionState::Connected);
+        let connected_now = connected && !self.port_connected;
+        self.port_connected = connected;
+        let due = connected
+            && (tick.is_multiple_of(SNAPSHOT_INTERVAL_TICKS)
+                || wake
+                || connected_now
+                || self.port.as_ref().is_some_and(|port| port.needs_snapshot()));
+        if due {
+            self.publish_state(world, tick);
+        }
+    }
+
+    /// Log the first desync and stop the run loudly (decision 2026-11-10): the
+    /// body halts (see [`BodyDriver::halt`]), the brain wakes with cause
+    /// `world_desync` and every snapshot from now on carries
+    /// `world_valid = false`, so nothing trusts the frozen facts.
     fn note_world(&mut self, world: &World, tick: u64, ts_ns: u64) {
         if let Some(reason) = world.status().reason()
-            && !self.desync_logged
+            && !self.halted
         {
-            self.desync_logged = true;
-            let _ = self.log.world_desync(tick, ts_ns, reason);
+            let reason = reason.to_owned();
+            let _ = self.log.world_desync(tick, ts_ns, &reason);
+            self.halt(tick, ts_ns, world);
+            self.record(
+                tick,
+                ts_ns,
+                EventKind::WakeBrain {
+                    cause: "world_desync".to_owned(),
+                    detail: reason,
+                },
+            );
+            self.publish_state(world, tick);
         }
         let warnings: BTreeMap<String, u64> = world
             .warning_counts()
@@ -1679,7 +1908,6 @@ impl Driver for BodyDriver {
         }
         let work_start = Instant::now();
         let ts_ns = now_ns();
-        self.last_tick = view.tick;
         {
             let mut shared = lock(&self.shared);
             shared.ticks = view.tick + 1;
@@ -1702,10 +1930,23 @@ impl Driver for BodyDriver {
         self.mirror.set_generation(self.arbiter.generation());
         let first_tick = *self.first_tick.get_or_insert(view.tick);
 
+        // A death is handled before this tick's packets register anything for
+        // the old life (the primitive's pending intent is dropped with it).
+        self.note_death_message(view, world);
+        if std::mem::take(&mut self.death_pending) {
+            self.handle_death(view.tick, ts_ns, world);
+        }
+
         let stage = Instant::now();
         self.observe_packets(view, world, ts_ns);
         self.read_chat(view, world, ts_ns);
         let observe_ns = stage.elapsed().as_nanos() as u64;
+
+        // A desynced world stops the body before anything acts on its frozen
+        // facts this tick (decision 2026-11-10, review finding 3).
+        if self.halted || !world.status().is_valid() {
+            return self.halted_frame(view, world, work_start, ts_ns);
+        }
         let stage = Instant::now();
         {
             let mut perception = lock(&self.perception);
@@ -1880,26 +2121,7 @@ impl Driver for BodyDriver {
         let sweep_ns = self.sweep_perception(world);
         let stage = Instant::now();
         self.note_world(world, view.tick, ts_ns);
-        // One snapshot per second, on every wake, on the connect edge and
-        // whenever the port asks for a fresh one after a drop (proposal §2.5).
-        // A disconnected port needs none: rebuilding one every tick was the
-        // review's finding 7.
-        let connected = self
-            .port
-            .as_ref()
-            .is_some_and(|port| port.connection_state() == ConnectionState::Connected);
-        let connected_now = connected && !self.port_connected;
-        self.port_connected = connected;
-        let snapshot_due = connected
-            && (view
-                .tick
-                .is_multiple_of(SNAPSHOT_INTERVAL_TICKS)
-                || ticked.wake_brain
-                || connected_now
-                || self.port.as_ref().is_some_and(|port| port.needs_snapshot()));
-        if snapshot_due {
-            self.publish_state(world, view.tick);
-        }
+        self.publish_if_due(world, view.tick, ticked.wake_brain);
         let _ = self.log.flush();
         let log_ns = stage.elapsed().as_nanos() as u64;
         {
@@ -1962,8 +2184,11 @@ impl Driver for BodyDriver {
         matches!(self.cli, CliGoal::Settled)
     }
 
+    /// The session's `Died` arrives on the owner's thread, between frames.
+    /// The next frame handles it: it has the world the settle and the
+    /// snapshot need, and the tee's `PlayerCombatKill` message by then.
     fn on_death(&mut self) {
-        self.handle_death();
+        self.death_pending = true;
     }
 
     fn summary_json(&self) -> Option<String> {
@@ -1999,9 +2224,13 @@ impl BodyDriver {
         } else {
             GazeMode::Idle
         };
-        let look = self
-            .gaze
-            .step(request, view.body.look(), cue, view.tick, mode);
+        // A halted body holds its camera still too.
+        let look = if self.halted {
+            Look::None
+        } else {
+            self.gaze
+                .step(request, view.body.look(), cue, view.tick, mode)
+        };
         if let Look::Delta { dyaw, dpitch } = look
             && (dyaw != 0.0 || dpitch != 0.0)
         {
@@ -2215,6 +2444,7 @@ fn port_facts(world: &World) -> PortFacts {
             .and_then(|slot| u8::try_from(slot).ok())
             .filter(|slot| *slot <= 8),
         slots,
+        world_valid: world.status().is_valid(),
     }
 }
 
@@ -3106,25 +3336,346 @@ skill stall()
             state.air_ticks = 3;
             state.last_safe_cell = Some(praxion_world::BlockPos::new(9, 70, 9));
         }
-        harness.driver.last_tick = 40;
 
-        harness.driver.handle_death();
+        harness.driver.handle_death(40, now_ns(), &harness.world);
 
         assert!(harness.driver.arbiter.generation() > generation);
         let state = harness.driver.arbiter.engine().state();
         assert_eq!(state.last_safe_cell, None);
         assert_ne!(state.air_ticks, 3, "the air supply is the new life's");
+        assert_eq!(harness.driver.interpreter_intent, None);
+        // The command died with the body (decision 2026-11-10): nothing of
+        // the old life keeps the body.
+        assert_eq!(*harness.driver.arbiter.owner(), Owner::Idle);
+        assert!(harness.driver.commands.is_empty());
+        assert!(!harness.driver.sync_interpreter());
+    }
+
+    /// The `died`, settled-receipt and `died` wake lines of the log, in order,
+    /// as `(kind, detail)`: the death message, the receipt's command id and
+    /// failure kind, the wake's detail.
+    fn death_lines(harness: &mut Harness) -> Vec<(String, String)> {
+        flush(harness);
+        harness
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.event {
+                EventKind::Died { message } => {
+                    Some(("died".to_owned(), message.unwrap_or_else(|| "null".to_owned())))
+                }
+                EventKind::CommandReceipt {
+                    command_id,
+                    state,
+                    outcome,
+                    failure_kind,
+                    ..
+                } if state == "settled" => Some((
+                    "settled".to_owned(),
+                    format!(
+                        "{command_id} {} {}",
+                        outcome.unwrap_or_default(),
+                        failure_kind.unwrap_or_default()
+                    ),
+                )),
+                EventKind::WakeBrain { cause, detail } => Some((format!("wake:{cause}"), detail)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_death_settles_the_running_command_failed_died_and_wakes_the_brain() {
+        let mut harness = harness();
+        accept(&mut harness, command("c-1", "stall"));
+        harness.run(3);
+        // The session reports the death between frames; the next frame
+        // handles it.
+        harness.driver.on_death();
+        assert!(death_lines(&mut harness).is_empty(), "nothing before the frame");
+        harness.step();
+
         assert_eq!(
-            harness.driver.interpreter_intent, None,
-            "the command restarts from the top on the respawned body"
+            death_lines(&mut harness),
+            vec![
+                ("died".to_owned(), "null".to_owned()),
+                ("settled".to_owned(), "c-1 failed died".to_owned()),
+                ("wake:died".to_owned(), String::new()),
+            ]
         );
-        // The command keeps the body and starts again on the next sync.
+        assert_eq!(*harness.driver.arbiter.owner(), Owner::Idle);
+        assert_eq!(harness.summary()["goals"][0]["outcome"], "failed(died)");
+        // Handled once: later frames add nothing.
+        harness.run(3);
+        assert_eq!(death_lines(&mut harness).len(), 3);
+    }
+
+    #[test]
+    fn a_death_with_no_command_is_still_an_event_and_a_wake() {
+        let mut harness = harness();
+        harness.driver.on_death();
+        harness.step();
         assert_eq!(
-            *harness.driver.arbiter.owner(),
-            Owner::Skill { intent_id: 1 }
+            death_lines(&mut harness),
+            vec![
+                ("died".to_owned(), "null".to_owned()),
+                ("wake:died".to_owned(), String::new()),
+            ]
         );
-        assert!(harness.driver.sync_interpreter());
-        assert_eq!(harness.driver.interpreter_intent, Some(1));
+    }
+
+    #[test]
+    fn a_death_during_a_meal_settles_the_command_the_meal_suspended() {
+        let mut harness = harness();
+        accept(&mut harness, command("c-1", "stall"));
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        let out = tick_arbiter(
+            &mut harness.driver,
+            &harness.world,
+            &hungry_view(test_view(feet, 10)),
+            Needs {
+                health: 20.0,
+                food: 10,
+            },
+            10,
+        );
+        assert_eq!(out.owner, Owner::Maintenance(NeedKind::Eat), "{:?}", out.events);
+
+        harness.driver.handle_death(11, now_ns(), &harness.world);
+
+        let lines = death_lines(&mut harness);
+        assert!(
+            lines.contains(&("settled".to_owned(), "c-1 failed died".to_owned())),
+            "{lines:?}"
+        );
+        assert_eq!(*harness.driver.arbiter.owner(), Owner::Idle);
+    }
+
+    /// The server's death screen packet for entity `player_id`.
+    fn combat_kill(player_id: i32, text: &str) -> praxion_headless::ObservedPacket {
+        use azalea_protocol::packets::game::c_player_combat_kill::ClientboundPlayerCombatKill;
+        // The id type lives in `azalea-core`, which this crate does not name.
+        let mut kill = ClientboundPlayerCombatKill {
+            player_id: Default::default(),
+            message: azalea_chat::FormattedText::from(text.to_owned()),
+        };
+        kill.player_id.0 = player_id;
+        praxion_headless::ObservedPacket {
+            conn_id: 1,
+            packet: Packet::PlayClientbound(ClientboundGamePacket::PlayerCombatKill(kill)),
+        }
+    }
+
+    #[test]
+    fn a_death_carries_the_death_message_the_tee_saw() {
+        let mut harness = harness();
+        accept(&mut harness, command("c-1", "stall"));
+        // The message may reach the driver a frame before the session's
+        // `Died`, or on the same frame.
+        harness.step_with(&[combat_kill(7, "Praxion was blown up by Creeper")]);
+        harness.driver.on_death();
+        harness.step();
+        let lines = death_lines(&mut harness);
+        assert_eq!(
+            lines.first(),
+            Some(&("died".to_owned(), "Praxion was blown up by Creeper".to_owned()))
+        );
+        assert_eq!(
+            lines.last(),
+            Some(&("wake:died".to_owned(), "Praxion was blown up by Creeper".to_owned()))
+        );
+        // The message is spent: a later death without one says nothing.
+        harness.driver.on_death();
+        harness.step();
+        let lines = death_lines(&mut harness);
+        assert_eq!(lines[lines.len() - 2], ("died".to_owned(), "null".to_owned()));
+    }
+
+    #[test]
+    fn an_old_death_message_never_names_a_later_death() {
+        let mut harness = harness();
+        harness.step_with(&[combat_kill(7, "Praxion fell from a high place")]);
+        harness.run(DEATH_MESSAGE_TICKS + 1);
+        harness.driver.on_death();
+        harness.step();
+        assert_eq!(
+            death_lines(&mut harness)[0],
+            ("died".to_owned(), "null".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_late_death_message_never_names_the_next_death() {
+        // Review finding 7: the message of a death handled without one
+        // arrives a frame later; it must not label a second death that comes
+        // within `DEATH_MESSAGE_TICKS`.
+        let mut harness = harness();
+        harness.driver.on_death();
+        harness.step();
+        harness.step_with(&[combat_kill(7, "Praxion fell from a high place")]);
+        harness.run(10);
+        harness.driver.on_death();
+        harness.step();
+        let died: Vec<String> = death_lines(&mut harness)
+            .into_iter()
+            .filter(|(kind, _)| kind == "died")
+            .map(|(_, message)| message)
+            .collect();
+        assert_eq!(died, vec!["null".to_owned(), "null".to_owned()]);
+        assert_eq!(
+            notes(&harness, "death_message_late"),
+            vec!["death_message_late Praxion fell from a high place".to_owned()]
+        );
+        // A message on the frame that handles a death still names it, even
+        // right after a death without one.
+        harness.driver.on_death();
+        harness.step_with(&[combat_kill(7, "Praxion was slain by Zombie")]);
+        let lines = death_lines(&mut harness);
+        assert_eq!(
+            lines[lines.len() - 2],
+            ("died".to_owned(), "Praxion was slain by Zombie".to_owned())
+        );
+    }
+
+    /// Make the harness world desynced, as a decode error on the followed
+    /// connection does.
+    fn desync(world: &mut World, reason: &str) {
+        if world.followed().is_none() {
+            world.follow(0);
+        }
+        world.invalidate(0, reason);
+        assert!(!world.status().is_valid());
+    }
+
+    #[test]
+    fn a_world_desync_is_logged_and_wakes_the_brain_once() {
+        let mut harness = harness();
+        harness.run(2);
+        desync(&mut harness.world, "explode left 1 of 83 bytes unread");
+        harness.run(5);
+        flush(&mut harness);
+        let events: Vec<EventKind> = harness.events().into_iter().map(|event| event.event).collect();
+        let desyncs = events
+            .iter()
+            .filter(|event| matches!(event, EventKind::WorldDesync { .. }))
+            .count();
+        let wakes: Vec<&EventKind> = events
+            .iter()
+            .filter(|event| matches!(event, EventKind::WakeBrain { .. }))
+            .collect();
+        assert_eq!(desyncs, 1);
+        assert_eq!(
+            wakes,
+            vec![&EventKind::WakeBrain {
+                cause: "world_desync".to_owned(),
+                detail: "explode left 1 of 83 bytes unread".to_owned(),
+            }]
+        );
+    }
+
+    /// Every `command_receipt` with its state, failure kind and reason.
+    fn receipt_lines(harness: &Harness) -> Vec<(String, String, String, String)> {
+        harness
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.event {
+                EventKind::CommandReceipt {
+                    command_id,
+                    state,
+                    failure_kind,
+                    reason,
+                    ..
+                } => Some((
+                    command_id,
+                    state,
+                    failure_kind.unwrap_or_default(),
+                    reason.unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_world_desync_settles_every_command_and_holds_the_body_still() {
+        // Decision 2026-11-10 "A world desync stops the run loudly", review
+        // finding 3: the body must not keep playing blind.
+        let mut harness = harness();
+        accept(&mut harness, command("c-1", "stall"));
+        accept(&mut harness, command("c-2", "stall"));
+        harness.run(2);
+        desync(&mut harness.world, "explode left 1 of 83 bytes unread");
+        let frames: Vec<ControlFrame> = (0..5).map(|_| harness.step()).collect();
+        for frame in &frames {
+            assert_eq!(frame.held, Held::NONE);
+            assert_eq!(frame.look, Look::None);
+            assert!(frame.clicks.is_empty());
+        }
+        assert_eq!(harness.driver.arbiter.owner(), &Owner::Idle);
+        assert!(
+            harness
+                .driver
+                .arbiter
+                .stack()
+                .entries()
+                .iter()
+                .all(|entry| entry.state == IntentState::Done)
+        );
+        // A command after the desync is refused with a typed reason.
+        harness.inject(command("c-3", "stall"));
+        harness.run(2);
+        flush(&mut harness);
+        let settled: Vec<(String, String)> = receipt_lines(&harness)
+            .into_iter()
+            .filter(|(_, state, _, _)| state == "settled")
+            .map(|(id, _, kind, _)| (id, kind))
+            .collect();
+        // The running one first, then the one it had suspended.
+        assert_eq!(
+            settled,
+            vec![
+                ("c-2".to_owned(), "world_desync".to_owned()),
+                ("c-1".to_owned(), "world_desync".to_owned()),
+            ]
+        );
+        let rejected: Vec<(String, String)> = receipt_lines(&harness)
+            .into_iter()
+            .filter(|(_, state, _, _)| state == "rejected")
+            .map(|(id, _, _, reason)| (id, reason))
+            .collect();
+        assert_eq!(rejected, vec![("c-3".to_owned(), "world_desync".to_owned())]);
+        assert_eq!(harness.driver.arbiter.owner(), &Owner::Idle);
+        // One wake, after the settles.
+        let lines = death_lines(&mut harness);
+        let wakes: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (kind, _))| kind.starts_with("wake:"))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(wakes.len(), 1, "{lines:?}");
+        assert_eq!(lines[wakes[0]].0, "wake:world_desync");
+        assert_eq!(wakes[0], lines.len() - 1, "the wake follows the settles: {lines:?}");
+    }
+
+    #[test]
+    fn a_desync_before_the_cli_goal_starts_ends_the_run() {
+        let mut harness = harness_with_start_delay("stall", 10);
+        harness.run(2);
+        desync(&mut harness.world, "explode left 1 of 83 bytes unread");
+        harness.run(2);
+        assert!(harness.driver.done(), "a refused --goal ends the run now");
+        assert_eq!(
+            harness.summary()["goal"]["outcome"],
+            "failed(start:world_desync)"
+        );
+    }
+
+    #[test]
+    fn the_port_facts_say_when_the_world_is_no_longer_valid() {
+        let mut world = World::new();
+        assert!(port_facts(&world).world_valid);
+        desync(&mut world, "explode left 1 of 83 bytes unread");
+        assert!(!port_facts(&world).world_valid);
     }
 
     #[test]
@@ -3989,6 +4540,18 @@ skill stall()
         assert!(stack_of(&harness).is_empty(), "{:?}", stack_of(&harness));
         flush(&mut harness);
         assert_eq!(harness.receipts("settled").len(), 1);
+    }
+
+    #[test]
+    fn a_desynced_world_never_starts_a_night_watch() {
+        // Its day time is frozen: it cannot say night (decision 2026-11-10).
+        let mut harness = harness_program(NIGHT_PROGRAM, Some(night_port()), DEFAULT_BRAIN_SILENCE, None);
+        harness.world.follow(0);
+        set_day_time(&mut harness.world, 14_000);
+        assert!(praxion_facts::is_night(harness.world.day_time()));
+        desync(&mut harness.world, "explode left 1 of 83 bytes unread");
+        harness.run(u64::from(NIGHT_FALLBACK_SILENT_TICKS) + 10);
+        assert!(stack_of(&harness).is_empty(), "{:?}", stack_of(&harness));
     }
 
     #[test]

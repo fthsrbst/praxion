@@ -24,8 +24,8 @@ Admission takes minutes, so it runs as a background job
 (:class:`~praxion_brain.admission_job.AdmissionJob`): the loop records the goal
 as open, starts the job and returns to IDLE at once, so the body keeps playing.
 While the job runs, the pick excludes its goal (the briefing names it) and a
-proposal that would need a second write is deferred with the failure gap, not
-recorded as a failure. When the job ends, an admitted skill is the next pick; a
+proposal that would need a second write is deferred with the ``nothing_to_do``
+back-off, not recorded as a failure. When the job ends, an admitted skill is the next pick; a
 rejection or an inconclusive run fails the goal with its admission status. A
 console stop while the job runs marks it, so its goal is recorded
 ``interrupted``/``stopped_by_user`` when it ends and is never played, even if
@@ -38,7 +38,14 @@ A failed goal is not retried at once: the pick waits
 :data:`FAILURE_GAP_TICKS` body ticks (or :data:`FAILURE_STREAK_GAP_TICKS`
 after :data:`FAILURE_STREAK` failures in a row) while the loop stays IDLE.
 Code-only picks obey the same failure memory as proposals, so a blocked goal
-idles instead of spinning.
+waits instead of spinning. A pick that ends with no goal at all backs off as
+``nothing_to_do`` (:data:`NOTHING_TO_DO_GAP_TICKS`, doubling) and picks again;
+so does a route or a play that ends without a goal (router timeout or error, no
+skill, no snapshot, a failed send); none leaves the loop IDLE with nothing to
+wake it (run 8). A ``world_desync`` wake from the body stops picking for good; a
+``died`` wake re-picks at once. A goal the body settles ``failed(died)`` or
+``failed(world_desync)`` is recorded ``interrupted``: it blocks nothing, does not
+count in the failure streak and is not narrated twice.
 
 Every expensive step is injectable so the loop is tested against
 :class:`FakeBody` with fake proposal, router and admission callables.
@@ -72,7 +79,7 @@ from .goal import Goal
 from .governor import CallTimeout, Governor
 from .ladder import RUNGS, code_only_goal, first_unmet, progress as ladder_progress
 from .ledger import Ledger, estimate_cost
-from .memory import GoalRecord, Memory, normalize_condition
+from .memory import NOT_FAILURE_KINDS, GoalRecord, Memory, normalize_condition
 from .needs import Gamedata, Gate, need_line, rung_need
 from .port import EventMessage, PortClient, PortError, Snapshot
 from .proposer import DEFAULT_MODEL, estimate as propose_estimate, propose
@@ -130,8 +137,8 @@ class WakeCause(str, Enum):
     RECONNECT = "reconnect"
     USER = "user"
     WRITE_STARTED = "write_started"
-    WRITE_DEFERRED = "write_deferred"
     SKILL_ADMITTED = "skill_admitted"
+    DIED = "died"
 
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +150,12 @@ class Loop:
     #: Whether the pick gap is a ``nothing_to_do`` back-off (a class default so
     #: a partially built loop in a test reads False).
     _nothing_gap = False
+    #: The last remembered proposal and what it replaced (``_forget_proposal``).
+    _before_remember: Optional[
+        tuple[GoalProposal, Optional[GoalProposal], tuple[str, ...]]
+    ] = None
+    #: The body's world desync reason; while set no new goal is picked.
+    _world_desync: Optional[str] = None
     #: Set in ``__init__``; a class default so a partly built loop in a test
     #: simply does not talk.
     narrator: "speech.Narrator | None" = None
@@ -205,6 +218,8 @@ class Loop:
         self._last_proposal: Optional[GoalProposal] = None
         #: Items of the last two accepted proposals, newest first (check 7).
         self._recent_items: deque[str] = deque(maxlen=2)
+        self._before_remember = None
+        self._world_desync = None
         #: The recipe export; ``None`` switches checks 6 and 7 and the brake off.
         self.gamedata = gamedata
         #: The drift brake: armed by the first five flat goals; only goals that
@@ -508,7 +523,12 @@ class Loop:
             self._on_chat_received(event)
 
     def _on_body_wake(self, event: Mapping[str, Any]) -> None:
-        if event.get("cause") == "hunger_no_food" and self.state == LoopState.IDLE:
+        cause = event.get("cause")
+        if cause == "died":
+            self._on_died(event)
+        elif cause == "world_desync":
+            self._on_world_desync(str(event.get("detail") or "") or None)
+        if cause == "hunger_no_food" and self.state == LoopState.IDLE:
             # The body is hungry and holds nothing: the pick starts get_food
             # (survival.choose) without waiting for a heartbeat.
             self._set_wake(WakeCause.BODY_WAKE)
@@ -522,6 +542,39 @@ class Loop:
             detail=event.get("detail"),
             tick=self.session.tick,
         )
+
+    def _on_died(self, event: Mapping[str, Any]) -> None:
+        """The body died (decision 2026-11-10 "Death is an event").
+
+        The running command settles as an ordinary ``failed(died)`` receipt; this
+        only records the death, says it, and makes the next pick read fresh facts
+        (the inventory is gone): a ``nothing_to_do`` wait is lifted and an idle
+        loop wakes at once.
+        """
+        detail = str(event.get("detail") or "") or None
+        self.evidence.write("died", detail=detail, tick=self.session.tick, state=self.state.value)
+        self._say("died", speech.died(detail), priority="urgent")
+        if self._nothing_gap:
+            self._next_pick_tick = 0
+        if self.state == LoopState.IDLE:
+            self._set_wake(WakeCause.DIED)
+
+    def _on_world_desync(self, reason: Optional[str]) -> None:
+        """The body's world mirror desynchronised: stop picking, say it once.
+
+        Decision 2026-11-10 "A world desync stops the run loudly": every fact the
+        body serves from now on is stale, so no new goal starts; the autonomy
+        harness ends the run. Idempotent: the event and a ``world_valid: false``
+        snapshot both lead here.
+        """
+        if self._world_desync is not None:
+            return
+        self._world_desync = reason or "unknown"
+        self.evidence.write(
+            "world_desync", reason=self._world_desync, tick=self.session.tick, state=self.state.value
+        )
+        self._say("world_desync", speech.world_desync(), priority="urgent")
+        self._wake = None
 
     def _on_receipt(self, event: Mapping[str, Any]) -> None:
         command_id = str(event.get("command_id") or "")
@@ -572,7 +625,9 @@ class Loop:
             failure = event.get("reason") or state
             self.records.finish(
                 open_goal.record,
-                status="failed",
+                # A command refused because the body went blind is not the
+                # goal's failure (decision 2026-11-10), as in `settled_status`.
+                status="interrupted" if failure in NOT_FAILURE_KINDS else "failed",
                 failure_kind=str(failure),
                 ticks=open_goal.ticks_since(self.session.tick),
             )
@@ -645,6 +700,14 @@ class Loop:
         ):
             # The back-off after a nothing_to_do pick is over: look again.
             self._set_wake(WakeCause.HEARTBEAT)
+        if self._world_desync is not None:
+            # A blind body: no new goal on stale facts (decision 2026-11-10).
+            if self.state in (LoopState.PICKING, LoopState.ROUTING):
+                pending, self._pending = self._pending, None
+                if pending is not None:
+                    self._drop_unplayed(pending, "world_desync")
+                self._transition(LoopState.IDLE, reason="world_desync")
+            return
         if self.state == LoopState.IDLE and self._wake is not None:
             if self._paused:
                 return
@@ -731,6 +794,10 @@ class Loop:
         self._transition(LoopState.IDLE, reason=f"goal_{record.status}")
         if record.status == "failed":
             self._note_failure(record.failure_kind)
+        elif record.failure_kind in NOT_FAILURE_KINDS:
+            # A death or a desync says nothing about the goal: the failure
+            # streak and its gap stay as they were (review of run 8 fixes).
+            pass
         else:
             self._consecutive_failures = 0
             self._next_pick_tick = 0
@@ -780,6 +847,11 @@ class Loop:
         # Facts and the generation may have moved while the body played or
         # while the brain was writing; read them before proposing or validating.
         self.session.refresh()
+        if self._facts().get("world_valid") is False:
+            # A snapshot can say it before (or without) the wake event.
+            self._on_world_desync(None)
+            self._transition(LoopState.IDLE, reason="world_desync")
+            return
         inventory = self._inventory()
         # The user's goal first, then survival, then the rest: the user's
         # projects come before Praxion's own ideas (architecture §1), so a
@@ -791,7 +863,7 @@ class Loop:
         if self._pick_written_goal(inventory):
             return
         if self.governor.code_only:
-            self._pick_code_only("governor_code_only")
+            self._end_pick_without_goal("governor_code_only")
             return
 
         gate = self._needs_gate(inventory)
@@ -802,11 +874,11 @@ class Loop:
         for _ in range(max(1, self.max_proposals)):
             denied = self._gate("propose", propose_estimate(self._invalid_proposals))
             if denied:
-                self._pick_code_only(denied)
+                self._end_pick_without_goal(denied)
                 return
             proposal, failure = self._proposal_call(briefing)
             if proposal is None:
-                self._pick_code_only(failure)
+                self._end_pick_without_goal(failure)
                 return
 
             result = validate(
@@ -871,7 +943,7 @@ class Loop:
                 invalid_count=self._invalid_proposals,
             )
 
-        self._pick_code_only("proposals_excluded" if excluded else "proposals_invalid")
+        self._end_pick_without_goal("proposals_excluded" if excluded else "proposals_invalid")
 
     def _rung_goal_unplayable(
         self, gate: Optional[Gate], proposal: GoalProposal, result: Validation
@@ -895,7 +967,12 @@ class Loop:
         return item == gate.need.goal
 
     def _remember_proposal(self, proposal: GoalProposal) -> None:
-        """The newest accepted proposal; its item joins the last-two list (check 7)."""
+        """The newest accepted proposal; its item joins the last-two list (check 7).
+
+        What it replaced is kept, so a goal that is never played (a deferred
+        write) can be forgotten again by :meth:`_forget_proposal`.
+        """
+        self._before_remember = (proposal, self._last_proposal, tuple(self._recent_items))
         self._last_proposal = proposal
         try:
             item = item_of_condition(proposal.condition)
@@ -905,6 +982,22 @@ class Loop:
             not self._recent_items or self._recent_items[0] != item
         ):
             self._recent_items.appendleft(item)
+
+    def _forget_proposal(self, proposal: GoalProposal) -> None:
+        """Undo :meth:`_remember_proposal` for a goal that was never played.
+
+        A write deferred while another skill is written plays nothing, so it
+        must not become the "last" goal: the model naming it again was refused
+        ``same_as_last`` three times in a row and the pick ended idle (run 8,
+        05:02 and 05:25 UTC). Only the matching, most recent remember is undone.
+        """
+        before = self._before_remember
+        if before is None or before[0] is not proposal or self._last_proposal is not proposal:
+            return
+        self._before_remember = None
+        _, self._last_proposal, recent = before
+        self._recent_items.clear()
+        self._recent_items.extend(recent)
 
     def _drift_brake(self, record: GoalRecord, rungs_met: int) -> None:
         """Five goals moved no rung: only goals that serve the next rung pass.
@@ -996,29 +1089,63 @@ class Loop:
             later_items=frozenset(later),
         )
 
-    def _end_pick_without_goal(self, reason: str, detail: Optional[str]) -> None:
-        """A code verdict ended the pick: play the rung's known skill, else wait.
+    def _end_pick_without_goal(self, reason: str, detail: Optional[str] = None) -> bool:
+        """The pick found no goal to play: play the rung's known skill, else wait.
 
         This is the existing code-only path, so a skill that already serves the
-        next rung is still played. When it finds nothing, the pick ends as one
-        visible ``nothing_to_do`` and the next pick waits a bounded, doubling
-        gap (a skill admission or a changed world lifts it at once).
+        next rung is still played (``True``). When it finds nothing, the pick
+        ends as one visible ``nothing_to_do`` and the next pick waits a bounded,
+        doubling gap (a skill admission or a changed world lifts it at once), so
+        the loop is never left IDLE with nothing to wake it (run 8, decision
+        2026-11-10 "Survival goals start during a skill admission").
         """
         if self._pick_code_only(reason):
-            return
+            return True
+        gap = self._nothing_backoff()
+        self.evidence.write(
+            "nothing_to_do",
+            reason=reason,
+            detail=detail,
+            writing=self._writing_skill(),
+            gap_ticks=gap,
+            next_pick_tick=self._next_pick_tick,
+        )
+        return False
+
+    def _nothing_backoff(self) -> int:
+        """Hold the next pick for the doubling ``nothing_to_do`` gap; return it.
+
+        The one back-off for every pick that ends without a goal. The gap is
+        lifted by a changed world, an admitted skill, a death or a due survival
+        goal; when it simply runs out, ``_advance`` wakes the loop. The streak
+        resets when a goal settles.
+        """
         gap = min(
             NOTHING_TO_DO_GAP_TICKS * (2**self._nothing_streak),
             NOTHING_TO_DO_MAX_GAP_TICKS,
         )
         self._nothing_streak += 1
         now = int(self.session.tick or 0)
-        self._next_pick_tick = now + gap
+        self._next_pick_tick = max(self._next_pick_tick, now + gap)
         self._nothing_gap = True
+        return gap
+
+    def _idle_backoff(self, reason: str) -> None:
+        """A route or a play ended without a goal: IDLE with the back-off.
+
+        A router timeout or a failed send is not the goal's failure, so it is
+        no failure gap; but IDLE with no wake and no gap would wait for the
+        world to change (run 8). The caller writes its own evidence line first.
+        """
+        if self._pending is not None:
+            # Nothing was played, so the proposal must not become the "last"
+            # goal: re-proposing it after the gap is not `same_as_last`.
+            self._forget_proposal(self._pending.proposal)
+        self._transition(LoopState.IDLE, reason=reason)
+        gap = self._nothing_backoff()
         self.evidence.write(
-            "nothing_to_do",
+            "pick_backoff",
             reason=reason,
-            detail=detail,
-            writing=self._writing_skill(),
             gap_ticks=gap,
             next_pick_tick=self._next_pick_tick,
         )
@@ -1081,7 +1208,7 @@ class Loop:
         command: the user's projects come first (architecture §1) and the night
         fallback takes the night again when their goal settles.
         """
-        if self._paused or self.session.snapshot is None:
+        if self._paused or self.session.snapshot is None or self._world_desync is not None:
             return
         opened = self._open_goal
         if self.state == LoopState.PLAYING and opened is not None:
@@ -1102,8 +1229,17 @@ class Loop:
             due = self._due_survival()
             if due is not None:
                 self._interrupt_goal("survival", survival=due.kind, reason=due.reason)
-        elif self.state == LoopState.IDLE and self._wake is None and self._job is None:
+        elif self.state == LoopState.IDLE and self._wake is None:
+            # Also while a skill is written in the background (decision
+            # 2026-11-10 "Survival goals start during a skill admission"): the
+            # pick plays survival before the written goal and the proposer, and
+            # an admitted skill waits in ``_written`` until survival is done.
             if self._due_survival() is not None:
+                if self._nothing_gap:
+                    # "Nothing to do" is no longer true: night or hunger is.
+                    # A failure gap still holds, so a failing survival goal
+                    # cannot spin.
+                    self._next_pick_tick = 0
                 self._set_wake(WakeCause.BODY_WAKE)
 
     def _interrupt_goal(self, cause: str, **fields: Any) -> None:
@@ -1234,6 +1370,11 @@ class Loop:
         return proposal, ""
 
     def _pick_code_only(self, reason: str) -> bool:
+        """Route the rung's known skill, or say why not and go IDLE (``False``).
+
+        Only :meth:`_end_pick_without_goal` calls this: a ``False`` here is
+        always followed by the ``nothing_to_do`` back-off, never a dead IDLE.
+        """
         inventory = self._inventory()
         fallback = code_only_goal(inventory, self.catalog)
         self._pending = None
@@ -1317,7 +1458,7 @@ class Loop:
     def _route(self) -> None:
         pending = self._pending
         if pending is None:
-            self._transition(LoopState.IDLE, reason="route_without_goal")
+            self._idle_backoff("route_without_goal")
             return
 
         if pending.source in ("code_only", "survival") and pending.forced_skill:
@@ -1338,7 +1479,7 @@ class Loop:
 
         denied = self._gate("route", estimate_cost(ROUTER_MODEL, 1_000, 0))
         if denied:
-            if self._pick_code_only(denied):
+            if self._end_pick_without_goal(denied):
                 self._play()
             return
 
@@ -1355,7 +1496,7 @@ class Loop:
         except CallTimeout as error:
             self.governor.record_error()
             self.evidence.write("route_timeout", seconds=error.seconds)
-            self._transition(LoopState.IDLE, reason="route_timeout")
+            self._idle_backoff("route_timeout")
             return
         except Exception as error:  # noqa: BLE001 - a Jev error is never "no"
             self.governor.record_error()
@@ -1363,7 +1504,7 @@ class Loop:
                 "route_error",
                 error=f"{type(error).__name__}: {error}",
             )
-            self._transition(LoopState.IDLE, reason="route_error")
+            self._idle_backoff("route_error")
             return
         self.governor.record_success()
 
@@ -1384,7 +1525,7 @@ class Loop:
             skill = routed.skill or pending.validation.skill_name
             if not skill:
                 self.evidence.write("route_no_skill", condition=pending.proposal.condition)
-                self._transition(LoopState.IDLE, reason="route_no_skill")
+                self._idle_backoff("route_no_skill")
                 return
             pending.forced_skill = skill
             self._play()
@@ -1407,7 +1548,7 @@ class Loop:
 
         denied = self._gate("write", admission_estimate(self.writer_model))
         if denied:
-            if self._pick_code_only(denied):
+            if self._end_pick_without_goal(denied):
                 self._play()
             return
 
@@ -1445,19 +1586,24 @@ class Loop:
         self._set_wake(WakeCause.WRITE_STARTED)
 
     def _defer_write(self, pending: PendingGoal) -> None:
-        """A write route while a job runs: back to IDLE with the gap, no failure."""
+        """A write route while a job runs: back to IDLE with the back-off, no failure.
+
+        The ``nothing_to_do`` back-off, not the failure gap: while an admission
+        runs for minutes the model must not re-propose (and pay for) the same
+        deferred goal every few seconds. No wake is set, so a due survival goal
+        still lifts the gap at once; an admitted skill lifts it too.
+        """
         writing = self._writing_skill()
         self._pending = None
+        # Nothing was played: the model may name this goal again later.
+        self._forget_proposal(pending.proposal)
         self.evidence.write(
             "write_deferred",
             condition=pending.proposal.condition,
             skill=pending.validation.skill_name,
             writing=writing,
         )
-        self._transition(LoopState.IDLE, reason="write_deferred")
-        now = int(self.session.tick or 0)
-        self._next_pick_tick = max(self._next_pick_tick, now + FAILURE_GAP_TICKS)
-        self._set_wake(WakeCause.WRITE_DEFERRED)
+        self._idle_backoff("write_deferred")
 
     def _reap_job(self) -> None:
         """Read a finished admission job; the one place its result is applied.
@@ -1669,13 +1815,13 @@ class Loop:
     def _play(self) -> None:
         pending = self._pending
         if pending is None:
-            self._transition(LoopState.IDLE, reason="play_without_goal")
+            self._idle_backoff("play_without_goal")
             return
         skill = pending.forced_skill or pending.validation.skill_name
         if not skill:
             self.evidence.write("play_no_skill", condition=pending.proposal.condition)
             self._drop_unplayed(pending, "no_skill")
-            self._transition(LoopState.IDLE, reason="no_skill")
+            self._idle_backoff("no_skill")
             return
         # Section 2.4: refresh the tick and generation from a snapshot right
         # before sending, so a long proposal/Jev/admission call cannot make the
@@ -1684,7 +1830,7 @@ class Loop:
         if self.session.generation is None or self.session.tick is None:
             self.evidence.write("play_no_snapshot", condition=pending.proposal.condition)
             self._drop_unplayed(pending, "no_snapshot")
-            self._transition(LoopState.IDLE, reason="no_snapshot")
+            self._idle_backoff("no_snapshot")
             return
 
         try:
@@ -1694,7 +1840,7 @@ class Loop:
         except PortError as error:
             self.evidence.write("command_send_failed", error=str(error), skill=skill)
             self._drop_unplayed(pending, "send_failed")
-            self._transition(LoopState.IDLE, reason="send_failed")
+            self._idle_backoff("send_failed")
             return
 
         if pending.record is not None:
@@ -1968,7 +2114,9 @@ class Loop:
         """One line per closed goal, from the record's own fields."""
         if record.status == "done":
             self._say("done", speech.goal_done(record.text, record.ticks), key=record.goal_id)
-        elif record.status == "failed":
+        elif record.status == "failed" and record.failure_kind not in NOT_FAILURE_KINDS:
+            # A death or a desync has its own line (``_on_died``,
+            # ``_on_world_desync``); a second "olmadı" would say it twice.
             self._say(
                 "failed",
                 speech.goal_failed(record.text, record.failure_kind, record.ticks),

@@ -122,9 +122,10 @@ def choose(
     unarmed. A goal whose skill the catalog lacks, or that failure memory blocks,
     is skipped (the body's own fallback covers the night). A skill already live
     in ``stack`` is not started twice. ``facts`` is the snapshot's body facts;
-    without them nothing is decided.
+    without them nothing is decided, and neither with a desynchronised world
+    (``world_valid`` false, decision 2026-11-10): its facts are stale.
     """
-    if not facts:
+    if not facts or facts.get("world_valid") is False:
         return None
     live = _live_skills(stack)
 

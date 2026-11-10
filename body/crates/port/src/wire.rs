@@ -83,7 +83,7 @@ pub struct SlotFact {
 }
 
 /// The body facts a snapshot carries (proposal §2.2, §2.5).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Facts {
     /// Half-hearts are possible, so this is fractional.
     pub health: f32,
@@ -100,6 +100,42 @@ pub struct Facts {
     /// Occupied slots only, ascending; absent when the inventory is empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<SlotFact>,
+    /// Whether the body's world mirror still follows the game. `false` from the
+    /// first desync on: every other fact is then frozen and must not be trusted
+    /// (decision 2026-11-10 "A world desync stops the run loudly"). Sent only
+    /// when `false`, so a healthy snapshot stays byte-identical and
+    /// `PORT_VERSION` stays 0 (decision 2026-11-09 "Console facts grow
+    /// additively").
+    #[serde(default = "valid", skip_serializing_if = "is_valid")]
+    pub world_valid: bool,
+}
+
+impl Default for Facts {
+    /// Empty facts over a valid world: a derived default would read
+    /// `world_valid` as `false` and report a desync that never happened.
+    fn default() -> Self {
+        Self {
+            health: 0.0,
+            food: 0,
+            air: 0,
+            is_night: false,
+            day_time: 0,
+            dimension: String::new(),
+            pos: [0; 3],
+            inventory: BTreeMap::new(),
+            selected_hotbar_slot: None,
+            slots: Vec::new(),
+            world_valid: true,
+        }
+    }
+}
+
+fn valid() -> bool {
+    true
+}
+
+fn is_valid(world_valid: &bool) -> bool {
+    *world_valid
 }
 
 /// State on demand: connect, `resync_request` and every wake.

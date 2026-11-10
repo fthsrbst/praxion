@@ -856,3 +856,139 @@ fn a_desynchronised_world_answers_no_own_fact() {
     assert_eq!(world.own_air(), None);
     assert_eq!(world.own_burning(), None);
 }
+
+// --- 26.3 world clock (run 8: day_time stayed 0 the whole run) ---------------
+//
+// The server sends a clock's state only on join, on an `advance_time` change
+// and when a command moves it; the 20-tick `set_time` carries no clocks. The
+// client extrapolates per tick by `rate` (`ClientClockManager.tick`).
+
+fn set_time(world: &mut World, game_time: u64, clocks: &[(u32, u64, f32, f32)]) {
+    let clock_updates = clocks
+        .iter()
+        .map(|&(id, total_ticks, partial_tick, rate)| {
+            (WorldClock::new_raw(id), ClockState { total_ticks, partial_tick, rate })
+        })
+        .collect();
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetTime(ClientboundSetTime { game_time, clock_updates }),
+    );
+}
+
+fn client_ticks(world: &mut World, n: u32) {
+    for _ in 0..n {
+        world.apply_serverbound_play(
+            0,
+            &ServerboundGamePacket::ClientTickEnd(ServerboundClientTickEnd),
+        );
+    }
+}
+
+#[test]
+fn a_running_clock_advances_with_client_ticks() {
+    let mut world = active_world();
+    // `time set 0` with advance_time on: the only clock update of the run.
+    set_time(&mut world, 1_000, &[(0, 0, 0.0, 1.0)]);
+    assert_eq!(world.day_time(), 0);
+    client_ticks(&mut world, 4_660);
+    assert_eq!(world.day_time(), 4_660);
+    assert_eq!(world.game_time(), 5_660);
+
+    // The 20-tick sync carries only the game time; the clock catches up to
+    // it (the server ran 10 ticks further than the client here).
+    set_time(&mut world, 5_670, &[]);
+    assert_eq!(world.day_time(), 4_670);
+    assert_eq!(world.game_time(), 5_670);
+    // ...and back when the server is behind the client's own count.
+    set_time(&mut world, 5_665, &[]);
+    assert_eq!(world.day_time(), 4_665);
+}
+
+#[test]
+fn a_fractional_rate_carries_the_partial_tick() {
+    let mut world = active_world();
+    set_time(&mut world, 0, &[(0, 100, 0.0, 0.5)]);
+    client_ticks(&mut world, 5);
+    assert_eq!(world.day_time(), 102, "2.5 ticks: two whole, half carried");
+    client_ticks(&mut world, 1);
+    assert_eq!(world.day_time(), 103);
+    set_time(&mut world, 10, &[(0, 1_000, 0.0, 3.0)]);
+    client_ticks(&mut world, 4);
+    assert_eq!(world.day_time(), 1_012);
+}
+
+#[test]
+fn a_frozen_or_paused_clock_stays_put() {
+    let mut world = active_world();
+    // `advance_time false` or a paused clock arrives as rate 0.
+    set_time(&mut world, 0, &[(0, 13_000, 0.0, 0.0)]);
+    client_ticks(&mut world, 500);
+    set_time(&mut world, 520, &[]);
+    assert_eq!(world.day_time(), 13_000);
+    assert_eq!(world.game_time(), 520, "the game time still runs");
+
+    // A frozen tick rate stops the client's own advance as well.
+    set_time(&mut world, 520, &[(0, 2_000, 0.0, 1.0)]);
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::TickingState(
+            azalea_protocol::packets::game::ClientboundTickingState {
+                tick_rate: 20.0,
+                is_frozen: true,
+            },
+        ),
+    );
+    client_ticks(&mut world, 50);
+    assert_eq!(world.day_time(), 2_000);
+    assert_eq!(world.game_time(), 520);
+}
+
+#[test]
+fn time_set_replaces_the_base() {
+    let mut world = active_world();
+    set_time(&mut world, 0, &[(0, 6_000, 0.0, 1.0)]);
+    client_ticks(&mut world, 300);
+    assert_eq!(world.day_time(), 6_300);
+    // `time set night` jumps; ticking continues from the new base.
+    set_time(&mut world, 300, &[(0, 13_000, 0.0, 1.0)]);
+    assert_eq!(world.day_time(), 13_000);
+    client_ticks(&mut world, 10);
+    assert_eq!(world.day_time(), 13_010);
+    // An update for another clock (the_end, id 1) leaves the overworld alone.
+    set_time(&mut world, 310, &[(1, 99, 0.0, 1.0)]);
+    assert_eq!(world.day_time(), 13_010);
+}
+
+#[test]
+fn the_overworld_clock_id_comes_from_the_registry_order() {
+    let mut world = World::new();
+    world.apply_clientbound_config(
+        0,
+        &ClientboundConfigPacket::RegistryData(
+            azalea_protocol::packets::config::ClientboundRegistryData {
+                registry_id: Identifier::new("minecraft:world_clock"),
+                entries: vec![
+                    (Identifier::new("minecraft:the_end"), None),
+                    (Identifier::new("minecraft:overworld"), None),
+                ],
+            },
+        ),
+    );
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    set_time(&mut world, 0, &[(0, 99, 0.0, 1.0), (1, 18_000, 0.0, 1.0)]);
+    assert_eq!(world.day_time(), 18_000);
+}
+
+#[test]
+fn a_new_login_starts_a_fresh_clock() {
+    let mut world = active_world();
+    set_time(&mut world, 0, &[(0, 6_000, 0.0, 1.0)]);
+    client_ticks(&mut world, 10);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    assert_eq!(world.day_time(), 0, "no clock until the join sync");
+    set_time(&mut world, 10, &[(0, 7_000, 0.0, 1.0)]);
+    client_ticks(&mut world, 1);
+    assert_eq!(world.day_time(), 7_001);
+}

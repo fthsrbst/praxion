@@ -203,6 +203,15 @@ pub enum EventKind {
     /// A `say` line was not sent: `too_long`, `stale`, `queue_full` or
     /// `send_failed`.
     ChatDropped { id: String, reason: String },
+    /// The player died (decision 2026-11-10 "Death is an event"). The envelope's
+    /// `tick` is the tick the body handled the death on. `message` is the
+    /// server's death message (`PlayerCombatKill`, for example "Praxion was
+    /// blown up by Creeper") when the body saw it, else `null`. The field is not
+    /// called `tick` or `kind`: both are envelope keys.
+    Died {
+        #[serde(default)]
+        message: Option<String>,
+    },
     /// The brain should wake. Demo-0 has no brain yet, so this is only logged.
     WakeBrain { cause: String, detail: String },
     /// Free-form operator or test note.
@@ -310,6 +319,28 @@ mod tests {
         .unwrap();
         assert!(line.contains("\"kind\":\"owner_changed\""), "{line}");
         assert!(line.contains("\"generation\":4"), "{line}");
+    }
+
+    #[test]
+    fn a_death_round_trips_with_or_without_its_message() {
+        for message in [Some("Praxion was blown up by Creeper".to_owned()), None] {
+            let case = EventKind::Died { message };
+            assert_eq!(round_trip(case.clone()), case);
+        }
+        let line = serde_json::to_string(&Event {
+            seq: 3,
+            tick: 4660,
+            ts_ns: 5,
+            event: EventKind::Died { message: None },
+        })
+        .unwrap();
+        assert_eq!(
+            line,
+            r#"{"seq":3,"tick":4660,"ts_ns":5,"kind":"died","message":null}"#
+        );
+        let back: Event =
+            serde_json::from_str(r#"{"seq":3,"tick":4660,"ts_ns":5,"kind":"died"}"#).unwrap();
+        assert_eq!(back.event, EventKind::Died { message: None });
     }
 
     #[test]

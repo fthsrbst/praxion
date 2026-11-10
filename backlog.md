@@ -19,6 +19,25 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Run 8 fix leftovers (2026-11-10)
+- Source: re-review of the run 8 fixes (Claude Opus 5.5 workflow), run 8 seed 808
+- State: the run 8 fixes are in (26.3 explode patch `versions/patches/azalea-8041a14-26.3-03-explode.patch`, vanilla
+  world clock, loud desync halt, `died` event, survival during admission, idle back-off). Not yet checked live.
+- Remaining:
+  (a) a pit spawn (seed 808): every log stands on ground 5-9 blocks above the feet; `mine` now walks toward a high log
+  but presses against the pit wall (`no_sight`). Reaching a tree needs the path planner (`move_to` a stand cell next
+  to the trunk) when `mine` cannot see or reach the target; decide where (in `mine`, or a `cut_log` rule).
+  (b) a due survival goal sets `_next_pick_tick = 0` and can wipe a failure gap held under a nothing gap (only via the
+  user-goal bypass); keep the failure deadline in its own field.
+  (c) a death after a desync halt still calls `arbiter.on_death` (breaks `Arbiter::halt`'s "never touched again").
+  (d) after a death the brain may re-pick on the death-frame snapshot, before the respawn inventory arrives (unknown
+  until a live run shows it); hold the pick for a snapshot after the respawn.
+  (e) one spurious `loop_wake` evidence line after a desync (`_advance` heartbeat before the desync early return).
+  (f) the typed `died` event is not forwarded to the brain (`port::forwards`); the brain uses the `died` wake.
+  (g) correct `backlog.md` "Body restart in the middle of a game connection": the body does not reconnect on desync.
+- Pointers: `body/crates/primitives/src/mine.rs`, `brain/praxion_brain/loop.py` (`_nothing_backoff`, `_on_died`,
+  `_advance`), `body/crates/body/src/driver.rs` (`handle_death`, `halt`).
+
 ### Live smoke round 3 leftovers (2026-11-10)
 - Source: Claude Opus 5.5, live runs `runs/test-body-36950d18...` (hunger) and `runs/test-body-e67ecdef...` (talk)
 - State: body smoke tests all pass live (eat, cow hunt with a sword, night zombie, pillar, axe), and the night

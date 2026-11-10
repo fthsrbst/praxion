@@ -24,9 +24,12 @@ bare, tasks with a prefix").
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Optional
 
 from .body import start_session
 from .paths import repo_root
@@ -68,6 +71,42 @@ def survival_report(referee, player: str = "Praxion") -> dict:
         "is_night": referee.is_night_time(ticks),
         "first_night_survived": referee.first_night_survived(),
     }
+
+
+class DesyncWatch:
+    """Reads the body's event log as it grows and reports a ``world_desync``.
+
+    Decision 2026-11-10 "A world desync stops the run loudly": the body logs one
+    ``world_desync`` event when its world mirror can no longer be trusted, and
+    the run ends at once with that reason. Only new bytes are read on each
+    :meth:`poll` (the offset is kept), and only complete lines: a line the body
+    is still writing is read on the next poll.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._offset = 0
+
+    def poll(self) -> Optional[str]:
+        """The desync reason, if a new complete line reports one; else ``None``."""
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(self._offset)
+                chunk = handle.read()
+        except FileNotFoundError:
+            return None
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            return None
+        self._offset += end + 1
+        for line in chunk[: end + 1].splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("kind") == "world_desync":
+                return str(event.get("reason") or "unknown")
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,9 +155,17 @@ def main(argv: list[str] | None = None) -> int:
             cwd=root / "brain",
         )
         deadline = time.monotonic() + args.minutes * 60
+        desync_watch = DesyncWatch(session.run_dir / "body" / "events.jsonl")
+        desync: Optional[str] = None
         try:
             while time.monotonic() < deadline and brain.poll() is None:
                 time.sleep(5)
+                desync = desync_watch.poll()
+                if desync is not None:
+                    # The body is blind: every fact it serves from now on is
+                    # stale, so the run ends here, loudly (decision 2026-11-10);
+                    # the reason is printed once, after the cleanup.
+                    break
                 # The first-night verdict needs the clock watched through the
                 # night, not read once at the end.
                 if not args.peaceful:
@@ -145,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"first_night_survived {report['first_night_survived']}",
                 flush=True,
             )
+    if desync is not None:
+        print(f"run stopped: world desync: {desync}", flush=True)
+        return 2
     return 0
 
 

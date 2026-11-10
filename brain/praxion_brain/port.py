@@ -148,6 +148,9 @@ class Facts(_Message):
     selected_hotbar_slot: Optional[int] = Field(default=None, ge=0, le=8)
     #: Occupied slots only, ascending; empty on a body that predates the field.
     slots: list[Slot] = Field(default_factory=list)
+    #: False once the body's world mirror desynchronised (decision 2026-11-10):
+    #: every world fact after that is stale. The body sends it only when false.
+    world_valid: bool = True
 
 
 class Snapshot(_Message):

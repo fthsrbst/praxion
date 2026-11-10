@@ -48,6 +48,7 @@ FAILURES_TR = {
     "stale_generation": "durum değişmişti",
     "unknown_skill": "bu beceriyi bilmiyorum",
     "stopped_by_user": "sen durdurdun",
+    "died": "öldüm",
 }
 
 #: Why a request was refused, in Turkish (``commands.Resolution.reason``).
@@ -137,6 +138,16 @@ def refused(reason: str, detail: Optional[str] = None) -> str:
     plain = REFUSALS_TR.get(reason, reason)
     extra = f" ({detail})" if detail and reason == "already_met" else ""
     return clean(f"bunu yapmıyorum: {plain}{extra}")
+
+
+def died(cause: Optional[str]) -> str:
+    """The body's ``died`` wake; ``cause`` is its detail (the death message)."""
+    return clean(f"öldüm: {(cause or '').strip() or 'bilinmiyor'}")
+
+
+def world_desync() -> str:
+    """The body's ``world_desync`` wake: its world mirror is no longer valid."""
+    return "dünyayı göremiyorum, duruyorum"
 
 
 def cannot_understand(text: str) -> str:
@@ -307,6 +318,7 @@ __all__ = [
     "TRY_HINT",
     "cannot_understand",
     "clean",
+    "died",
     "goal_done",
     "goal_failed",
     "goal_resumed",
@@ -319,4 +331,5 @@ __all__ = [
     "resumed",
     "seconds",
     "task_accepted",
+    "world_desync",
 ]

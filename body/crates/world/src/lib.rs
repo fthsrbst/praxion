@@ -8,6 +8,7 @@
 //! accessors below are the seam that API will narrow (architecture §4, §5.1).
 
 mod block;
+mod clock;
 mod dimension;
 mod entity;
 mod player;
@@ -47,6 +48,7 @@ pub use player::{
 pub use section::SectionView;
 pub use sound::{MAX_SOUNDS, Sound};
 
+use clock::OverworldClock;
 use player::{Player, set_slot};
 
 /// Whether the followed world can still be trusted.
@@ -170,7 +172,14 @@ pub struct World {
     sounds: VecDeque<Sound>,
     open_container: Option<OpenContainer>,
     game_time: u64,
-    day_time: u64,
+    /// The overworld `world_clock`, extrapolated per client tick (clock.rs).
+    clock: OverworldClock,
+    /// Protocol id of `minecraft:overworld` in the `world_clock` registry, from
+    /// the configuration registry data (entry order is the id). Vanilla sends
+    /// `overworld` first, so 0 until registry data says otherwise.
+    overworld_clock_id: u32,
+    /// `ticking_state` froze the tick rate: the client stops advancing time.
+    ticks_frozen: bool,
     weather: Weather,
     tick: u64,
     chunk_batches_started: u64,
@@ -199,7 +208,9 @@ impl World {
             sounds: VecDeque::new(),
             open_container: None,
             game_time: 0,
-            day_time: 0,
+            clock: OverworldClock::default(),
+            overworld_clock_id: 0,
+            ticks_frozen: false,
             weather: Weather::default(),
             tick: 0,
             chunk_batches_started: 0,
@@ -379,13 +390,16 @@ impl World {
         &self.sounds
     }
 
+    /// The game time: the last `set_time` value plus one per client tick since,
+    /// as the vanilla client keeps it (`ClientLevel.tickTime`).
     pub fn game_time(&self) -> u64 {
         self.game_time
     }
 
-    /// `world_clock` overworld ticks (the day time).
+    /// `world_clock` overworld ticks (the day time), extrapolated between the
+    /// server's clock updates exactly as the 26.3 client does (clock.rs).
     pub fn day_time(&self) -> u64 {
-        self.day_time
+        self.clock.total_ticks()
     }
 
     pub fn weather(&self) -> Weather {
@@ -507,6 +521,16 @@ impl World {
     /// a follow switch made at the Play login packet still resolves dimensions.
     pub fn apply_clientbound_config(&mut self, _conn_id: u32, packet: &ClientboundConfigPacket) {
         if let ClientboundConfigPacket::RegistryData(packet) = packet {
+            // `RegistryHolder` drops entries sent without data (known packs),
+            // so the world clock ids are read from the entry order here.
+            if packet.registry_id.to_string() == "minecraft:world_clock"
+                && let Some(index) = packet
+                    .entries
+                    .iter()
+                    .position(|(ident, _)| ident.to_string() == "minecraft:overworld")
+            {
+                self.overworld_clock_id = index as u32;
+            }
             self.registries.append(
                 packet.registry_id.clone(),
                 packet.entries.iter().cloned().map(|(ident, tag)| (ident, tag.map(Into::into))).collect(),
@@ -526,6 +550,10 @@ impl World {
                 self.player = Player::default();
                 self.open_container = None;
                 self.weather = Weather::default();
+                // A Play login starts a new `ClientPacketListener` and level:
+                // a fresh clock manager and tick rate manager.
+                self.clock = OverworldClock::default();
+                self.ticks_frozen = false;
                 self.set_dimension_and_mode(&packet.common);
                 self.own_entity_id = Some(packet.player_id.0);
             }
@@ -845,12 +873,16 @@ impl World {
                 }
             }
             ClientboundGamePacket::SetTime(packet) => {
+                // `ClientPacketListener.handleSetTime`. Most of these packets
+                // carry no clocks (the 20-tick game time sync); the clock map is
+                // keyed by `world_clock` registry id (`holderRegistry`, no +1).
                 self.game_time = packet.game_time;
-                // The overworld clock is registry entry 0 in every vanilla
-                // data set; the packet keys the map by that registry id.
-                if let Some(clock) = packet.clock_updates.get(&WorldClock::new_raw(0)) {
-                    self.day_time = clock.total_ticks;
-                }
+                let update =
+                    packet.clock_updates.get(&WorldClock::new_raw(self.overworld_clock_id));
+                self.clock.handle_update(packet.game_time, update);
+            }
+            ClientboundGamePacket::TickingState(packet) => {
+                self.ticks_frozen = packet.is_frozen;
             }
             ClientboundGamePacket::GameEvent(packet) => match packet.event {
                 EventType::StartRaining => self.weather.raining = true,
@@ -915,6 +947,14 @@ impl World {
             }
             ServerboundGamePacket::ClientTickEnd(_) => {
                 self.tick += 1;
+                // The client sends this once per unpaused tick, after
+                // `ClientLevel.tick`, whose `tickTime` adds one to the game time
+                // and advances the clocks unless the tick rate is frozen.
+                // Frozen stepping (`tick step`) is not modelled.
+                if !self.ticks_frozen {
+                    self.game_time += 1;
+                    self.clock.tick(self.game_time);
+                }
             }
             _ => {}
         }
@@ -936,7 +976,8 @@ impl World {
         self.sounds.clear();
         self.open_container = None;
         self.game_time = 0;
-        self.day_time = 0;
+        self.clock = OverworldClock::default();
+        self.ticks_frozen = false;
         self.weather = Weather::default();
         self.tick = 0;
         self.chunk_batches_started = 0;

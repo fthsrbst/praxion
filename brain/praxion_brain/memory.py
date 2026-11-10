@@ -37,6 +37,13 @@ _LOGGER = logging.getLogger(__name__)
 BLOCK_SECONDS = 2 * 60 * 60.0
 #: Consecutive goals without rung progress that count as curriculum drift.
 DRIFT_GOALS = 5
+#: Failure kinds that end a goal without saying anything about the goal or its
+#: skill: the body died (a mob, a fall) or its world mirror desynchronised
+#: (decisions 2026-11-10). The wire receipt stays ``failed(<kind>)``; the
+#: brain records the goal ``interrupted``, so it neither blocks the goal nor
+#: counts against the skill. A history written before that rule may still hold
+#: ``failed`` records of these kinds; failure memory skips them too.
+NOT_FAILURE_KINDS = frozenset({"died", "world_desync"})
 
 
 class EvidenceSink(Protocol):
@@ -333,7 +340,8 @@ class Memory:
     def failures(self) -> Dict[str, FailureEntry]:
         """Failure memory per normalized condition, from the goal history.
 
-        Only ``failed`` records count. ``interrupted`` (the brain lost the
+        Only ``failed`` records count, and not those of a
+        :data:`NOT_FAILURE_KINDS` kind. ``interrupted`` (the brain lost the
         intent, A1) and ``unverified`` (a done the body could not verify, A7)
         are not failures and never block a goal. Derived once per goal-history
         change: the console asks for it for every rung on every state poll.
@@ -347,7 +355,7 @@ class Memory:
     def _derive_failures(self) -> Dict[str, FailureEntry]:
         groups: Dict[str, list[GoalRecord]] = {}
         for record in self._goals.values():
-            if record.status != "failed":
+            if record.status != "failed" or record.failure_kind in NOT_FAILURE_KINDS:
                 continue
             key = normalize_condition(record.condition)
             groups.setdefault(key, []).append(record)
@@ -391,7 +399,11 @@ class Memory:
         """Failure kinds recorded for one skill (``skill_uses.jsonl``)."""
         counts: Counter[str] = Counter()
         for use in self.skill_uses():
-            if use.skill != skill or use.outcome != "failed":
+            if (
+                use.skill != skill
+                or use.outcome != "failed"
+                or use.failure_kind in NOT_FAILURE_KINDS
+            ):
                 continue
             counts[use.failure_kind or "unknown"] += 1
         return dict(counts)
@@ -436,6 +448,7 @@ __all__ = [
     "FailureEntry",
     "GoalRecord",
     "Memory",
+    "NOT_FAILURE_KINDS",
     "SkillUse",
     "normalize_condition",
     "world_dir",

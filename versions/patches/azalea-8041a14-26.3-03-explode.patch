@@ -1,0 +1,34 @@
+diff --git a/azalea-protocol/src/packets/game/c_explode.rs b/azalea-protocol/src/packets/game/c_explode.rs
+index 651c856d..245c1f18 100644
+--- a/azalea-protocol/src/packets/game/c_explode.rs
++++ b/azalea-protocol/src/packets/game/c_explode.rs
+@@ -1,9 +1,17 @@
+ use azalea_buf::AzBuf;
+-use azalea_core::position::Vec3;
++use azalea_core::{position::Vec3, sound::CustomSound};
+ use azalea_entity::particle::Particle;
+ use azalea_protocol_macros::ClientboundGamePacket;
+ use azalea_registry::builtin::SoundEvent;
+ 
++// Praxion local patch (26.3 layout, read from the 26.3 client's
++// ClientboundExplodePacket STREAM_CODEC): Vec3 center, float radius, int
++// blockCount, optional Vec3 playerKnockback, particle, Holder<SoundEvent>
++// explosionSound (SoundEvent.STREAM_CODEC is ByteBufCodecs.holder, so a
++// registry id + 1 or 0 then a direct sound), WeightedList blockParticles, and a
++// trailing bool playSound that vendored azalea lacked. Run 8 hit it as
++// "explode left 1 of 83 bytes unread" and the world mirror desynchronised.
++// Regression tests: body/crates/decoder/tests/explode.rs.
+ #[derive(AzBuf, ClientboundGamePacket, Clone, Debug, PartialEq)]
+ pub struct ClientboundExplode {
+     pub center: Vec3,
+@@ -11,8 +19,9 @@ pub struct ClientboundExplode {
+     pub block_count: i32,
+     pub player_knockback: Option<Vec3>,
+     pub explosion_particle: Particle,
+-    pub explosion_sound: SoundEvent,
++    pub explosion_sound: azalea_registry::Holder<SoundEvent, CustomSound>,
+     pub block_particles: Vec<Weighted<ExplosionParticleInfo>>,
++    pub play_sound: bool,
+ }
+ 
+ #[derive(AzBuf, Clone, Debug, PartialEq)]

@@ -599,6 +599,43 @@ impl Arbiter {
         std::mem::take(&mut self.events)
     }
 
+    /// The world desynced and nothing may act on its frozen facts again
+    /// (decision 2026-11-10 "A world desync stops the run loudly"). End a meal,
+    /// drop the interpreter's in-flight action, mark every live entry `done`
+    /// and leave the body to no one, under a new generation. The driver settles
+    /// its commands first, through its own settle path; this ends whatever is
+    /// left (a reflex, a meal). The returned events are the stack lines for the
+    /// driver's log. The caller must never tick the arbiter again.
+    pub fn halt(
+        &mut self,
+        interpreter: &mut Interpreter,
+        actuator: &mut dyn Actuator,
+        body: &mut Body,
+        tick: u64,
+    ) -> Vec<EventKind> {
+        self.events.clear();
+        self.meal = None;
+        interpreter.preempt(actuator);
+        let live: Vec<u64> = self
+            .stack
+            .entries()
+            .iter()
+            .filter(|entry| entry.state != IntentState::Done)
+            .map(|entry| entry.intent_id)
+            .collect();
+        for intent_id in live {
+            if self.stack.done(intent_id) {
+                self.events.push(EventKind::IntentState {
+                    intent_id,
+                    state: IntentState::Done.name().to_owned(),
+                });
+            }
+        }
+        body.bump_generation();
+        self.set_owner(Owner::Idle, body.generation(), tick);
+        std::mem::take(&mut self.events)
+    }
+
     /// The same-tier switch rule: `gain > k x loss`, no `until`, and no second
     /// switch inside `min_switch_ticks`.
     #[allow(clippy::too_many_arguments)]
