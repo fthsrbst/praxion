@@ -30,6 +30,7 @@ import time
 
 from .body import start_session
 from .paths import repo_root
+from .rcon import RconError
 
 
 #: Morning: tick 0 of the day (sunrise). 24000 ticks are 20 minutes, so a
@@ -121,7 +122,12 @@ def main(argv: list[str] | None = None) -> int:
                 # The first-night verdict needs the clock watched through the
                 # night, not read once at the end.
                 if not args.peaceful:
-                    session.referee.observe()
+                    try:
+                        session.referee.observe()
+                    except (ValueError, OSError, RconError) as error:
+                        # One empty or dropped RCON reply must not end a long
+                        # run (run 8, 2026-11-10, died on `time query day` -> '').
+                        print(f"referee: observation skipped ({error})", flush=True)
         finally:
             if brain.poll() is None:
                 brain.terminate()
