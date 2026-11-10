@@ -87,6 +87,14 @@ _ONE_CHAR_OPS = "<>"
 _ESCAPES = {'"': '"', "\\": "\\", "n": "\n", "t": "\t", "r": "\r"}
 
 
+#: Names that are facts or categories, never items: inside ``has()``/``count()``
+#: they would count an item that does not exist (always 0).
+NOT_ITEMS = {
+    "food": "count_food() for the food held, or food() for the hunger bar",
+    "health": "health()",
+}
+
+
 class ConditionError(ValueError):
     """The guard text is not well formed."""
 
@@ -453,6 +461,18 @@ class _Parser:
                     raise ConditionError(
                         f"{token.value}() takes exactly one item name, "
                         f"found {len(args)} argument(s)"
+                    )
+                if (
+                    token.value in {"has", "count"}
+                    and isinstance(args[0], Name)
+                    and args[0].name in NOT_ITEMS
+                ):
+                    # Run 9: the model wrote `count(food) >= 2`, which counts an
+                    # item called "food" (always 0) while `get_food` stops on
+                    # `count_food()`, so a goal the skill finished settled false.
+                    raise ConditionError(
+                        f"{args[0].name!r} is not an item: use "
+                        f"{NOT_ITEMS[args[0].name]}"
                     )
                 return Call(token.value, args)
             if token.value == "true":

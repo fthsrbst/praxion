@@ -201,3 +201,17 @@ def test_count_of_condition_is_the_goal_count() -> None:
     assert count_of_condition("count(oak_log) >= 0") == 1  # never below one
     assert count_of_condition("has(furnace)") == 1
     assert count_of_condition("has(a) and count(b) >= 3") == 1
+
+
+def test_food_and_health_are_not_items() -> None:
+    """Run 9: `count(food) >= 2` counted an item called "food" (always 0)."""
+    import pytest
+
+    from praxion_brain.conditions import ConditionError, parse
+
+    for text in ("count(food) >= 2", "has(food)", "count(health) >= 10"):
+        with pytest.raises(ConditionError, match="is not an item"):
+            parse(text)
+    # The facts themselves and real food items still parse.
+    for text in ("count_food() >= 2", "food() >= 10", "count(cooked_beef) >= 2", "has(bread)"):
+        parse(text)
