@@ -1,0 +1,24 @@
+# Torches: one coal (or one charcoal) and one stick give four (26.3 recipe
+# data, a 1x2 recipe, so no table is needed).
+#
+# Depth 4: get_torch -> get_coal -> get_wooden_pickaxe -> get_planks (a leaf).
+# `get_coal` is the only deep child; the sticks are one frame, and the craft
+# itself is a primitive.
+#
+# Why the rules are ordered this way: the goal check is on top, and the default
+# is four because one craft yields exactly four. The coal rule and the stick
+# rule come before the craft, so `craft(torch)` never fails
+# `missing_ingredients`: a failed `get_coal` makes its rule ineligible for one
+# tick and the stick rule gets its turn, instead of the skill failing on the
+# first tick. Charcoal counts as the coal key here (the 26.3 recipe accepts
+# both), and `get_coal` is only called when neither is held, so a body that
+# already has charcoal mines nothing new. The last rule is the craft itself;
+# it fires again while the count is short, which is how a goal of eight or
+# twelve torches gets two or three crafts.
+skill get_torch(n: int = 4)
+  doc "Have n torches, crafted four at a time from coal or charcoal and a stick."
+  rules:
+    count(torch) >= $n -> done
+    count(coal) < 1 and count(charcoal) < 1 -> do get_coal(1)
+    count(stick) < 1 -> do get_sticks(1)
+    true -> craft(torch)

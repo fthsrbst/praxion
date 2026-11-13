@@ -11,7 +11,7 @@ use azalea_core::{
 };
 use azalea_entity::{EntityDataItem, EntityDataValue, LookDirection, Pose};
 use azalea_protocol::{
-    common::movements::{PositionMoveRotation, RelativeMovements},
+    common::movements::{MoveFlags, PositionMoveRotation, RelativeMovements},
     packets::{
         ProtocolPacket,
         common::CommonPlayerSpawnInfo,
@@ -24,7 +24,8 @@ use azalea_protocol::{
             ClientboundRespawn, ClientboundSectionBlocksUpdate, ClientboundSetEntityData,
             ClientboundSetHealth, ClientboundSetPlayerInventory, ClientboundSetTime,
             ClientboundTeleportEntity, ServerboundClientTickEnd, ServerboundGamePacket,
-            ServerboundMovePlayerPos,
+            ServerboundMovePlayerPos, ServerboundMovePlayerPosRot, ServerboundMovePlayerRot,
+            ServerboundMovePlayerStatusOnly,
             c_game_event::EventType,
             c_level_chunk_with_light::ClientboundLevelChunkPacketData,
             c_move_entity_pos_rot::{Properties, VecDelta},
@@ -131,6 +132,109 @@ fn teleport_then_moves_update_position_and_rotation() {
     });
     world.apply_serverbound_play(0, &moved);
     assert_eq!(world.player_position(), Some(Vec3::new(12.0, 65.0, 41.0)));
+}
+
+#[test]
+fn the_client_on_ground_flag_is_remembered_until_a_respawn() {
+    let mut world = active_world();
+    assert_eq!(world.player_on_ground(), None, "no movement packet yet");
+
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            flags: MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    assert_eq!(world.player_on_ground(), Some(true));
+
+    // A jump with no position change is the status-only packet, flag clear: the
+    // client tells the server its feet left the block.
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerStatusOnly(ServerboundMovePlayerStatusOnly {
+            flags: MoveFlags {
+                on_ground: false,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    assert_eq!(world.player_on_ground(), Some(false));
+
+    // A respawn hands the player a new entity: the old flag is not its pose.
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::Respawn(ClientboundRespawn {
+            common: spawn_info(),
+            data_to_keep: 0,
+        }),
+    );
+    assert_eq!(world.player_on_ground(), None);
+}
+
+#[test]
+fn the_life_number_moves_with_a_login_and_a_respawn() {
+    let mut world = World::new();
+    assert_eq!(world.life(), 0, "no login yet");
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    assert_eq!(world.life(), 1, "the Play login is the first life");
+
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::Respawn(ClientboundRespawn {
+            common: spawn_info(),
+            data_to_keep: 0,
+        }),
+    );
+    assert_eq!(world.life(), 2, "a respawn hands the player a new entity");
+
+    // A new connection is a new player too, so the counter never restarts.
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    assert_eq!(world.life(), 3);
+}
+
+#[test]
+fn every_movement_packet_carries_the_ground_flag() {
+    let mut world = active_world();
+
+    // Position and rotation: the client moved and says whether it stands.
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPosRot(ServerboundMovePlayerPosRot {
+            pos: Vec3::new(1.5, 65.0, 0.5),
+            look_direction: LookDirection::new(45.0, 0.0),
+            flags: MoveFlags {
+                on_ground: false,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    assert_eq!(world.player_position(), Some(Vec3::new(1.5, 65.0, 0.5)));
+    assert_eq!(world.player_on_ground(), Some(false));
+
+    // Rotation only: the position stays, the ground flag still updates.
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerRot(ServerboundMovePlayerRot {
+            look_direction: LookDirection::new(90.0, 10.0),
+            flags: MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    assert_eq!(
+        world.player_position(),
+        Some(Vec3::new(1.5, 65.0, 0.5)),
+        "a rotation-only packet does not move the player"
+    );
+    assert_eq!(world.player_rotation(), (90.0, 10.0));
+    assert_eq!(world.player_on_ground(), Some(true));
 }
 
 #[test]

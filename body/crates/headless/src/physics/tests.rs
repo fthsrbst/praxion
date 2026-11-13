@@ -460,3 +460,83 @@ fn the_bounding_box_follows_the_position_after_a_step() {
     assert_close((bounding_box.min.x + bounding_box.max.x) / 2., position.x, 1e-9, "box centre x");
     assert_close(bounding_box.min.y, position.y, 1e-9, "box bottom");
 }
+
+// ---------------------------------------------------------------------------
+// observe: the pose of a player somebody else drives (real-client shadow mode)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn observe_sets_pose_ground_and_the_velocity_of_the_last_tick() {
+    let mut body = body_at(0.5, 64.0, 0.5);
+
+    // The first observation has no previous position, so no velocity.
+    body.observe(Vec3::new(10.5, 64.0, -3.5), 90.0, 10.0, true, 1);
+    assert_eq!(body.position(), Vec3::new(10.5, 64.0, -3.5));
+    assert_eq!(body.look().y_rot(), 90.0);
+    assert_eq!(body.look().x_rot(), 10.0);
+    assert!(body.on_ground());
+    assert_eq!(body.generation(), 0, "a first observation is not a teleport");
+    assert_eq!(body.physics.velocity, Vec3::ZERO);
+
+    // A normal tick: the velocity is the position change since the last one.
+    body.observe(Vec3::new(10.6, 63.9, -3.5), 90.0, 10.0, false, 1);
+    assert_eq!(body.position(), Vec3::new(10.6, 63.9, -3.5));
+    assert!(!body.on_ground());
+    assert_close(body.physics.velocity.x, 0.1, 1e-12, "velocity x");
+    assert_close(body.physics.velocity.y, -0.1, 1e-12, "velocity y");
+    assert_eq!(body.generation(), 0);
+    // The collision box follows the observed position, not the previous one.
+    let position = body.position();
+    let bounding_box = body.bounding_box();
+    assert_close(bounding_box.min.y, position.y, 1e-9, "box bottom");
+    assert_close((bounding_box.min.x + bounding_box.max.x) / 2., position.x, 1e-9, "box centre x");
+}
+
+#[test]
+fn observe_divides_a_burst_of_ticks_out_of_the_velocity() {
+    let mut body = body_at(0.5, 64.0, 0.5);
+    body.observe(Vec3::new(10.5, 64.0, 0.5), 0.0, 0.0, true, 1);
+
+    // Three client ticks between two observations: 0.6 blocks is 0.2 per tick,
+    // not 0.6 (review finding 3: a stalled loop must not overstate the speed).
+    body.observe(Vec3::new(11.1, 64.0, 0.5), 0.0, 0.0, true, 3);
+    assert_close(body.physics.velocity.x, 0.2, 1e-12, "velocity x per tick");
+    assert_eq!(body.physics.velocity.y, 0.0);
+    assert_eq!(body.physics.velocity.z, 0.0);
+}
+
+#[test]
+fn a_respawn_forgets_the_previous_observation() {
+    let mut body = body_at(0.5, 64.0, 0.5);
+    body.observe(Vec3::new(0.5, 64.0, 0.5), 0.0, 0.0, true, 1);
+    body.observe(Vec3::new(2.5, 64.0, 0.5), 0.0, 0.0, true, 1);
+    assert!(body.physics.velocity.x > 0.0);
+    let generation = body.generation();
+
+    body.respawn();
+    assert_eq!(body.generation(), generation.wrapping_add(1));
+    assert_eq!(body.physics.velocity, Vec3::ZERO);
+
+    // The new life's first observation has no previous position to measure a
+    // velocity against: nothing spans the respawn.
+    body.observe(Vec3::new(2.6, 64.0, 0.5), 0.0, 0.0, true, 1);
+    assert_eq!(body.physics.velocity, Vec3::ZERO);
+}
+
+#[test]
+fn observe_treats_a_far_jump_as_a_teleport() {
+    let mut body = body_at(0.5, 64.0, 0.5);
+    body.observe(Vec3::new(0.5, 64.0, 0.5), 0.0, 0.0, true, 1);
+    let generation = body.generation();
+
+    // A 7.5-block step is still movement; the teleport check is "more than 8".
+    body.observe(Vec3::new(8.0, 64.0, 0.5), 0.0, 0.0, true, 1);
+    assert_eq!(body.generation(), generation, "7.5 blocks is not a teleport");
+    assert!(body.physics.velocity.x > 0.0);
+
+    // A server teleport moves the mirrored player somewhere far at once.
+    body.observe(Vec3::new(120.5, 70.0, -40.5), 0.0, 0.0, false, 1);
+    assert_eq!(body.generation(), generation.wrapping_add(1));
+    assert_eq!(body.physics.velocity, Vec3::ZERO, "a teleport has no velocity");
+    assert!(!body.on_ground());
+}

@@ -1,0 +1,34 @@
+# Coal for fuel and for torches, mined from the 26.3 block tag `#coal_ores`,
+# which holds coal ore and its deepslate form. Charcoal is deliberately NOT
+# coal here: this skill fills the furnace's coal slot and the coal key of the
+# torch recipe, and a body that has only charcoal burns logs for fuel instead
+# (see the fuel guard in `get_iron_ingot`) or crafts its torches from it.
+#
+# Depth 3: get_coal -> get_wooden_pickaxe -> get_planks (a leaf). A stone
+# pickaxe would be nicer, but its chain is four frames by itself
+# (get_stone_pickaxe -> get_cobblestone -> get_wooden_pickaxe -> leaf), so a
+# coal skill that demanded one could not be a core skill at all. Coal ore drops
+# to a wooden pickaxe, so the cheaper tool is enough for the surface rung. The
+# deepslate form needs a stone pickaxe for its drop: a wooden pickaxe breaks it
+# and gains nothing, which the goal check absorbs (the mine confirms, the count
+# does not rise, and the rule mines the next ore or hands over to the search).
+#
+# Why the rules are ordered this way: the goal check is on top, so a body that
+# already holds n coal stays where it is. The pickaxe rule comes before any
+# mining, so a body with no pickaxe never walks to an ore it cannot harvest
+# (`mine` would fail `needs_tool`); a failed `get_wooden_pickaxe` makes that
+# rule ineligible for one tick, and the rules below get their turn, so a body
+# that cannot make a pickaxe still searches instead of failing at once. One ore
+# rule covers both ores through the tag, and `until count(coal) >= $n` keeps
+# the mine going while the goal is short; the tag also matches the deepslate
+# vein a tunnel opens. `find_ore(coal_ore)` is the search half: it walks the
+# surface first and opens the rock with `branch_mine` when no ray sees an ore.
+# Its failure (normally not_found) is this skill's failure after the usual
+# three tries, and the caller decides what then.
+skill get_coal(n: int = 1)
+  doc "Have n coal, mined from coal ore or deepslate coal ore (charcoal does not count); crafts a wooden pickaxe first when none is held."
+  rules:
+    count(coal) >= $n -> done
+    not has(#pickaxes) -> do get_wooden_pickaxe()
+    near(#coal_ores, 5) -> mine(#coal_ores) until count(coal) >= $n
+    true -> do find_ore(coal_ore)

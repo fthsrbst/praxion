@@ -293,24 +293,8 @@ impl KnownMap {
         mut accept: impl FnMut(BlockPos, BlockState) -> bool,
     ) -> Option<BlockPos> {
         let r2 = i64::from(radius) * i64::from(radius);
-        let axis = |c: i32, lo: i32| i64::from((lo - c).max(c - (lo + 15)).max(0));
-        let mut sections: Vec<(i64, SectionKey)> = self
-            .sections
-            .keys()
-            .map(|&key| {
-                let base = section_base(key);
-                let (dx, dy, dz) = (
-                    axis(center.x, base.x),
-                    axis(center.y, base.y),
-                    axis(center.z, base.z),
-                );
-                (dx * dx + dy * dy + dz * dz, key)
-            })
-            .filter(|&(d2, _)| d2 <= r2)
-            .collect();
-        sections.sort_unstable();
         let mut best: Option<(i64, (i32, i32, i32), BlockPos)> = None;
-        for (section_d2, key) in sections {
+        for (section_d2, key) in self.sections_within(center, radius) {
             if best.is_some_and(|(d2, ..)| section_d2 > d2) {
                 break;
             }
@@ -364,6 +348,86 @@ impl KnownMap {
             }
         }
         best.map(|(.., pos)| pos)
+    }
+
+    /// Every seen cell within `radius` of `center`, visited one by one.
+    ///
+    /// The visit order and the total count are not part of the contract; it is
+    /// the same remembered set [`KnownMap::nearest_seen`] searches, so a caller
+    /// that counts can never see a cell the planner could not. A cell whose
+    /// chunk changed since it was last checked is re-validated against the live
+    /// world first, exactly as in `nearest_seen`; a cell whose chunk unloaded is
+    /// dropped.
+    pub(crate) fn seen_within(
+        &self,
+        world: &World,
+        center: BlockPos,
+        radius: u32,
+        mut visit: impl FnMut(BlockPos, BlockState),
+    ) {
+        let r2 = i64::from(radius) * i64::from(radius);
+        for (_, key) in self.sections_within(center, radius) {
+            // One revision lookup serves the whole column, as in
+            // `nearest_seen`.
+            let current_revision = world.chunk_revision(ChunkPos::new(key.0, key.2));
+            let base = section_base(key);
+            for (index, cell) in &self.sections[&key].cells {
+                let Cell::Seen {
+                    state,
+                    checked_revision,
+                    ..
+                } = *cell
+                else {
+                    continue;
+                };
+                let pos = BlockPos::new(
+                    base.x + i32::from(index & 15),
+                    base.y + i32::from((index >> 8) & 15),
+                    base.z + i32::from((index >> 4) & 15),
+                );
+                let (dx, dy, dz) = (
+                    i64::from(pos.x - center.x),
+                    i64::from(pos.y - center.y),
+                    i64::from(pos.z - center.z),
+                );
+                if dx * dx + dy * dy + dz * dz > r2 {
+                    continue;
+                }
+                let state = if current_revision == Some(checked_revision) {
+                    state
+                } else {
+                    match world.block_state(pos) {
+                        Some(live) => live,
+                        None => continue,
+                    }
+                };
+                visit(pos, state);
+            }
+        }
+    }
+
+    /// The sections whose cells can lie within `radius` of `center`, nearest
+    /// first: the key is the squared distance from `center` to the closest cell
+    /// of the section, a lower bound on the distance of any cell it holds.
+    fn sections_within(&self, center: BlockPos, radius: u32) -> Vec<(i64, SectionKey)> {
+        let r2 = i64::from(radius) * i64::from(radius);
+        let axis = |c: i32, lo: i32| i64::from((lo - c).max(c - (lo + 15)).max(0));
+        let mut sections: Vec<(i64, SectionKey)> = self
+            .sections
+            .keys()
+            .map(|&key| {
+                let base = section_base(key);
+                let (dx, dy, dz) = (
+                    axis(center.x, base.x),
+                    axis(center.y, base.y),
+                    axis(center.z, base.z),
+                );
+                (dx * dx + dy * dy + dz * dz, key)
+            })
+            .filter(|&(d2, _)| d2 <= r2)
+            .collect();
+        sections.sort_unstable();
+        sections
     }
 
     /// Whether the sweep should spend a ray on this cell now: nothing is

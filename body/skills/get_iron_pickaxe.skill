@@ -1,0 +1,41 @@
+# An iron pickaxe is three iron ingots and two sticks at a placed crafting
+# table. The frames decide the shape: get_iron_pickaxe -> get_raw_iron (three
+# frames through find_ore -> search_surface) and -> get_iron_ingot, get_sticks
+# and get_crafting_table_near (one frame each), so the deepest chain is four,
+# the core cap.
+#
+# What it deliberately does not fetch: a furnace. `get_furnace` is four frames
+# by itself (get_furnace -> get_cobblestone -> get_wooden_pickaxe -> get_planks),
+# so calling it from here would be five and the loader rejects the file. The
+# cheapest restructure is the one `get_iron_ingot` already documents: the ladder
+# is cumulative, the furnace, coal and raw iron come first, and this skill
+# carries only the rung its own chain is missing. Raw iron does fit
+# (`get_raw_iron` is three frames), so a body with a stone pickaxe really does
+# reach its first iron pickaxe through this one call; fuel and the furnace do
+# not, so a body without them gets `get_iron_ingot`'s own kinds (no_fuel,
+# no_furnace) after its three tries, and the caller decides what to get first.
+#
+# Why the rules are ordered this way: the goal check is on top, then the craft,
+# so a body that already smelted three ingots and holds two sticks only has to
+# stand at its table. Raw iron comes before smelting, so a missing ore is one
+# `get_raw_iron` call and not three failed smelts, and its kind (`needs_tool`
+# without a stone pickaxe, `not_found` when the search runs out) is then the
+# one this skill fails with. `get_iron_ingot(3)` cooks one ingot per call and
+# is re-selected until three are held; it places the furnace the body carries,
+# and a body without fuel or a furnace fails this skill with that kind after
+# three tries. Sticks come before the table rule because a table is made of
+# planks and `get_sticks` may spend the last ones. The table rule is last: it
+# fires only when the ingots and sticks are ready and no table stands in reach.
+#
+# Surplus ore: the raw iron guard asks for three however many ingots are
+# already held, because the DSL has no subtraction; one extra ore in the pack
+# costs a few ticks and feeds the next rung.
+skill get_iron_pickaxe()
+  doc "Have an iron pickaxe: three iron ingots and two sticks crafted at a placed crafting table, fetching the raw iron, the sticks and the table itself."
+  rules:
+    count(iron_pickaxe) >= 1 -> done
+    count(iron_ingot) >= 3 and count(stick) >= 2 and near(crafting_table, 4) -> craft(iron_pickaxe)
+    count(iron_ingot) < 3 and count(raw_iron) < 3 -> do get_raw_iron(3)
+    count(iron_ingot) < 3 -> do get_iron_ingot(3)
+    count(stick) < 2 -> do get_sticks(2)
+    count(iron_ingot) >= 3 and count(stick) >= 2 and not near(crafting_table, 4) -> do get_crafting_table_near()

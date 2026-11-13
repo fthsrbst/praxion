@@ -1222,3 +1222,80 @@ fn a_reflex_start_logs_its_action_target_and_distance() {
         "{events:?}"
     );
 }
+
+#[test]
+fn a_heard_hostile_sound_turns_the_head_while_nothing_owns_the_body() {
+    // Reaction B end to end: an idle body hears a zombie it cannot see and the
+    // tick carries a gaze frame, with no owner change and one log line.
+    let mut rig = Rig::new(continuous_program());
+    let view = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 20);
+    rig.arbiter
+        .engine_mut()
+        .state_mut()
+        .set_heard(vec![praxion_reflexes::HeardSound {
+            id: "entity.zombie.ambient".to_owned(),
+            class: praxion_reflexes::SoundClass::Hostile,
+            position: Vec3::new(0.5, 64.0, -5.0),
+            age_ticks: 0,
+            entity: None,
+        }]);
+
+    let out = rig.tick(0, &view, Needs { health: 20.0, food: 20 }, &Settings::default());
+
+    assert_eq!(out.owner, Owner::Idle, "a glance owns nothing");
+    assert_eq!(out.reflex, None);
+    assert_eq!(out.generation, 0);
+    let crate::FrameSource::Reflex(frame) = &out.source else {
+        panic!("the glance must reach the body: {:?}", out.source);
+    };
+    let (yaw, pitch) = aim(view.eye, Vec3::new(0.5, 64.0, -5.0));
+    assert_eq!(frame.look, Look::Aim { yaw, pitch });
+    let notes: Vec<&str> = out
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            EventKind::Note { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        vec![
+            "reflex_action kind=alert action=look target=- distance=5.50 renewed=false \
+             heard=entity.zombie.ambient"
+        ],
+        "{:?}",
+        out.events
+    );
+}
+
+#[test]
+fn a_running_command_never_gives_the_look_to_a_heard_sound() {
+    // The gaze overlay waits for a free body: a command's primitive frame is
+    // the look request, so the same heard sound is not acted on.
+    let mut rig = Rig::new(continuous_program());
+    rig.command("work");
+    let view = bare_view(Vec3::new(0.5, 64.0, 0.5), 20.0, 20);
+    rig.arbiter
+        .engine_mut()
+        .state_mut()
+        .set_heard(vec![praxion_reflexes::HeardSound {
+            id: "entity.zombie.ambient".to_owned(),
+            class: praxion_reflexes::SoundClass::Hostile,
+            position: Vec3::new(0.5, 64.0, -5.0),
+            age_ticks: 0,
+            entity: None,
+        }]);
+
+    let out = rig.tick(0, &view, Needs { health: 20.0, food: 20 }, &Settings::default());
+
+    assert_eq!(out.owner, Owner::Skill { intent_id: 1 });
+    assert!(matches!(out.source, crate::FrameSource::Skill(_)));
+    assert!(
+        !out.events
+            .iter()
+            .any(|event| matches!(event, EventKind::Note { text } if text.contains("kind=alert"))),
+        "{:?}",
+        out.events
+    );
+}

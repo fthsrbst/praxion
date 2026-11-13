@@ -219,12 +219,16 @@ fn air() -> BlockState {
 }
 
 fn add_zombie(world: &mut World, id: i32, pos: Vec3) {
+    add_entity(world, id, EntityKind::Zombie, pos);
+}
+
+fn add_entity(world: &mut World, id: i32, kind: EntityKind, pos: Vec3) {
     world.apply_clientbound_play(
         0,
         &ClientboundGamePacket::AddEntity(ClientboundAddEntity {
             id: MinecraftEntityId(id),
             uuid: Uuid::from_u128(id as u128),
-            entity_type: EntityKind::Zombie,
+            entity_type: kind,
             position: pos,
             movement: LpVec3::Zero,
             x_rot: 0,
@@ -1272,6 +1276,100 @@ fn a_changed_chunk_revalidates_its_seen_cells_against_the_world() {
 }
 
 #[test]
+fn for_each_known_visits_only_seen_cells_within_the_radius() {
+    let near = BlockPos::new(2, 65, 6);
+    let far = BlockPos::new(40, 65, 0);
+    let near_state = find_block("oak_log", &[]);
+    let far_state = find_block("coal_ore", &[]);
+    let world = world_area(4, &[(near, near_state), (far, far_state)]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    assert!(p.block(Caller::Other, &world, near).is_known());
+    assert!(p.block(Caller::Other, &world, far).is_known());
+    let mut seen = Vec::new();
+    assert_eq!(
+        p.for_each_known(&world, 16, |pos, state| seen.push((pos, state))),
+        Some(()),
+        "the eye is known, so the visit runs"
+    );
+    assert_eq!(seen, vec![(near, near_state)], "only the cell inside 16 blocks");
+
+    // A wider radius reaches the farther cell; a cell nobody saw is not in the
+    // map to begin with, so it can never be visited.
+    let mut wide = Vec::new();
+    p.for_each_known(&world, 64, |pos, state| wide.push((pos, state)));
+    assert_eq!(wide, vec![(near, near_state), (far, far_state)]);
+
+    // Walking the remembered set spends no ray: the ledger does not move.
+    let before = p.ledger().total();
+    p.for_each_known(&world, 64, |_, _| {});
+    assert_eq!(p.ledger().total(), before, "a known cell costs no ray");
+
+    // An unknown eye is not "nothing is known".
+    let mut fresh = Perception::new(Config::default());
+    assert_eq!(fresh.for_each_known(&World::new(), 16, |_, _| {}), None);
+    fresh.begin_tick(&World::new());
+    assert_eq!(
+        fresh.for_each_known(&World::new(), 16, |_, _| {}),
+        None,
+        "a valid world without a position has no eye to measure from"
+    );
+}
+
+#[test]
+fn a_remembered_cell_gone_from_the_world_is_revalidated() {
+    // The same re-validation `nearest_known` does: a changed chunk shows the
+    // live state, so a caller counts what is there now, not a ghost.
+    let log = BlockPos::new(50, 65, 0);
+    let log_state = find_block("oak_log", &[]);
+    let mut world = world_across_chunks(4, &[(log, log_state)]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    assert!(p.block(Caller::Other, &world, log).is_known());
+    set_block(&mut world, log, BlockState::AIR);
+    p.begin_tick(&world);
+
+    let mut seen = Vec::new();
+    p.for_each_known(&world, 64, |pos, state| seen.push((pos, state)));
+    assert_eq!(seen, vec![(log, BlockState::AIR)], "the removed log is aired");
+}
+
+#[test]
+fn entity_kinds_near_counts_visible_mobs_and_skips_items_orbs_and_the_player() {
+    let mut world = world_with(&[]);
+    add_zombie(&mut world, 10, Vec3::new(2.5, FEET_Y, 0.5));
+    add_zombie(&mut world, 11, Vec3::new(3.5, FEET_Y, 0.5));
+    add_entity(&mut world, 12, EntityKind::Item, Vec3::new(4.5, FEET_Y, 0.5));
+    add_entity(
+        &mut world,
+        13,
+        EntityKind::ExperienceOrb,
+        Vec3::new(5.5, FEET_Y, 0.5),
+    );
+    // The store redirects the own player's entity data, but a server may still
+    // spawn it: it is never part of the body's surroundings.
+    add_entity(&mut world, 7, EntityKind::Player, Vec3::new(1.5, FEET_Y, 0.5));
+
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    let answer = p.entity_kinds_near(Caller::Other, &world, 32);
+    let counts = answer.value().unwrap_or_else(|| panic!("{answer:?}"));
+    assert_eq!(counts.get(&EntityKind::Zombie), Some(&2));
+    for skipped in [EntityKind::Item, EntityKind::ExperienceOrb, EntityKind::Player] {
+        assert_eq!(counts.get(&skipped), None, "{skipped:?} is not surroundings");
+    }
+    assert_eq!(counts.values().sum::<u32>(), 2);
+
+    // A desynced world cannot answer, exactly like every other query.
+    world.invalidate(0, "test");
+    p.begin_tick(&world);
+    assert_eq!(
+        p.entity_kinds_near(Caller::Other, &world, 32).reason(),
+        Some(Reason::NeverSeen)
+    );
+}
+
+#[test]
 fn workable_keeps_fluids_out_except_for_the_blocks_skills_use() {
     use std::collections::HashMap;
 
@@ -1607,4 +1705,59 @@ fn a_dying_mob_is_neither_the_nearest_nor_in_the_list() {
         .map(|facts| facts.iter().map(|fact| fact.id).collect())
         .unwrap_or_default();
     assert_eq!(listed, vec![2]);
+}
+
+#[test]
+fn an_item_entity_fact_carries_the_kind_of_its_stack() {
+    use azalea_registry::builtin::ItemKind;
+    let mut world = world_with(&[]);
+    add_entity(&mut world, 21, EntityKind::Item, Vec3::new(2.5, FEET_Y, 0.5));
+    add_entity(&mut world, 22, EntityKind::Item, Vec3::new(2.5, FEET_Y, 2.5));
+    add_zombie(&mut world, 23, Vec3::new(0.5, FEET_Y, 3.5));
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(21),
+            packed_items: azalea_entity::EntityMetadataItems(vec![azalea_entity::EntityDataItem {
+                index: 8,
+                value: azalea_entity::EntityDataValue::ItemStack(ItemStack::new(
+                    ItemKind::CraftingTable,
+                    1,
+                )),
+            }]),
+        }),
+    );
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    let facts = p
+        .entities_near(Caller::Other, &world, 8, EntityFilter::Any)
+        .value()
+        .cloned()
+        .expect("the entities are in sight");
+    let item_of = |id: i32| facts.iter().find(|fact| fact.id == id).expect("listed").item;
+    assert_eq!(item_of(21), Some(ItemKind::CraftingTable));
+    assert_eq!(item_of(22), None, "an item entity whose stack is not sent yet");
+    assert_eq!(item_of(23), None, "a mob holds no stack");
+}
+
+#[test]
+fn the_eye_block_is_the_live_cell_and_costs_no_ray() {
+    let mut world = world_with(&[]);
+    let mut p = Perception::new(Config::default());
+    p.begin_tick(&world);
+    let eye_cell = p.eye_cell(&world).expect("the eye is known");
+    let state = p.eye_block(&world).value().copied().expect("air at the eye");
+    assert!(state.is_air());
+    set_block(&mut world, eye_cell, find_block("water", &[("level", "0")]));
+    p.begin_tick(&world);
+    let answer = p.eye_block(&world);
+    assert_eq!(
+        answer.value().copied(),
+        Some(find_block("water", &[("level", "0")])),
+        "a block placed at the eye is read at once, not from memory"
+    );
+    assert_eq!(answer.provenance(), Some(Provenance::Sight));
+    assert_eq!(p.rays_used_this_tick(), 0, "an own-state fact costs no ray");
+    let unseen = Perception::new(Config::default());
+    assert_eq!(unseen.eye_block(&world).reason(), Some(Reason::NeverSeen));
 }

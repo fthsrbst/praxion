@@ -1,0 +1,22 @@
+# A chest is eight planks in a ring on a 3x3 grid, so it needs a placed
+# crafting table. Shaped exactly like `get_furnace`: goal, craft, input, table.
+#
+# Depth 2: get_chest -> get_planks (a leaf), and get_crafting_table_near (a
+# leaf). Eight planks is two logs' worth (one log gives four), and `get_planks`
+# mines its own logs, so this skill never calls `get_wood`.
+#
+# Why the rules are ordered this way: the goal check is on top. The craft rule
+# asks for both things it cannot make itself (eight planks of any wood type and
+# a table within reach). The plank rule under it fetches the planks, and a
+# failed `get_planks` makes it ineligible for one tick, so the table rule gets
+# its turn. The table rule is last because it is always true when nothing else
+# is missing: `get_crafting_table_near` places the held table or crafts and
+# places one, and returns done at once when a table already stands there, so
+# `craft` above it can never fail `needs_table`.
+skill get_chest()
+  doc "Have a chest in the inventory: eight planks crafted at a placed crafting table."
+  rules:
+    count(chest) >= 1 -> done
+    count(#planks) >= 8 and near(crafting_table, 4) -> craft(chest)
+    count(#planks) < 8 -> do get_planks(8)
+    true -> do get_crafting_table_near()

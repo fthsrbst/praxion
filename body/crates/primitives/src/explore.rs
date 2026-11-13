@@ -292,6 +292,24 @@ impl ExploreMemory {
     }
 }
 
+/// Ticks one `explore(stone)` call may walk before it fails `not_found`: a
+/// quarter of the usual budget. Stone in flat terrain lies under the dirt and
+/// no ray reaches it from the surface, so walking finds it only where it
+/// outcrops, and a person with a pickaxe digs (`find_stone`) before they walk.
+/// The walk is the last resort of `get_cobblestone`; at the full budget its
+/// three failed calls cost three minutes (run B, 2026-11-12), at this one
+/// forty-five seconds.
+pub const STONE_EXPLORE_TICKS: u32 = 300;
+
+/// The tick budget of one `explore(target)` call.
+fn explore_budget(target: &str) -> u32 {
+    if target == "stone" {
+        STONE_EXPLORE_TICKS
+    } else {
+        praxion_rules::registry::EXPLORE_MAX_TICKS
+    }
+}
+
 impl Explore {
     pub(crate) fn new(target: String, memory: &mut ExploreMemory) -> Result<Self, String> {
         if let Some(tag) = target.strip_prefix('#') {
@@ -318,6 +336,7 @@ impl Explore {
                 "`{target}` is not hunted; explore may only seek mobs on the hunt allowlist"
             ));
         }
+        let budget = explore_budget(&target);
         Ok(Self {
             target,
             entity,
@@ -365,7 +384,7 @@ impl Explore {
             next_plan_tick: 0,
             events: Vec::new(),
             waited: 0,
-            budget: praxion_rules::registry::EXPLORE_MAX_TICKS,
+            budget,
             path_ticks: 0,
         })
     }
@@ -1139,6 +1158,23 @@ fn sky_open(state: BlockState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exploring_for_stone_gets_a_short_budget_everything_else_the_full_one() {
+        use super::*;
+        assert_eq!(explore_budget("stone"), STONE_EXPLORE_TICKS);
+        const { assert!(STONE_EXPLORE_TICKS * 3 <= 1200) };
+        for other in ["#logs", "oak_log", "coal_ore", "cow", "cobblestone"] {
+            assert_eq!(
+                explore_budget(other),
+                praxion_rules::registry::EXPLORE_MAX_TICKS,
+                "{other}"
+            );
+        }
+        let mut memory = ExploreMemory::default();
+        let explore = Explore::new("stone".into(), &mut memory).expect("stone is a block");
+        assert_eq!(explore.budget, STONE_EXPLORE_TICKS);
+    }
+
     use std::collections::HashMap;
 
     use azalea_core::position::Vec3;

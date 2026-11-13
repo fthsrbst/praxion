@@ -405,7 +405,7 @@ impl PlayState {
 ///
 /// Vanilla clients stop moving into chunks they do not have; reading a missing
 /// chunk as air would drop the body into the void instead.
-fn world_ready(world: &praxion_world::World, position: Vec3) -> bool {
+pub(crate) fn world_ready(world: &praxion_world::World, position: Vec3) -> bool {
     if !world.status().is_valid() || world.dimension().is_none() {
         return false;
     }
@@ -473,6 +473,11 @@ fn world_summary(state: &PlayState) -> String {
         return "none (no --tee)".to_owned();
     };
     let world = feed.lock();
+    world_line(&world)
+}
+
+/// One line about a world mirror: status, chunks and warnings.
+pub(crate) fn world_line(world: &praxion_world::World) -> String {
     let warnings: u64 = world.warning_counts().values().sum();
     let reason = world
         .status()

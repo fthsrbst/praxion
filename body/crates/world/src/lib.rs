@@ -182,6 +182,10 @@ pub struct World {
     ticks_frozen: bool,
     weather: Weather,
     tick: u64,
+    /// The player's life number: bumped by the Play login and by every respawn.
+    /// Monotonic for the mirror's whole lifetime (a new connection is a new
+    /// player too), so a reader can tell one player entity from the next.
+    life: u64,
     chunk_batches_started: u64,
     chunk_batches_finished: u64,
     last_chunk_batch_size: Option<u32>,
@@ -213,6 +217,7 @@ impl World {
             ticks_frozen: false,
             weather: Weather::default(),
             tick: 0,
+            life: 0,
             chunk_batches_started: 0,
             chunk_batches_finished: 0,
             last_chunk_batch_size: None,
@@ -292,6 +297,17 @@ impl World {
 
     pub fn player_rotation(&self) -> (f32, f32) {
         self.player.rotation()
+    }
+
+    /// The on-ground flag of the client's own last serverbound movement packet
+    /// (`move_player_pos`, `_pos_rot`, `_rot` or `_status_only`).
+    ///
+    /// This is what the client told the server about its feet, so it is the only
+    /// ground truth for a player the body does not simulate. `None` until one
+    /// movement packet was seen in the current life: an unreported ground state
+    /// is unknown, never "in the air".
+    pub fn player_on_ground(&self) -> Option<bool> {
+        self.player.on_ground()
     }
 
     pub fn health(&self) -> Option<Health> {
@@ -409,6 +425,17 @@ impl World {
     /// `client_tick_end` packets seen from the followed connection.
     pub fn tick(&self) -> u64 {
         self.tick
+    }
+
+    /// The player's life number: `1` after the Play login and one more for
+    /// every respawn (which in 26.3 also covers a dimension change).
+    ///
+    /// It never restarts: a reconnection, a reloaded world or a respawn all
+    /// hand the client a new player entity, and a reader that follows the body
+    /// treats any change as "a new player". A mirror that has seen no login
+    /// yet answers `0`.
+    pub fn life(&self) -> u64 {
+        self.life
     }
 
     pub fn chunk_batches_started(&self) -> u64 {
@@ -556,8 +583,10 @@ impl World {
                 self.ticks_frozen = false;
                 self.set_dimension_and_mode(&packet.common);
                 self.own_entity_id = Some(packet.player_id.0);
+                self.life += 1;
             }
             ClientboundGamePacket::Respawn(packet) => {
+                self.life += 1;
                 let changed = self
                     .dimension
                     .as_ref()
@@ -568,6 +597,7 @@ impl World {
                 self.entities.clear();
                 self.sounds.clear();
                 self.player.clear_position();
+                self.player.clear_on_ground();
                 self.player.clear_own_facts();
                 // The server builds a new player on slot 0 and sends no held-slot
                 // packet for the reset. The old selection would otherwise stay in
@@ -905,6 +935,7 @@ impl World {
         match packet {
             ServerboundGamePacket::MovePlayerPos(packet) => {
                 self.player.set_position(packet.pos);
+                self.player.set_on_ground(packet.flags.on_ground);
             }
             ServerboundGamePacket::MovePlayerPosRot(packet) => {
                 self.player.set_position(packet.pos);
@@ -912,14 +943,18 @@ impl World {
                     packet.look_direction.y_rot(),
                     packet.look_direction.x_rot(),
                 );
+                self.player.set_on_ground(packet.flags.on_ground);
             }
             ServerboundGamePacket::MovePlayerRot(packet) => {
                 self.player.set_rotation(
                     packet.look_direction.y_rot(),
                     packet.look_direction.x_rot(),
                 );
+                self.player.set_on_ground(packet.flags.on_ground);
             }
-            ServerboundGamePacket::MovePlayerStatusOnly(_) => {}
+            ServerboundGamePacket::MovePlayerStatusOnly(packet) => {
+                self.player.set_on_ground(packet.flags.on_ground);
+            }
             ServerboundGamePacket::SetCarriedItem(packet) => {
                 self.player.set_selected_slot(u32::from(packet.slot));
             }

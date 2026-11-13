@@ -112,6 +112,11 @@ pub struct BodyOptions {
     /// need none; an empty prefix accepts every operator line as a task
     /// (decision 2026-11-09 "Chat: control words bare, tasks with a prefix").
     pub chat_prefix: String,
+    /// Ticks a pending dig or place may wait for its receipt field in the
+    /// actuator's report before the intent is dropped. `0` for a logged-in body
+    /// (the actuator reports the same tick); hands mode sets it because the
+    /// client's packet arrives a tick or two after the frame that caused it.
+    pub report_grace_ticks: u32,
 }
 
 /// The owner of a tick's look request, for the gaze's reaction delay.
@@ -178,6 +183,9 @@ pub struct BodyDriver {
     /// A `brain_silent` note is already written for this silence.
     brain_silent: bool,
     pending: Option<IntentSpec>,
+    /// The tick `pending` was produced, so `report_grace_ticks` can bound its
+    /// wait for a late report.
+    pending_since: Option<u64>,
     /// The block a registered place or dig intent changes, so its confirmed
     /// receipt can update the known map at once.
     block_intent: Option<(u64, BlockPos)>,
@@ -345,6 +353,7 @@ impl BodyDriver {
             port_connected: false,
             brain_silent: false,
             pending: None,
+            pending_since: None,
             block_intent: None,
             last_report: None,
             observe_receipt: None,
@@ -913,6 +922,7 @@ impl BodyDriver {
         // the next frame, a continuous one is released.
         self.abandon_flight();
         self.pending = None;
+        self.pending_since = None;
         self.interpreter_intent = None;
         self.record(
             tick,
@@ -1279,46 +1289,59 @@ impl BodyDriver {
     }
 
     /// Registers the pending primitive intent from the previous tick.
+    ///
+    /// A hands session reads its report from the client's own packets, which
+    /// arrive a tick or two after the frame: while the field the intent needs is
+    /// missing, and fewer than `report_grace_ticks` ticks have passed since the
+    /// primitive asked, the intent stays pending for the next tick. A logged-in
+    /// body (grace 0) drops it at once, exactly as before.
     fn register_pending(&mut self, tick: u64, world: &World) {
         let Some(spec) = self.pending.take() else {
             return;
         };
+        let since = self.pending_since.unwrap_or(tick);
+        let within_grace =
+            tick.saturating_sub(since) < u64::from(self.options.report_grace_ticks);
         let Some((report_tick, report)) = self.last_report.clone() else {
+            self.keep_pending(spec, within_grace, since);
             return;
         };
         let intent_id = self.intent_counter + 1;
+        // Set when the report lacks the field this intent needs; the pending
+        // spec is then kept for another tick (or dropped when the grace is out).
+        let mut missing = false;
         let intent = match &spec {
             IntentSpec::Dig { window, .. } => {
-                let Some(seq) = report.block_seq else {
-                    return;
-                };
-                let Some((target, before)) = report.block_before else {
-                    return;
-                };
-                Some(
-                    Intent::dig(intent_id, target, seq, report_tick)
-                        .with_window(*window)
-                        .with_initial_block(before)
-                        // The block update can already be in the world when
-                        // the intent registers (the feed applies packets
-                        // before the driver sees them); the observed state
-                        // then proves the dig without a later packet.
-                        .with_observed_block(world.block_state(target)),
-                )
+                match (report.block_seq, report.block_before) {
+                    (Some(seq), Some((target, before))) => Some(
+                        Intent::dig(intent_id, target, seq, report_tick)
+                            .with_window(*window)
+                            .with_initial_block(before)
+                            // The block update can already be in the world when
+                            // the intent registers (the feed applies packets
+                            // before the driver sees them); the observed state
+                            // then proves the dig without a later packet.
+                            .with_observed_block(world.block_state(target)),
+                    ),
+                    _ => {
+                        missing = true;
+                        None
+                    }
+                }
             }
             IntentSpec::Place { block, window, .. } => {
-                let Some(seq) = report.block_seq else {
-                    return;
-                };
-                let Some((target, before)) = report.block_before else {
-                    return;
-                };
-                Some(
-                    Intent::place(intent_id, target, block.clone(), seq, report_tick)
-                        .with_window(*window)
-                        .with_initial_block(before)
-                        .with_observed_block(world.block_state(target)),
-                )
+                match (report.block_seq, report.block_before) {
+                    (Some(seq), Some((target, before))) => Some(
+                        Intent::place(intent_id, target, block.clone(), seq, report_tick)
+                            .with_window(*window)
+                            .with_initial_block(before)
+                            .with_observed_block(world.block_state(target)),
+                    ),
+                    _ => {
+                        missing = true;
+                        None
+                    }
+                }
             }
             IntentSpec::Inventory {
                 primitive,
@@ -1363,15 +1386,16 @@ impl BodyDriver {
                 container_id,
                 slot,
                 window,
-            } => {
-                let Some(state_id) = report.menu_state_id else {
-                    return;
-                };
-                Some(
+            } => match report.menu_state_id {
+                Some(state_id) => Some(
                     Intent::slot_click(intent_id, *container_id, *slot, state_id, report_tick)
                         .with_window(*window),
-                )
-            }
+                ),
+                None => {
+                    missing = true;
+                    None
+                }
+            },
             IntentSpec::Attack { entity_id, window } => {
                 Some(Intent::attack(intent_id, *entity_id, report_tick).with_window(*window))
             }
@@ -1379,9 +1403,15 @@ impl BodyDriver {
                 Some(Intent::fact(intent_id, fact.to_string(), report_tick).with_window(*window))
             }
         };
+        if missing {
+            self.keep_pending(spec, within_grace, since);
+            return;
+        }
         let Some(intent) = intent else {
+            self.pending_since = None;
             return;
         };
+        self.pending_since = None;
         let ts = now_ns();
         match self.engine.register(&mut self.log, tick, ts, intent, world) {
             Ok(receipt) => {
@@ -1400,6 +1430,18 @@ impl BodyDriver {
                 }
             }
             Err(error) => log::warn!("body: register intent: {error}"),
+        }
+    }
+
+    /// Hold a pending intent for another tick, or drop it once the grace is
+    /// spent. The tick it first became pending is kept, so the wait is bounded
+    /// by the primitive's first ask, not by the last retry.
+    fn keep_pending(&mut self, spec: IntentSpec, within_grace: bool, since: u64) {
+        if within_grace {
+            self.pending = Some(spec);
+            self.pending_since = Some(since);
+        } else {
+            self.pending_since = None;
         }
     }
 
@@ -1596,6 +1638,13 @@ impl BodyDriver {
             self.runner.tick(&mut ctx)
         };
         if let Some(pending) = result.pending {
+            // A spec kept while its report is late keeps the tick of its first
+            // ask: `report_grace_ticks` is a bound, so re-asking every tick must
+            // not restart it (the primitives keep sending the spec until the
+            // runner registers it).
+            if self.pending_since.is_none() {
+                self.pending_since = Some(view.tick);
+            }
             self.pending = Some(pending);
         }
         for event in result.events {
@@ -1751,6 +1800,7 @@ impl BodyDriver {
         self.log_events(tick, ts_ns, events);
         self.abandon_flight();
         self.pending = None;
+        self.pending_since = None;
         self.interpreter_intent = None;
         self.night_idle_ticks = 0;
     }
@@ -2128,6 +2178,20 @@ impl Driver for BodyDriver {
         matches!(self.cli, CliGoal::Settled)
     }
 
+    /// The hands stopped applying frames: note it in the event log, so a run
+    /// that lost control says why. No goal is settled here; main reports it to
+    /// the operator and the frames keep coming (they are dropped again).
+    fn on_takeover(&mut self, reason: &str) {
+        let tick = lock(&self.shared).ticks;
+        self.record(
+            tick,
+            now_ns(),
+            EventKind::Note {
+                text: format!("taken_over reason={reason}"),
+            },
+        );
+    }
+
     /// The session's `Died` arrives on the owner's thread, between frames,
     /// with the message of its own `PlayerCombatKill`. The next frame handles
     /// it: it has the world the settle and the snapshot need.
@@ -2392,16 +2456,19 @@ fn port_facts(world: &World) -> PortFacts {
         world_valid: world.status().is_valid(),
         // Needs perception: set where the snapshot is published.
         sheltered: false,
+        nearby: None,
     }
 }
 
 /// The facts a published snapshot carries: [`port_facts`] plus the ones that
 /// need perception. `sheltered` is the skill fact `sheltered()` itself, so the
 /// brain and `take_shelter` can never disagree (run 9, third review); an
-/// unknown answer is sent as not sheltered.
+/// unknown answer is sent as not sheltered. `nearby` is what the body can see
+/// and hear around itself (proposal 2026-11-12), omitted when it is empty.
 fn snapshot_facts(world: &World, perception: &mut Perception) -> PortFacts {
     let mut facts = port_facts(world);
     facts.sheltered = praxion_facts::sheltered(perception, world) == Some(true);
+    facts.nearby = crate::nearby::nearby(world, perception);
     facts
 }
 
@@ -2482,6 +2549,7 @@ skill stall()
             own_name: "Praxion".to_owned(),
             operators: vec!["Fatih".to_owned()],
             chat_prefix: crate::chat::DEFAULT_TASK_PREFIX.to_owned(),
+            report_grace_ticks: 0,
         }
     }
 
@@ -3607,6 +3675,15 @@ skill stall()
     }
 
     #[test]
+    fn a_snapshot_with_nothing_around_it_carries_no_nearby() {
+        // Nothing seen, nothing heard: the key is absent, so a snapshot of an
+        // unknown world stays exactly as it was (proposal 2026-11-12).
+        let world = World::new();
+        let mut perception = Perception::new(PerceptionConfig::default());
+        assert_eq!(snapshot_facts(&world, &mut perception).nearby, None);
+    }
+
+    #[test]
     fn the_port_facts_say_when_the_world_is_no_longer_valid() {
         let mut world = World::new();
         assert!(port_facts(&world).world_valid);
@@ -4624,6 +4701,81 @@ skill stall()
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(notes(&harness), 2, "a later silence is noted again");
+    }
+
+    /// A pending dig whose report has not arrived yet.
+    fn late_dig(harness: &mut Harness, grace_ticks: u32) {
+        harness.driver.options.report_grace_ticks = grace_ticks;
+        harness.driver.pending = Some(IntentSpec::Dig {
+            pos: BlockPos::new(1, 64, 1),
+            window: 0,
+        });
+        harness.driver.pending_since = Some(10);
+        harness.driver.last_report = Some((10, AppliedReport::default()));
+    }
+
+    #[test]
+    fn a_missing_report_drops_the_intent_at_once_without_grace() {
+        // The logged-in body: the actuator reports the same tick, so a report
+        // without the field is a failed action, not a late one.
+        let mut harness = harness();
+        late_dig(&mut harness, 0);
+        harness.driver.register_pending(10, &harness.world);
+        assert!(harness.driver.pending.is_none());
+        assert_eq!(harness.driver.intent_counter, 0);
+    }
+
+    #[test]
+    fn a_missing_report_keeps_the_intent_through_the_grace_ticks() {
+        let mut harness = harness();
+        late_dig(&mut harness, 8);
+        for tick in 10..18 {
+            harness.driver.register_pending(tick, &harness.world);
+            assert!(
+                harness.driver.pending.is_some(),
+                "tick {tick} is still within the grace"
+            );
+            assert_eq!(harness.driver.pending_since, Some(10));
+        }
+        // The eighth tick is out of grace: the intent is dropped, not kept.
+        harness.driver.register_pending(18, &harness.world);
+        assert!(harness.driver.pending.is_none());
+        assert_eq!(harness.driver.pending_since, None);
+        assert_eq!(harness.driver.intent_counter, 0);
+    }
+
+    #[test]
+    fn a_report_that_arrives_inside_the_grace_registers_the_intent() {
+        let mut harness = harness();
+        late_dig(&mut harness, 8);
+        harness.driver.register_pending(10, &harness.world);
+        assert!(harness.driver.pending.is_some());
+
+        let pos = BlockPos::new(1, 64, 1);
+        harness.driver.last_report = Some((
+            11,
+            AppliedReport {
+                block_seq: Some(3),
+                block_hit: Some(pos),
+                block_before: Some((pos, None)),
+                ..AppliedReport::default()
+            },
+        ));
+        harness.driver.register_pending(11, &harness.world);
+        assert!(harness.driver.pending.is_none());
+        assert_eq!(harness.driver.pending_since, None);
+        assert_eq!(harness.driver.intent_counter, 1, "the intent registered");
+    }
+
+    #[test]
+    fn a_takeover_is_noted_in_the_event_log() {
+        let mut harness = harness();
+        harness.driver.on_takeover("foreign_input");
+        harness.driver.log.flush().expect("the note reaches the file");
+        assert_eq!(
+            notes(&harness, "taken_over"),
+            vec!["taken_over reason=foreign_input"]
+        );
     }
 
     /// A minimal brain: handshake, then frames on demand.

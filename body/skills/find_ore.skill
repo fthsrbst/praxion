@@ -21,6 +21,28 @@
 # tunnel, but a tunnel that keeps refusing (e.g. fluid) can reach its cap
 # first, and then the skill fails with that kind instead. A caller must not
 # read every failure as "keep searching".
+#
+# How long a failing call takes, worst case (run D, 2026-11-12: one tunnel ran
+# 5,091 ticks, the whole goal budget, and the goal failed `budget` instead of
+# `not_found`). Every `branch_mine` call ends itself with `not_found` after
+# 2400 ticks (BRANCH_MAX_TICKS), between two digs, so at most 2400 plus the dig
+# in flight (a receipt window of 160 ticks and a walk of 60): 2620. A search
+# (`search_surface`) is three explores of at most 1200 ticks each, but they
+# share the explored-cell memory and end as soon as no frontier is left (run D:
+# 3 * 160 ticks). The rule cap (the third failure of one rule fails the skill)
+# lets the sequence run search, tunnel, search, tunnel, search, the last search
+# failing the skill:
+#   typical (searches end early, 3 * 160 = 480 ticks each):
+#     3 * 480 + 2 * 2620 = 6680 ticks, the second tunnel starts from the end of
+#     the first and cuts fresh rock;
+#   worst (every explore runs its 1200 ticks): 3 * 3600 + 2 * 2620 = 16040.
+# The goal budget (6000) can still end such a run first, as `failed(budget)`.
+# What the 2400-tick cap buys is that each tunnel hands control back with a
+# typed `not_found` after about two minutes instead of five, and that the
+# tunnel's depth (coal: y 56, see `descent_target`) leaves it time to cut fresh
+# rock. Ending the skill after ONE tunnel needs state across calls (the Runner
+# remembering a spent tunnel) or a per-skill tick budget in the
+# interpreter, both open design choices: backlog.
 skill find_ore(ore: block)
   doc "Get the given ore within mining reach: search the surface, then tunnel underground; fails with the last failure kind (normally not_found) when it is not found."
   rules:

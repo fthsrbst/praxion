@@ -22,6 +22,17 @@ pub(crate) const TUNNEL_RESERVE_DUGS: u32 = 160;
 // The reserve covers four full legs of two digs per step.
 const _: () = assert!(4 * 2 * LEG_STEPS <= TUNNEL_RESERVE_DUGS);
 
+/// Ticks one `branch_mine` call may run, the descent included (two minutes).
+/// The dig budget alone does not bound the call in time: a stone dig with a
+/// stone pickaxe costs about 35 ticks, so the 202 digs of a surface start
+/// took 5,091 ticks in live run D (2026-11-12), the whole goal budget, and the
+/// caller never got its typed `not_found` back with time left to do anything
+/// else. At 35 ticks a dig, 2,400 ticks are about 68 digs: a descent of a few
+/// blocks and a tunnel of some thirty steps. The call fails `not_found`
+/// between two digs (a dig in flight settles its receipt first), so it ends a
+/// little past the cap, never in the middle of a receipt.
+pub(crate) const BRANCH_MAX_TICKS: u32 = 2400;
+
 /// Digs one block of descent costs: the three cells of a stair (clearance,
 /// head room, new feet cell). A descent through open air costs fewer; the
 /// estimate stays on the safe side.
@@ -31,18 +42,28 @@ const DIGS_PER_DESCENT_BLOCK: u32 = 3;
 /// for a block with no known best height (the tunnel then starts at the
 /// current height).
 ///
-/// Source: minecraft.wiki, Java Edition 1.18+ ore generation (checked
-/// 2026-11-08). All three ores peak in a triangle distribution:
-/// - coal: y 0..192, peak y 96 (a second, uniform batch lies above y 136);
-///   y 48 is the compromise between the peak and a descent from the surface.
-/// - iron: y -24..56, peak y 16 (plus a thin uniform batch over -64..72).
-/// - copper: y -16..112, peak y 48.
+/// Source: minecraft.wiki, Java Edition 1.18+ ore generation (articles "Coal
+/// Ore", "Iron Ore", "Copper Ore" and "Ore", read again 2026-11-13 from
+/// `local/wiki/text/`). The ores peak in a triangle distribution:
+/// - coal: second batch y 0..192, peak y 96, so the density at y falls
+///   linearly from the peak (half the peak density at y 48); the first batch
+///   (y 136..320) lies above any depth a tunnel reaches. The "Ore" table puts
+///   the layer with most coal at y 45. y 56 is the compromise: 60% of the
+///   peak density, and a descent of about seven blocks from a surface at
+///   y 63 instead of fifteen. A stair block costs about 85 ticks and a call
+///   has [`BRANCH_MAX_TICKS`], so the tunnel's own share of the call weighs
+///   more than the last few percent of density (run D, 2026-11-12: the
+///   descent to y 48 took 750 of the 2,400 ticks a call has now).
+/// - iron: batch 2 y -24..56, peak y 16; batch 3 is a thin uniform layer over
+///   -64..72; batch 1 (y 80..384, peak y 232) is out of reach.
+/// - copper: y -16..112, peak y 47..48.
 ///
 /// Ores that live in deepslate (lapis, diamond, redstone) are not listed: a
 /// descent to y < 8 needs lava and cave handling this primitive does not have.
 pub(crate) fn descent_target(ore: &str) -> Option<i32> {
     match ore {
-        "coal_ore" | "copper_ore" => Some(48),
+        "coal_ore" => Some(56),
+        "copper_ore" => Some(48),
         "iron_ore" => Some(16),
         _ => None,
     }
@@ -190,7 +211,7 @@ mod tests {
 
     #[test]
     fn each_supported_ore_has_its_height() {
-        assert_eq!(descent_target("coal_ore"), Some(48));
+        assert_eq!(descent_target("coal_ore"), Some(56));
         assert_eq!(descent_target("copper_ore"), Some(48));
         assert_eq!(descent_target("iron_ore"), Some(16));
     }
@@ -287,7 +308,7 @@ mod tests {
         let coal = Branch::new("coal_ore");
         assert_eq!(
             coal.dig_budget(150),
-            3 * (150 - 48) + TUNNEL_RESERVE_DUGS
+            3 * (150 - 56) + TUNNEL_RESERVE_DUGS
         );
         // No known height: the whole budget is tunnel.
         assert_eq!(Branch::new("stone").dig_budget(64), TUNNEL_RESERVE_DUGS);

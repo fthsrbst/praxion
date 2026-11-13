@@ -276,6 +276,27 @@ pub(crate) fn set_health(world: &mut World, health: f32) {
     );
 }
 
+/// Set the followed player's remaining air, as the server's own entity data
+/// does. 300 is a full breath; a drowning body is driven to 0.
+pub(crate) fn set_air(world: &mut World, ticks: u32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(
+            azalea_protocol::packets::game::ClientboundSetEntityData {
+                id: azalea_core::entity_id::MinecraftEntityId(7),
+                packed_items: azalea_entity::EntityMetadataItems(vec![
+                    azalea_entity::EntityDataItem {
+                        index: 1,
+                        value: azalea_entity::EntityDataValue::Int(
+                            i32::try_from(ticks).unwrap_or(i32::MAX),
+                        ),
+                    },
+                ]),
+            },
+        ),
+    );
+}
+
 /// A perception whose known map has been filled by sweeping `world`.
 pub(crate) fn swept(world: &World) -> Perception {
     let mut perception = Perception::new(Config::default());
@@ -414,6 +435,33 @@ pub(crate) fn set_dying(world: &mut World, id: i32) {
                     azalea_entity::EntityDataItem {
                         index: 6,
                         value: azalea_entity::EntityDataValue::Pose(azalea_entity::Pose::Dying),
+                    },
+                ]),
+            },
+        ),
+    );
+}
+
+/// A dropped item: an item entity `id` at `pos` holding one `item`, as the
+/// server's `add_entity` and its `set_entity_data` stack.
+pub(crate) fn add_item_entity(
+    world: &mut World,
+    id: i32,
+    item: azalea_registry::builtin::ItemKind,
+    pos: Vec3,
+) {
+    add_entity(world, id, azalea_registry::builtin::EntityKind::Item, pos);
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SetEntityData(
+            azalea_protocol::packets::game::ClientboundSetEntityData {
+                id: azalea_core::entity_id::MinecraftEntityId(id),
+                packed_items: azalea_entity::EntityMetadataItems(vec![
+                    azalea_entity::EntityDataItem {
+                        index: 8,
+                        value: azalea_entity::EntityDataValue::ItemStack(
+                            azalea_inventory::ItemStack::new(item, 1),
+                        ),
                     },
                 ]),
             },

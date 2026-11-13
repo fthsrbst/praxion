@@ -203,9 +203,13 @@ impl Runner {
                 uphill: 0,
                 rejected: Vec::new(),
                 rejected_kind: None,
+                sure_drop: None,
+                settled: false,
+                held_before: None,
             }),
             "dig_down" => Active::Dig(Digger::dig_down(arg)),
             "branch_mine" => Active::Dig(Digger::branch_mine(arg)),
+            "climb_out" => Active::Dig(Digger::climb_out()),
             "place" => Active::Place(Place {
                 block: arg,
                 target: None,

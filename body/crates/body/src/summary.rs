@@ -124,6 +124,27 @@ pub struct SessionSummary {
     pub attack_clicks: u64,
     pub use_clicks: u64,
     pub world: Option<String>,
+    /// Real-client shadow mode only: frames whose controls asked for something
+    /// (a held key, a look change, a click, a slot, a menu action or chat).
+    /// Absent on a logged-in body, where `shadow` is absent too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow_wanted: Option<u64>,
+    /// Real-client shadow mode: every frame was computed and dropped instead of
+    /// being applied by an actuator. Absent on a logged-in body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<bool>,
+    /// Hands mode only: frames translated and written to the helper.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hands_frames: Option<u64>,
+    /// Hands mode only: frames the helper refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hands_refused: Option<u64>,
+    /// Hands mode only: frames that asked for a control S3 cannot post.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hands_unsupported: Option<u64>,
+    /// Hands mode only: takeovers that stopped the frames.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hands_takeovers: Option<u64>,
 }
 
 /// `summary.json`.
@@ -256,5 +277,52 @@ mod tests {
         assert_eq!(shared.over_25ms, 1, "a 20 Hz period is never a slow tick");
         assert_eq!(summary(&shared).goal.outcome, "running");
         assert_eq!(summary(&shared).tick_time.period_p50_ms, 49.0);
+    }
+
+    #[test]
+    fn shadow_counters_are_written_only_in_shadow_mode() {
+        let mut shared = Shared::new("run", "goal", vec![]);
+        shared.session = Some(SessionSummary {
+            frames: 40,
+            ticks_ran: 40,
+            shadow_wanted: Some(7),
+            shadow: Some(true),
+            ..SessionSummary::default()
+        });
+        let shadow = serde_json::to_value(summary(&shared)).expect("summary json");
+        let session = &shadow["session"];
+        assert_eq!(session["shadow"], serde_json::json!(true));
+        assert_eq!(session["shadow_wanted"], serde_json::json!(7));
+
+        // A logged-in body writes neither field: an old harness reading the
+        // summary must not think the body was in shadow mode.
+        shared.session = Some(SessionSummary {
+            frames: 40,
+            ticks_ran: 40,
+            ..SessionSummary::default()
+        });
+        let live = serde_json::to_value(summary(&shared)).expect("summary json");
+        let session = live["session"].as_object().expect("session object");
+        assert!(!session.contains_key("shadow"));
+        assert!(!session.contains_key("shadow_wanted"));
+        assert!(!session.contains_key("hands_frames"));
+    }
+
+    #[test]
+    fn hands_counters_are_written_only_in_hands_mode() {
+        let mut shared = Shared::new("run", "goal", vec![]);
+        shared.session = Some(SessionSummary {
+            hands_frames: Some(40),
+            hands_refused: Some(0),
+            hands_unsupported: Some(2),
+            hands_takeovers: Some(1),
+            ..SessionSummary::default()
+        });
+        let hands = serde_json::to_value(summary(&shared)).expect("summary json");
+        let session = &hands["session"];
+        assert_eq!(session["hands_frames"], serde_json::json!(40));
+        assert_eq!(session["hands_refused"], serde_json::json!(0));
+        assert_eq!(session["hands_unsupported"], serde_json::json!(2));
+        assert_eq!(session["hands_takeovers"], serde_json::json!(1));
     }
 }

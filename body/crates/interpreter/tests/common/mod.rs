@@ -67,6 +67,8 @@ impl Facts for Mock {
                 .and_then(|name| self.bools.get(name))
                 .copied()
                 .unwrap_or(false),
+            // The one fact with no argument that a test steers by name.
+            "sky_above" => self.bools.get("sky_above").copied().unwrap_or(false),
             _ => false,
         };
         if value { Truth::True } else { Truth::False }

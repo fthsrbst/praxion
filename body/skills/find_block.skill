@@ -1,0 +1,19 @@
+# The public search wrapper: one block name in, the body walks until that block
+# is within mining reach. A goal may name a place ("go to a block", decision
+# 2026-11-12 "Wider tasks"), and a goal is verified by the skill's own `done`,
+# so the search needs a done check of its own on top: `search_surface` is the
+# helper that decides how to look, but its contract is the surface walk, while
+# this skill is done the moment the block is near, whatever put it there (a
+# block the body placed itself counts, and so does one a caller's goal already
+# reached).
+#
+# Depth 2: find_block -> search_surface (a leaf). Ordered: the done check first,
+# then exactly one action. `search_surface` explores until the block is in
+# reach and fails `not_found` after its own three explores; that kind is this
+# skill's failure after the usual three tries, and the caller decides whether to
+# search again from somewhere else.
+skill find_block(block: block)
+  doc "Walk until the given block is within mining reach (5 blocks); fails not_found when the surface search runs out."
+  rules:
+    near($block, 5) -> done
+    true -> do search_surface($block)

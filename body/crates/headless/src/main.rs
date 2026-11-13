@@ -94,6 +94,8 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
                 Some(message) => println!("died: {message}"),
                 None => println!("died"),
             },
+            // A logged-in session has no hands; nothing can take it over.
+            Some(Event::TakenOver { reason }) => println!("taken over: {reason}"),
             Some(Event::Disconnected(reason)) => break Some(reason),
             None => {}
         }

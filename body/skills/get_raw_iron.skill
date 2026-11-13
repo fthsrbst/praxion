@@ -1,0 +1,41 @@
+# Raw iron from iron ore or deepslate iron ore (`#iron_ores` is the 26.3 block
+# tag that holds both), so one rule covers a surface vein and the deepslate
+# body a tunnel opens.
+#
+# Iron ore needs a stone pickaxe or better: a wooden (or golden) pickaxe breaks
+# the block and drops nothing. The skill therefore refuses before it walks,
+# `fail(needs_tool)`, the same shape `get_iron_ingot` uses for `no_raw_iron`:
+# an honest kind the caller can act on beats an ore that vanishes. The guard
+# names the four tiers above wood on purpose. Golden is left out because a gold
+# pickaxe has the wooden harvest level, and copper is left out because this
+# repo's tool table does not rank it; being wrong there costs one rung, since
+# the caller then gets a stone pickaxe first.
+#
+# Why it does not fetch the pickaxe itself (the admitted shape was
+# `do get_stone_pickaxe()` when missing, and that call cannot load): a stone
+# pickaxe is four frames by itself (get_stone_pickaxe -> get_cobblestone ->
+# get_wooden_pickaxe -> get_planks), and the core cap is four frames root
+# included, so calling it from here is a five-frame chain the loader rejects
+# and the interpreter would refuse at run time. Inlining the pickaxe here is
+# the other way out, and it does not fit either: three cobblestone, two sticks,
+# a placed table and the craft are four rules on top of this skill's four, and
+# every combination under six rules leaves a state with no true rule (three
+# cobblestone and one stick, or the ingredients ready and no table) where the
+# body would spin or die with `no_rule`. So the rung is cumulative like the
+# rest of the ladder: a body that got this far has a stone pickaxe from the
+# previous rung, and a body that does not is told `needs_tool` in one tick.
+#
+# Why the rules are ordered this way: the goal check is on top. The tool guard
+# comes before the search so no step is spent on an ore that cannot drop. The
+# mine rule commits with `until count(raw_iron) >= $n`, so one call keeps
+# mining while the goal is short and releases the moment it is met. The last
+# rule is the search: `find_ore` walks the surface, then tunnels with
+# `branch_mine`, and its failure (normally not_found) is this skill's failure
+# after the usual three tries.
+skill get_raw_iron(n: int = 1)
+  doc "Have n raw iron, mined from iron ore or deepslate iron ore with a stone pickaxe or better; fails needs_tool without one."
+  rules:
+    count(raw_iron) >= $n -> done
+    not (has(stone_pickaxe) or has(iron_pickaxe) or has(diamond_pickaxe) or has(netherite_pickaxe)) -> fail(needs_tool)
+    near(#iron_ores, 5) -> mine(#iron_ores) until count(raw_iron) >= $n
+    true -> do find_ore(iron_ore)

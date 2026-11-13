@@ -24,8 +24,12 @@ use praxion_perception::{Answer, Caller, Perception, scaffold, workable};
 use praxion_rules::{ArgValue, FactCall};
 use praxion_world::{BlockPos, BlockState, ItemStack, Vec3, World};
 
+mod sky;
+
 #[cfg(test)]
 mod tests;
+
+pub use sky::{SKY_SCAN_BLOCKS, sky_above};
 
 /// One day of the overworld clock, in ticks.
 pub const DAY_TICKS: u64 = 24_000;
@@ -101,6 +105,12 @@ pub fn bool_fact(perception: &mut Perception, world: &World, call: &FactCall) ->
         // shelter now"); `take_shelter` waits on it, `shelter()` builds it.
         "sheltered" => match sheltered(perception, world) {
             Some(closed) => truth(closed),
+            None => Truth::Unknown(call.clone()),
+        },
+        // Nothing but air, leaves and vegetation over the head: the body is
+        // out of the ground (`go_to_surface` ends on it).
+        "sky_above" => match sky_above(perception, world) {
+            Some(open) => truth(open),
             None => Truth::Unknown(call.clone()),
         },
         // Static allowlist, no perception needed: `hunt` asks it before it

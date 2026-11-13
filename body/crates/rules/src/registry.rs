@@ -99,6 +99,9 @@ impl Facts {
             // sides of the feet and head cells are full blocks (decision
             // 2026-11-10 "A sealed shelter now"; `praxion_facts::sheltered`).
             ("sheltered", ValueType::Bool),
+            // Nothing but air, leaves and vegetation between the head and the
+            // sky (`praxion_facts::sky_above`); `go_to_surface` ends on it.
+            ("sky_above", ValueType::Bool),
         ] {
             facts.add(FactSig {
                 name,
@@ -334,14 +337,29 @@ impl Primitives {
             }],
             kind: PrimitiveKind::Discrete,
             cancellation: CancellationClass::Interruptible,
-            // Worst case, from the new start-height budget: a mountain start at
-            // y 150 tunnels for the lowest target (y 16) after a descent of
-            // 3 * 134 = 402 digs, plus the 160-dig tunnel reserve: 562 digs. At
-            // about 26 ticks per dig (the receipt, the walk onto each step, a
-            // gravel settle) that is 14,612 ticks, so 15000 covers it with room
-            // for a slow pickaxe. The interpreter must not preempt a tunnel
-            // that is progressing.
+            // A backstop only: the call ends itself with `not_found` after
+            // 2,400 ticks (`BRANCH_MAX_TICKS`, live run D, 2026-11-12). The
+            // dig budget alone allowed a mountain start at y 150 562 digs (a
+            // descent of 3 * 134 digs and the 160-dig tunnel reserve) at about
+            // 26 ticks each, 14,612 ticks, so the deadline is kept above that:
+            // the interpreter must not preempt a tunnel that is progressing.
             default_max_ticks: 15000,
+            effects: dig_down_effects.clone(),
+            per_argument: BTreeMap::new(),
+            evidence: EvidenceKind::BlockBecomesAir,
+        });
+
+        primitives.add(PrimitiveRecord {
+            name: "climb_out",
+            version: 1,
+            params: vec![],
+            kind: PrimitiveKind::Discrete,
+            cancellation: CancellationClass::Interruptible,
+            // The call ends itself with `no_way_up` after 3,000 ticks
+            // (`CLIMB_MAX_TICKS`) or 120 digs, between two digs; the deadline
+            // is a backstop above that, so a staircase that is progressing is
+            // never preempted. Same effects as `dig_down`: it breaks blocks.
+            default_max_ticks: 4000,
             effects: dig_down_effects,
             per_argument: BTreeMap::new(),
             evidence: EvidenceKind::BlockBecomesAir,
@@ -903,6 +921,7 @@ mod tests {
             "mine",
             "dig_down",
             "branch_mine",
+            "climb_out",
             "place",
             "pillar",
             "shelter",
@@ -1096,6 +1115,7 @@ mod tests {
             ("count_food", ValueType::Int),
             ("is_night", ValueType::Bool),
             ("sheltered", ValueType::Bool),
+            ("sky_above", ValueType::Bool),
         ] {
             let sig = f.get(name).unwrap_or_else(|| panic!("{name} is declared"));
             assert!(sig.params.is_empty(), "{name} takes no arguments");

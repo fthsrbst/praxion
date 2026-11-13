@@ -90,6 +90,9 @@ const MAX_UP_STEP: f64 = 0.6;
 const MIN_PLAYER_SPEED_SQUARED: f64 = 9.0e-6;
 /// Below this absolute vertical speed, velocity.y is zeroed.
 const MIN_VERTICAL_SPEED: f64 = 0.003;
+/// A position change beyond this distance in one observed tick is a teleport,
+/// not movement ([`Body::observe`]): 8 blocks.
+const OBSERVE_TELEPORT_DISTANCE: f64 = 8.0;
 
 /// Read-only block access, the only thing physics needs from the world.
 ///
@@ -149,6 +152,8 @@ pub struct Body {
     /// The sneak key of the current tick, used by the edge guard and water descent.
     trying_to_crouch: bool,
     last_input: Held,
+    /// The position of the previous [`Body::observe`], for its velocity.
+    last_observed: Option<Vec3>,
     generation: u32,
 }
 
@@ -170,6 +175,7 @@ impl Body {
             crouching: false,
             trying_to_crouch: false,
             last_input: Held::NONE,
+            last_observed: None,
             generation: 0,
         }
     }
@@ -242,7 +248,48 @@ impl Body {
         self.physics.set_old_pos(self.position);
         self.physics.set_on_ground(false);
         self.sprinting = false;
+        // A new life has no previous observation to measure a velocity against;
+        // the next one starts from zero instead of spanning the respawn.
+        self.last_observed = None;
         self.bump_generation();
+    }
+
+    /// Take the pose of the player somebody else is driving, without stepping
+    /// physics.
+    ///
+    /// Real-client (shadow) mode reads the operator's position, rotation and
+    /// on-ground flag from the mirror instead of simulating them; this puts them
+    /// into the body the driver sees. `ticks` is the number of client ticks
+    /// between the previous observation and this one, so the velocity is the
+    /// position change per tick even when a burst of them is caught up at once.
+    /// The first observation has no previous position, and a change of more than
+    /// [`OBSERVE_TELEPORT_DISTANCE`] blocks is a teleport rather than movement:
+    /// both leave the velocity at zero, and the teleport also bumps
+    /// [`Body::generation`] so a frame built against the old pose is stale.
+    ///
+    /// The old position and the bounding box follow the new position so the
+    /// collision box the interaction code tests is the one the player stands in.
+    pub fn observe(&mut self, position: Vec3, yaw: f32, pitch: f32, on_ground: bool, ticks: u64) {
+        let previous = self.last_observed.replace(position);
+        let delta = previous.map_or(Vec3::ZERO, |previous| position - previous);
+        let teleported = delta.length() > OBSERVE_TELEPORT_DISTANCE;
+        // The loop never observes without at least one tick in between; the
+        // floor keeps a caller's zero from turning the velocity into an infinity.
+        let ticks = ticks.max(1);
+
+        self.position = Position::new(position);
+        self.look = LookDirection::new(yaw, pitch);
+        self.physics.set_old_pos(self.position);
+        self.physics.bounding_box = self.dimensions.make_bounding_box(position);
+        self.physics.velocity = if teleported {
+            Vec3::ZERO
+        } else {
+            delta / ticks as f64
+        };
+        self.physics.set_on_ground(on_ground);
+        if teleported {
+            self.bump_generation();
+        }
     }
 
     /// One client tick: the frame's held controls, then azalea's physics order.

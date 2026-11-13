@@ -25,6 +25,8 @@ mod driver;
 mod error;
 mod events;
 mod frame;
+mod hands;
+mod hands_link;
 mod interact;
 mod login;
 mod movement;
@@ -32,6 +34,7 @@ mod physics;
 mod play;
 mod script;
 mod session;
+mod shadow;
 mod win;
 mod worldfeed;
 
@@ -46,11 +49,14 @@ pub use driver::{Driver, DriverHandle, TickView};
 pub use error::Error;
 pub use events::Event;
 pub use frame::{Click, ControlFrame, FrameError, Held, Look, MenuAction, MenuMode};
+pub use hands::{ClientOptions, HandsLine, Translator, observed_report};
+pub use hands_link::{HandsLink, HandsReply, release_all};
 pub use interact::{
     ActuatorState, AppliedReport, Outgoing, Pick, held_item, pick, pick_block_looking,
 };
 pub use login::protocol_version;
 pub use physics::{Blocks, Body, ToolFit, tool_fit};
 pub use script::{Script, ScriptLook, Step};
-pub use session::{ConnectOptions, Session, SessionStats};
+pub use session::{ConnectOptions, Host, Session, SessionStats};
+pub use shadow::{HandsConfig, ShadowSession};
 pub use worldfeed::{ObservedPacket, WorldFeed};

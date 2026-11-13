@@ -1,33 +1,51 @@
-# Stone needs a wooden pickaxe or better; this skill builds the pickaxe if
-# it has none. Depth 3: get_cobblestone -> get_wooden_pickaxe -> leaf. With the
-# pickaxe in hand and stone in reach it mines. With no stone in reach it first
-# explores (find_stone), and digs a staircase down when exploring finds none:
-# in flat terrain stone lies three to six blocks under the dirt and no ray ever
-# reaches it from the surface. Without the pickaxe the wood chain comes first,
-# because stone cannot be mined yet. Before the walk the body takes its placed
-# table along: the wooden pickaxe leaves three planks, one short of a new table,
-# and a body far from the trees then explored for one more log instead of
-# crafting. This skill decides to leave, so the rule lives here, not in the
-# caller (only the innermost frame selects a rule each tick).
+# Stone needs a pickaxe; any pickaxe counts (`#pickaxes`), so a body that holds
+# a stone pickaxe and no wooden one mines at once. Only a body with no pickaxe
+# at all builds the wooden one first. Depth 3: get_cobblestone ->
+# get_wooden_pickaxe -> leaf.
 #
-# Why explore, then dig, without the two rules fighting (interpreter 6.1):
-# the highest true rule fires, but a rule whose child skill just failed is
-# ineligible for that one tick only. So the two rules share one guard, the
-# search comes first, and the dig is the rule underneath: it fires exactly on
-# the tick the search frame failed, and `dig_down` is a discrete primitive,
-# which the interpreter runs to its outcome before it evaluates any guard
-# again, so the search cannot take over mid-dig. Once stone is near, the mine
-# rule above both wins and the dig ends by itself (confirmed). The failure cap
-# counts per rule: a failed search counts once for the search rule (a third
-# one fails the skill), a failed dig once for the dig rule, and a finished
-# search or dig clears its own count. The search itself needs three failed
-# explores to fail its frame (one cap, inside find_stone).
+# The order is dig, then explore. A person with a pickaxe and no stone in sight
+# does not walk off first: in flat terrain stone lies three to six blocks under
+# the dirt and no ray ever reaches it from the surface, so the body digs a
+# staircase down where it stands (`find_stone`) and explores the surface
+# (`search_surface`) only when that ground refuses the stair, and the stair
+# itself steps a few blocks aside before it refuses (see find_stone). Live run
+# A (2026-11-12) had it the other way round and spent three minutes of the
+# goal's budget on three 1200-tick `explore(stone)` walks before it dug a single
+# block; run B had the order right but met a refused spot and walked the same
+# three minutes. `explore(stone)` now stops after 300 ticks a call, so the
+# whole surface search is bounded at 45 seconds.
+#
+# Why the two search rules do not fight (interpreter 6.1): the highest true
+# rule fires, but a rule whose CHILD SKILL just failed is ineligible for that
+# one tick only. So the two rules share one guard, the dig comes first, and the
+# exploration is the rule underneath: it fires exactly on the tick the dig frame
+# failed, and the dig fires again on the tick the search frame failed. Both
+# actions are calls to a skill, which is the point: a failed PRIMITIVE retries
+# in place on the next tick and the rule below would never run, and a running
+# action needs a frame of its own because a higher true rule of the same frame
+# takes the body back at once (`explore` is continuous and would be released
+# after one tick).
+#
+# The failure cap counts per rule: a failed dig counts once for the dig rule (a
+# third one fails this skill with the dig's kind), a failed search once for the
+# search rule (a third one fails it with not_found), and a finished search or
+# dig clears its own count. The search itself needs three failed explores to
+# fail its frame (one cap, inside search_surface), 900 ticks at most.
+#
+# Before it moves on the body takes its placed table along: the wooden pickaxe
+# leaves three planks, one short of a new table, and a body far from the trees
+# then explored for one more log instead of crafting. This skill decides to
+# move, so the rule lives here, not in the caller (only the innermost frame
+# selects a rule each tick). `mine` returns only once the inventory holds the
+# table (its pickup walk checks the inventory for a block with a certain drop);
+# run B (2026-11-12) mined it, never held it, and later stood at the bottom of
+# its dig with no table, three planks short of one.
 skill get_cobblestone(n: int = 3)
-  doc "Collect at least n cobblestone, crafting a wooden pickaxe first if needed."
+  doc "Collect at least n cobblestone, crafting a pickaxe first if the body holds none."
   rules:
     count(cobblestone) >= $n -> done
-    has(wooden_pickaxe) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table) -> mine(crafting_table)
-    has(wooden_pickaxe) and near(stone, 5) -> mine(stone) until count(cobblestone) >= $n
-    has(wooden_pickaxe) -> do find_stone()
-    has(wooden_pickaxe) -> dig_down(stone)
+    has(#pickaxes) and not near(stone, 5) and near(crafting_table, 4) and not has(crafting_table) -> mine(crafting_table)
+    has(#pickaxes) and near(stone, 5) -> mine(stone) until count(cobblestone) >= $n
+    has(#pickaxes) and not near(stone, 5) -> do find_stone()
+    has(#pickaxes) and not near(stone, 5) -> do search_surface(stone)
     true -> do get_wooden_pickaxe()

@@ -82,6 +82,35 @@ pub struct SlotFact {
     pub count: u32,
 }
 
+/// What the body can see and hear around itself (proposal 2026-11-12 "Snapshot
+/// facts: `nearby`").
+///
+/// Every part is additive and optional: a map or a list that is empty is not
+/// written, and [`Facts::nearby`] itself is omitted when all three are empty, so
+/// a snapshot with nothing notable stays byte-identical and `PORT_VERSION`
+/// stays 0.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Nearby {
+    /// Entity count per kind id, without the `minecraft:` namespace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub entities: BTreeMap<String, u32>,
+    /// Notable block count per block id, without the namespace; a bed of any
+    /// colour is reported as `bed`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blocks: BTreeMap<String, u32>,
+    /// Distinct sound ids heard recently, newest first, without the namespace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<String>,
+}
+
+impl Nearby {
+    /// Whether the body has nothing to report. An empty value is never written
+    /// to the wire (see [`Facts::nearby`]).
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty() && self.blocks.is_empty() && self.sounds.is_empty()
+    }
+}
+
 /// The body facts a snapshot carries (proposal §2.2, §2.5).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Facts {
@@ -116,6 +145,11 @@ pub struct Facts {
     /// stays byte-identical and `PORT_VERSION` stays 0.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sheltered: bool,
+    /// What the body can see and hear around itself (proposal 2026-11-12).
+    /// Omitted when all three parts are empty, so an unchanged golden frame
+    /// stays byte-identical and `PORT_VERSION` stays 0.
+    #[serde(default, skip_serializing_if = "nearby_absent")]
+    pub nearby: Option<Nearby>,
 }
 
 impl Default for Facts {
@@ -135,6 +169,7 @@ impl Default for Facts {
             slots: Vec::new(),
             world_valid: true,
             sheltered: false,
+            nearby: None,
         }
     }
 }
@@ -149,6 +184,12 @@ fn is_valid(world_valid: &bool) -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// `nearby` is written only when it carries something: an empty value and an
+/// absent one are the same fact.
+fn nearby_absent(nearby: &Option<Nearby>) -> bool {
+    nearby.as_ref().is_none_or(Nearby::is_empty)
 }
 
 /// State on demand: connect, `resync_request` and every wake.

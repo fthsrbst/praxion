@@ -6,7 +6,7 @@ use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use praxion_gamedata as gamedata;
 use praxion_headless::{ControlFrame, Held, Look, MenuAction, MenuMode};
-use praxion_perception::{BlockFilter, BlockRegion, Caller, scaffold};
+use praxion_perception::{BlockFilter, BlockRegion, Caller, Perception, scaffold};
 use praxion_planner::{Inventory as PlanInventory, WALK_TOLERANCE_DEG, center, look_towards};
 use praxion_world::{BlockDescription, BlockState, World};
 
@@ -370,7 +370,7 @@ pub(crate) fn cell_centre(pos: BlockPos) -> Vec3 {
 
 /// The nearest visible block of `wanted` within `radius`.
 pub(crate) fn block_target(ctx: &mut Ctx<'_>, wanted: &str, radius: u32) -> Option<BlockPos> {
-    block_target_where(ctx, wanted, radius, |_, _| true)
+    block_target_where(ctx, wanted, radius, |_, _, _| true)
 }
 
 /// The nearest visible `wanted` block within `radius` that `accept` allows for
@@ -379,7 +379,7 @@ pub(crate) fn block_target_where(
     ctx: &mut Ctx<'_>,
     wanted: &str,
     radius: u32,
-    accept: impl Fn(BlockPos, BlockState) -> bool,
+    accept: impl Fn(&Perception, BlockPos, BlockState) -> bool,
 ) -> Option<BlockPos> {
     if let Some(tag) = wanted.strip_prefix('#') {
         let eye = ctx.perception.eye_cell(ctx.world)?;
@@ -393,7 +393,7 @@ pub(crate) fn block_target_where(
             .filter(|fact| {
                 gamedata::block_in_tag(fact.kind.to_str(), tag)
                     && !scaffold::is_scaffold(fact.pos)
-                    && accept(fact.pos, fact.state)
+                    && accept(&*ctx.perception, fact.pos, fact.state)
             })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
             .map(|fact| fact.pos);
@@ -401,15 +401,16 @@ pub(crate) fn block_target_where(
     let kind = wanted.parse::<BlockKind>().ok()?;
     // The body's own scaffolding is never a target
     // (`praxion_perception::scaffold`).
-    let accept =
-        |pos: BlockPos, state: BlockState| !scaffold::is_scaffold(pos) && accept(pos, state);
+    let accept = |perception: &Perception, pos: BlockPos, state: BlockState| {
+        !scaffold::is_scaffold(pos) && accept(perception, pos, state)
+    };
     let nearest = ctx
         .perception
         .nearest_block(Caller::Other, ctx.world, kind, radius)
         .value()
         .map(|fact| (fact.pos, fact.state));
     if let Some((pos, state)) = nearest
-        && accept(pos, state)
+        && accept(&*ctx.perception, pos, state)
     {
         return Some(pos);
     }
@@ -422,7 +423,7 @@ pub(crate) fn block_target_where(
     answer
         .value()?
         .iter()
-        .filter(|fact| fact.kind == kind && accept(fact.pos, fact.state))
+        .filter(|fact| fact.kind == kind && accept(&*ctx.perception, fact.pos, fact.state))
         .min_by(|a, b| a.distance.total_cmp(&b.distance))
         .map(|fact| fact.pos)
 }

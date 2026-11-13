@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use azalea_buf::AzBuf;
 use azalea_core::{
+    heightmap_kind::HeightmapKind,
     delta::LpVec3,
     entity_id::MinecraftEntityId,
     game_type::{GameMode, OptionalGameType},
@@ -72,6 +73,19 @@ fn login() -> ClientboundLogin {
     }
 }
 
+/// 256 columns at ceil(log2(384 + 1)) = 9 bits each pack into 36 u64 words.
+fn surface_heightmap_data() -> Box<[u64]> {
+    azalea_world::heightmap::Heightmap::new(
+        HeightmapKind::WorldSurface,
+        384,
+        -64,
+        vec![0u64; 36].into_boxed_slice(),
+    )
+    .data
+    .data
+    .clone()
+}
+
 fn chunk_packet(x: i32, z: i32) -> ClientboundLevelChunkWithLight {
     let chunk = Chunk::default();
     let mut buffer = Vec::new();
@@ -82,7 +96,10 @@ fn chunk_packet(x: i32, z: i32) -> ClientboundLevelChunkWithLight {
         x,
         z,
         chunk_data: ClientboundLevelChunkPacketData {
-            heightmaps: Vec::new(),
+            // A live server's packet carries the `WorldSurface` heightmap (every
+            // column at the world's minimum y until a block raises it), which
+            // `sky_above` reads through perception.
+            heightmaps: vec![(HeightmapKind::WorldSurface, surface_heightmap_data())],
             buffer: Arc::new(buffer.into_boxed_slice()),
             block_entities: Vec::new(),
         },
@@ -543,7 +560,7 @@ fn unknown_helper_facts_propagate() {
     perception.begin_tick(&world);
     let mut facts = Facts::new(&mut perception, &world);
 
-    for name in ["health", "food", "air", "burning", "is_night", "sheltered"] {
+    for name in ["health", "food", "air", "burning", "is_night", "sheltered", "sky_above"] {
         assert_eq!(
             facts.bool_fact(&call(name, vec![])),
             Truth::Unknown(call(name, vec![])),
@@ -726,4 +743,77 @@ fn a_body_standing_on_a_dirt_path_is_sheltered_by_the_cells_around_its_feet() {
         }),
     );
     assert_eq!(sheltered_fact(&world), Truth::True);
+}
+
+/// A world with the body's feet at (8, 64, 8) and a heightmap in its chunk.
+fn surface_world() -> World {
+    let mut world = World::new();
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::LevelChunkWithLight(chunk_packet(0, 0)),
+    );
+    world.apply_serverbound_play(
+        0,
+        &ServerboundGamePacket::MovePlayerPos(ServerboundMovePlayerPos {
+            pos: Vec3::new(8.5, 64.0, 8.5),
+            flags: azalea_protocol::common::movements::MoveFlags {
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        }),
+    );
+    world
+}
+
+fn sky_fact(world: &World) -> Truth {
+    let mut perception = Perception::new(Config::default());
+    perception.begin_tick(world);
+    Facts::new(&mut perception, world).bool_fact(&call("sky_above", vec![]))
+}
+
+#[test]
+fn sky_above_is_true_under_open_sky_and_false_under_a_roof() {
+    let mut world = surface_world();
+    // Ground under the feet, nothing over the head.
+    set_block(
+        &mut world,
+        BlockPos::new(8, 63, 8),
+        praxion_world::BlockState::from(BlockKind::Stone),
+    );
+    assert_eq!(sky_fact(&world), Truth::True, "open sky");
+
+    // A canopy leaf three blocks up leaves the sky in sight.
+    set_block(
+        &mut world,
+        BlockPos::new(8, 67, 8),
+        praxion_world::BlockState::from(BlockKind::OakLeaves),
+    );
+    assert_eq!(sky_fact(&world), Truth::True, "a canopy is the surface");
+
+    // A stone roof does not, wherever it sits above the head.
+    set_block(
+        &mut world,
+        BlockPos::new(8, 70, 8),
+        praxion_world::BlockState::from(BlockKind::Stone),
+    );
+    assert_eq!(sky_fact(&world), Truth::False, "a stone roof");
+}
+
+#[test]
+fn sky_above_is_unknown_without_a_heightmap() {
+    // A chunk packet with no heightmap: the column is not known to be covered,
+    // so the fact must not say so.
+    let mut packet = chunk_packet(0, 0);
+    packet.chunk_data.heightmaps = Vec::new();
+    let mut world = World::new();
+    world.follow(0);
+    world.apply_clientbound_play(0, &ClientboundGamePacket::Login(login()));
+    world.apply_clientbound_play(0, &ClientboundGamePacket::LevelChunkWithLight(packet));
+    set_player(&mut world);
+    assert_eq!(
+        sky_fact(&world),
+        Truth::Unknown(call("sky_above", vec![]))
+    );
 }

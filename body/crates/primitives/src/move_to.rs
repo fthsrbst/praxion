@@ -29,6 +29,9 @@ pub(crate) struct Move {
     /// re-resolve it: swimming can put the marker behind a ledge, and losing
     /// sight of a chosen goal is not the same as the goal disappearing.
     block_goal: Option<BlockPos>,
+    /// The goal is exactly `block_goal`, not "near" a block of that name: the
+    /// walk of [`Move::to_cell`].
+    exact: bool,
 }
 
 impl Move {
@@ -42,6 +45,28 @@ impl Move {
             waited: 0,
             path_ticks: 0,
             block_goal: None,
+            exact: false,
+        }
+    }
+
+    /// A walk onto exactly `cell`, for a primitive that moves the body a few
+    /// blocks as one step of its own work (`dig_down` stepping aside from a
+    /// start it cannot dig at). It only walks: a route that needs a block
+    /// broken or placed is not taken, so the caller never finds the body
+    /// digging on a step it did not ask for.
+    pub(crate) fn to_cell(cell: BlockPos) -> Self {
+        let mut planner = body_planner();
+        planner.set_allow_world_changes(false);
+        Self {
+            target: format!("{}, {}, {}", cell.x, cell.y, cell.z),
+            planner,
+            follower: None,
+            observe: None,
+            tries: 0,
+            waited: 0,
+            path_ticks: 0,
+            block_goal: Some(cell),
+            exact: true,
         }
     }
 
@@ -152,6 +177,9 @@ impl Move {
     }
 
     fn resolve_goal(&mut self, ctx: &mut Ctx<'_>) -> Option<Goal> {
+        if self.exact {
+            return self.block_goal.map(Goal::Block);
+        }
         // `Goal::Block` wants the feet in exactly that cell; a solid block (a
         // tree, a marker) can never be entered. Move *to* the block means the
         // nearest standable cell within reach of it, the same rule entities

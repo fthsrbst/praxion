@@ -1,8 +1,11 @@
 # Walk until a block is within mining reach. It is a skill of its own so that a
 # failed search is ONE failure of the caller's rule: three failed explores
 # inside this frame (the per-rule cap) fail it with not_found, and the caller
-# then falls through to its next rule, see find_ore. Same shape as find_stone,
-# for any block.
+# then falls through to its next rule, see find_ore. It serves any block; only
+# `explore(stone)` is given a short budget (300 ticks a call, so three failed
+# calls end in 45 seconds): stone under flat ground is dug for (`find_stone`),
+# and walking the surface for it is the last resort of `get_cobblestone`. Every
+# other target keeps the full 1200-tick call.
 skill search_surface(block: block)
   doc "Explore the surface until the given block is within mining reach; fails not_found when exploring runs out."
   rules:

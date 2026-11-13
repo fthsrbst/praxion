@@ -1,5 +1,6 @@
 //! Wire-level and loopback tests (proposal §2.6, unit list).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Cursor;
 use std::net::TcpStream;
@@ -13,8 +14,8 @@ use crate::forwards;
 use crate::frame::{FrameError, FrameReader, MAX_FRAME_SIZE, write_frame, write_payload};
 use crate::server::{ConnectionState, PortConfig, PortServer, PublishOutcome};
 use crate::wire::{
-    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, PORT_VERSION, SlotFact, SayPriority,
-    Snapshot, StackEntry,
+    BodyMessage, BrainMessage, ByeReason, Capability, Command, Facts, Nearby, PORT_VERSION, SlotFact,
+    SayPriority, Snapshot, StackEntry,
 };
 
 fn config() -> PortConfig {
@@ -26,6 +27,27 @@ fn config() -> PortConfig {
 
 fn server() -> PortServer {
     PortServer::bind("127.0.0.1:0".parse().unwrap(), config()).unwrap()
+}
+
+/// The golden snapshot with surroundings: [`snapshot`] plus `nearby` (proposal
+/// 2026-11-12). The plain snapshot stays without it, which proves the new key is
+/// additive.
+fn nearby_snapshot() -> Snapshot {
+    let mut snapshot = snapshot(3);
+    snapshot.facts.nearby = Some(Nearby {
+        entities: [("cow".to_owned(), 2), ("zombie".to_owned(), 1)]
+            .into_iter()
+            .collect(),
+        blocks: [
+            ("coal_ore".to_owned(), 3),
+            ("oak_log".to_owned(), 12),
+            ("water".to_owned(), 40),
+        ]
+        .into_iter()
+        .collect(),
+        sounds: vec!["entity.creeper.primed".to_owned()],
+    });
+    snapshot
 }
 
 fn event(seq: u64, tick: u64) -> Event {
@@ -65,6 +87,7 @@ fn snapshot(seq: u64) -> Snapshot {
             slots: Vec::new(),
             world_valid: true,
             sheltered: false,
+            nearby: None,
         },
         stale_ticks: 0,
     }
@@ -334,6 +357,52 @@ fn sheltered_is_sent_only_when_the_body_is_sealed_in() {
     facts.sheltered = true;
     let json = serde_json::to_string(&facts).unwrap();
     assert!(json.ends_with(r#","sheltered":true}"#), "{json}");
+    assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
+}
+
+#[test]
+fn nearby_is_sent_only_when_there_is_something_to_report() {
+    // Proposal 2026-11-12 "Snapshot facts: nearby": additive and optional. An
+    // absent or empty value is never written, so every golden frame before the
+    // change stays byte-identical.
+    let mut facts = Facts::default();
+    assert_eq!(facts.nearby, None);
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(!json.contains("nearby"), "{json}");
+    let back: Facts = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.nearby, None, "an absent key reads as nothing to report");
+
+    facts.nearby = Some(Nearby::default());
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(!json.contains("nearby"), "an empty value is not written: {json}");
+
+    let golden = serde_json::to_string(&BodyMessage::Snapshot(snapshot(5))).unwrap();
+    assert!(!golden.contains("nearby"), "{golden}");
+
+    facts.nearby = Some(Nearby {
+        entities: [("cow".to_owned(), 2), ("zombie".to_owned(), 1)]
+            .into_iter()
+            .collect(),
+        blocks: [("coal_ore".to_owned(), 3), ("oak_log".to_owned(), 12)]
+            .into_iter()
+            .collect(),
+        sounds: vec!["entity.creeper.primed".to_owned()],
+    });
+    let json = serde_json::to_string(&facts).unwrap();
+    assert_eq!(
+        json,
+        r#"{"health":0.0,"food":0,"air":0,"is_night":false,"day_time":0,"dimension":"","pos":[0,0,0],"inventory":{},"nearby":{"entities":{"cow":2,"zombie":1},"blocks":{"coal_ore":3,"oak_log":12},"sounds":["entity.creeper.primed"]}}"#
+    );
+    assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
+
+    // An empty part is not written; the key stays because another part is there.
+    facts.nearby = Some(Nearby {
+        entities: BTreeMap::new(),
+        blocks: [("water".to_owned(), 40)].into_iter().collect(),
+        sounds: Vec::new(),
+    });
+    let json = serde_json::to_string(&facts).unwrap();
+    assert!(json.ends_with(r#","nearby":{"blocks":{"water":40}}}"#), "{json}");
     assert_eq!(serde_json::from_str::<Facts>(&json).unwrap(), facts);
 }
 
@@ -857,6 +926,10 @@ fn body_golden_frames() -> Vec<(&'static str, BodyMessage)> {
             },
         ),
         ("rust_snapshot.bin", BodyMessage::Snapshot(snapshot(3))),
+        (
+            "rust_snapshot_nearby.bin",
+            BodyMessage::Snapshot(nearby_snapshot()),
+        ),
         ("rust_dropped.bin", BodyMessage::Dropped { seq: 812, n: 37 }),
         (
             "rust_pong.bin",

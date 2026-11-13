@@ -2,11 +2,12 @@
 
 use azalea_core::position::{BlockPos, Vec3};
 use azalea_registry::builtin::{BlockKind, EntityKind};
+use praxion_facts::item_count;
 use praxion_gamedata as gamedata;
 use praxion_headless::ControlFrame;
 use praxion_interpreter::Outcome;
-use praxion_perception::{Answer, Caller, EntityFilter, exposes_fluid, workable};
-use praxion_planner::center;
+use praxion_perception::{Answer, Caller, EntityFilter, Perception, exposes_fluid, workable};
+use praxion_planner::{blocks, center};
 use praxion_world::BlockState;
 
 use crate::common::{
@@ -15,6 +16,18 @@ use crate::common::{
 };
 use crate::frontier::nearest_known_block;
 use crate::runner::{Ctx, IntentSpec};
+
+/// The typed failure of a dig the body cannot finish inside its remaining air:
+/// the eyes are under water and the block outlasts the breath. A drowned dig
+/// never completes, and every restart dug the same cell again until the goal's
+/// budget ran out (live run A, 2026-11-12: eight 185-tick `mine` calls on
+/// `-96, 58, 10`, each preempted by the drowning reflex).
+const UNDERWATER: &str = "underwater";
+
+/// Air ticks a submerged dig must leave for the drowning reflex and its walk
+/// to the surface: the break estimate is approximate, and the reflex needs a
+/// turn before the air runs out.
+const AIR_MARGIN_TICKS: u32 = 40;
 
 /// How far `mine` looks in the known map for a target it cannot see yet. One
 /// block wider than the skills' `near(T, 5)`: the fact measures from the eye
@@ -74,7 +87,7 @@ enum TargetCheck {
 }
 
 /// Decide the current target's fate before the tick acts. `settled` is true
-/// once the runner settled a receipt and started the pickup marker. A target
+/// once the runner settled a receipt for the current target. A target
 /// that vanished before it started is forgotten even while a pickup marker is
 /// active, so a dropped `Dig` spec cannot leave the body clicking air.
 fn target_check(
@@ -132,6 +145,18 @@ pub(crate) struct Mine {
     /// `out_of_reach` for one two or more blocks above the feet. The call
     /// fails with it once no candidate is left.
     pub(crate) rejected_kind: Option<&'static str>,
+    /// The one item breaking the current target always drops (see
+    /// [`sure_drop`]), or `None` when it drops nothing certain. The pickup walk
+    /// ends only once the inventory holds more of it than before the break.
+    pub(crate) sure_drop: Option<&'static str>,
+    /// A dig receipt settled `confirmed` for the current target. The pickup
+    /// marker cannot say it: it stays set across targets of a dig-through so
+    /// the runner keeps the primitive alive.
+    pub(crate) settled: bool,
+    /// How many of [`Mine::sure_drop`] the body held when the pickup walk
+    /// began: the break's own drop cannot be collected before it spawns, so
+    /// the count at that moment is the "before".
+    pub(crate) held_before: Option<u32>,
 }
 
 /// Aligned ticks without the crosshair on the target before the call gives up.
@@ -147,6 +172,7 @@ const UPHILL_WALK_TICKS: u32 = 60;
 
 impl Mine {
     pub(crate) fn begin_pickup(&mut self) {
+        self.settled = true;
         if self.pickup.is_none() {
             self.pickup = Some(Pickup::default());
         }
@@ -158,6 +184,13 @@ impl Mine {
         self.waited = 0;
         self.tool_waited = 0;
         self.blocked = 0;
+        // The receipt that settled belonged to the block before. Left set,
+        // `target_check` read it as "a receipt settled for THIS target" and
+        // dug the new target again under a new receipt, tick after tick, the
+        // whole time it was being dug (run B, 2026-11-12: nine intents on one
+        // log, every one expiring unconfirmed). The pickup marker itself must
+        // stay: it also keeps the runner's primitive alive between targets.
+        self.settled = false;
         if let Some(dig) = &mut self.dig_through {
             dig.digging_occluder = digging_occluder;
             dig.target_started = false;
@@ -171,6 +204,7 @@ impl Mine {
         self.target = None;
         self.waited = 0;
         self.tool_waited = 0;
+        self.settled = false;
         if let Some(dig) = &mut self.dig_through {
             dig.digging_occluder = false;
             dig.target_started = false;
@@ -185,6 +219,9 @@ impl Mine {
             dig.target_started = false;
         }
         self.tool_waited = 0;
+        // The settled receipt is spent: the new one has to settle before the
+        // cell counts as broken again.
+        self.settled = false;
     }
 
     /// The runner registered the pending intent. The driver drops a spec it
@@ -261,6 +298,16 @@ impl Mine {
         self.forget_target();
     }
 
+    /// One tick of walking toward a target above reach: counts it and says
+    /// whether the call must give up now. It does when the body is right under
+    /// the target (no step helps) or has walked [`UPHILL_WALK_TICKS`] without
+    /// the ground rising to it.
+    fn give_up_uphill(&mut self, eye: Vec3, aim: Vec3) -> bool {
+        let horizontal = ((aim.x - eye.x).powi(2) + (aim.z - eye.z).powi(2)).sqrt();
+        self.uphill = self.uphill.saturating_add(1);
+        horizontal <= UNDER_TARGET_RADIUS || self.uphill > UPHILL_WALK_TICKS
+    }
+
     pub(crate) fn tick(
         &mut self,
         ctx: &mut Ctx<'_>,
@@ -282,7 +329,7 @@ impl Mine {
             .is_some_and(|dig| dig.digging_occluder);
         match target_check(
             gone,
-            self.pickup.is_some(),
+            self.settled,
             dig_through,
             digging_occluder,
             target_started,
@@ -319,7 +366,22 @@ impl Mine {
             let accept = |pos: BlockPos, state: BlockState| {
                 !rejected.contains(&pos) && workable(pos, state, |cell| world.block_state(cell))
             };
-            if let Some(target) = block_target_where(ctx, &self.name, 5, accept) {
+            // A block inside a pool (a lake bed, a shore under the water line)
+            // is mined with the eyes under water: slow, and over in one breath.
+            // A dry alternative in the same reach wins, so a body at the edge
+            // of a pool walks ashore instead of drowning beside it. When no dry
+            // cell can stand beside any candidate, the underwater check below
+            // decides, and the dig is refused rather than restarted forever.
+            //
+            // The stand cells are read from what perception remembers: a cell
+            // it has not seen is no evidence of a dry stand.
+            let dry = |perception: &Perception, pos: BlockPos, state: BlockState| {
+                accept(pos, state)
+                    && dry_stand(pos, |cell| perception.known(cell).map(|seen| seen.state))
+            };
+            if let Some(target) = block_target_where(ctx, &self.name, 5, dry).or_else(|| {
+                block_target_where(ctx, &self.name, 5, |_, pos, state| accept(pos, state))
+            }) {
                 self.set_target(target, false);
             } else {
                 if self.waited == 0
@@ -341,7 +403,15 @@ impl Mine {
                     // a chosen target out of reach is walked to below (seed 101:
                     // stone 4.4 blocks away under the floor was never tried).
                     let eye = ctx.body.eye_position();
-                    if ctx.body.on_ground() {
+                    // A hidden target above reach is not dug toward: the soft
+                    // blocks between are the roof of the body's own hole, and
+                    // tunnelling up through them brings a log six blocks over
+                    // the head no nearer (run B, 2026-11-12: the body at the
+                    // bottom of its dig broke a wall block and the next, then
+                    // clicked a log it could never hit). It is walked toward
+                    // or failed `out_of_reach` below, like a visible one.
+                    let overhead = above_reach(eye.y, cell, ctx.body.block_interaction_range() - 0.25);
+                    if ctx.body.on_ground() && !overhead {
                         let feet = ctx.body.position().to_block_pos_floor();
                         let blocking =
                             ctx.perception
@@ -396,6 +466,17 @@ impl Mine {
                     if let Some((cell, _)) =
                         nearest_known_block(ctx.perception, ctx.world, &self.name, KNOWN_SEARCH_RADIUS, &self.rejected)
                     {
+                        let eye = ctx.body.eye_position();
+                        let reach = ctx.body.block_interaction_range() - 0.25;
+                        if above_reach(eye.y, cell, reach) && self.give_up_uphill(eye, center(cell)) {
+                            log::debug!(
+                                "mine: known {:?} at {:?} is higher than reach above the eye {:?}",
+                                self.name,
+                                cell,
+                                eye
+                            );
+                            return (frame, None, Some(Outcome::Failed("out_of_reach".into())));
+                        }
                         if self.waited > 80 {
                             log::debug!(
                                 "mine: known {:?} at {:?} never came into sight; body at {:?}",
@@ -436,9 +517,7 @@ impl Mine {
         // (user decision 2026-11-10).
         if above_reach(eye.y, target, reach) {
             let aim = center(target);
-            let horizontal = ((aim.x - eye.x).powi(2) + (aim.z - eye.z).powi(2)).sqrt();
-            self.uphill = self.uphill.saturating_add(1);
-            if horizontal <= UNDER_TARGET_RADIUS || self.uphill > UPHILL_WALK_TICKS {
+            if self.give_up_uphill(eye, aim) {
                 log::debug!(
                     "mine: {:?} at {:?} is higher than reach above the eye {:?}",
                     self.name,
@@ -457,6 +536,31 @@ impl Mine {
             return (pickup_frame(ctx, center(target)), None, None);
         }
         self.waited = 0;
+        // In reach: the stand position of this dig is the body's own cell. A
+        // block the breath cannot outlast is not started and not continued:
+        // the drowning reflex would preempt it mid-dig tick after tick while
+        // every restart began the same block from zero (run A, 2026-11-12).
+        let target_state = ctx.world.block_state(target);
+        // What breaking it certainly drops, so the pickup walk afterwards can
+        // check the inventory instead of trusting that a drop which left the
+        // body's view was collected. A soft block dug only to get at the
+        // wanted one is never watched.
+        let digging_occluder = self
+            .dig_through
+            .as_ref()
+            .is_some_and(|dig| dig.digging_occluder);
+        self.sure_drop = target_state
+            .filter(|_| !digging_occluder)
+            .and_then(sure_drop);
+        if target_state.is_some_and(|state| drowned_before_break(ctx, state)) {
+            log::debug!(
+                "mine: {:?} at {:?} outlasts the breath with the eyes under water; body at {:?}",
+                self.name,
+                target,
+                ctx.body.position()
+            );
+            return (frame, None, Some(Outcome::Failed(UNDERWATER.into())));
+        }
         // The runner's `started` covers only the first target of a call; a
         // dig-through selects later targets after it is already true, so the
         // dig state carries the per-target flag. The flag moves only when the
@@ -486,7 +590,7 @@ impl Mine {
                 return (frame, None, None);
             }
         };
-        if !target_started && let Some(state) = ctx.world.block_state(target) {
+        if !target_started && let Some(state) = target_state {
             match hold_tool(ctx, state, &mut self.hand, &mut self.tool_waited, &mut frame) {
                 ToolStep::Ready => {}
                 ToolStep::Pending => return (frame, None, None),
@@ -539,18 +643,39 @@ impl Mine {
     }
 
     /// Walk to the dropped item for at most [`PICKUP_TICKS`] ticks after the
-    /// break. A missing item entity means it was collected (or never spawned),
-    /// which also ends the phase. The outcome is always `Confirmed`: the block
-    /// break is what the mine receipt settled, and a failed pickup is not a
-    /// failed dig.
+    /// break. The outcome is always `Confirmed`: the block break is what the
+    /// mine receipt settled, and a failed pickup is not a failed dig.
+    ///
+    /// When breaking the block certainly drops one item ([`sure_drop`]) the
+    /// phase ends when the inventory holds more of it than it did at the
+    /// start, and not before: a drop that left the body's view, or another
+    /// item picked up on the way, is no proof that this one was collected (run
+    /// B, 2026-11-12: the placed crafting table was mined "to take it along"
+    /// and the body never held it). The walk follows an item entity of the
+    /// wanted kind, looks for another one when the tracked one is gone without
+    /// the inventory growing, and keeps to the cell the block stood in while
+    /// none is in sight. Without a certain drop the old rule stands: a drop
+    /// seen and then missing for a few ticks was collected.
     fn tick_pickup(
         &mut self,
         ctx: &mut Ctx<'_>,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
         let mut frame = idle(ctx);
+        let wanted = self.sure_drop;
+        let held = wanted.and_then(|item| item_count(ctx.perception, ctx.world, item));
+        // The drop cannot be collected before it has spawned, and a block's
+        // drop has a pickup delay: the count on the first tick of the walk is
+        // the "before".
+        if self.held_before.is_none() {
+            self.held_before = held;
+        }
+        let collected = matches!(
+            (self.held_before, held),
+            (Some(before), Some(now)) if now > before
+        );
         let pickup = self.pickup.as_mut().expect("checked by the caller");
         pickup.ticks += 1;
-        if pickup.ticks > PICKUP_TICKS {
+        if pickup.ticks > PICKUP_TICKS || collected {
             return (frame, None, Some(Outcome::Confirmed));
         }
         let items = match ctx.perception.entities_near(
@@ -563,23 +688,34 @@ impl Mine {
             // An unanswerable entity query is not proof the item is gone.
             Answer::Unknown(_) => None,
         };
+        // An item entity whose stack the server has not sent yet may still be
+        // the one: it is followed, and dropped again once its kind is known.
+        let is_wanted = |fact: &praxion_perception::EntityFact| match (wanted, fact.item) {
+            (Some(item), Some(kind)) => gamedata::normalize(kind.to_str()) == item,
+            _ => true,
+        };
+        let last = pickup
+            .last
+            .or_else(|| self.target.map(center))
+            .unwrap_or_else(|| ctx.body.position());
         let target = match items.as_deref() {
-            Some(items) => match pickup.target(items) {
+            Some(items) => match pickup.target_where(items, is_wanted) {
                 Some(position) => position,
-                None if pickup.gone() => {
+                None if pickup.gone() && wanted.is_none() => {
                     // It was visible and has been gone for a few ticks:
                     // picked up.
                     return (frame, None, Some(Outcome::Confirmed));
                 }
-                None => pickup
-                    .last
-                    .or_else(|| self.target.map(center))
-                    .unwrap_or_else(|| ctx.body.position()),
+                None => {
+                    if pickup.gone() {
+                        // Gone, yet the inventory did not grow: it was not
+                        // collected. Follow the nearest one of the kind again.
+                        pickup.retarget();
+                    }
+                    last
+                }
             },
-            None => pickup
-                .last
-                .or_else(|| self.target.map(center))
-                .unwrap_or_else(|| ctx.body.position()),
+            None => last,
         };
         if pickup_arrived(ctx.body.position(), target) {
             return (frame, None, None);
@@ -613,8 +749,19 @@ impl Pickup {
     /// visible item becomes the target; if it is missing for a few ticks the
     /// drop has been collected.
     pub(crate) fn target(&mut self, items: &[praxion_perception::EntityFact]) -> Option<Vec3> {
+        self.target_where(items, |_| true)
+    }
+
+    /// [`Pickup::target`] restricted to the items `accept` takes. The tracked
+    /// item counts as missing once it no longer passes `accept` either (its
+    /// stack turned out to be another kind).
+    pub(crate) fn target_where(
+        &mut self,
+        items: &[praxion_perception::EntityFact],
+        accept: impl Fn(&praxion_perception::EntityFact) -> bool,
+    ) -> Option<Vec3> {
         if let Some(id) = self.target_id {
-            if let Some(fact) = items.iter().find(|fact| fact.id == id) {
+            if let Some(fact) = items.iter().find(|fact| fact.id == id && accept(fact)) {
                 self.missing = 0;
                 self.last = Some(fact.position);
                 return Some(fact.position);
@@ -624,6 +771,7 @@ impl Pickup {
         }
         let nearest = items
             .iter()
+            .filter(|fact| accept(fact))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))?;
         self.target_id = Some(nearest.id);
         self.missing = 0;
@@ -681,6 +829,17 @@ fn through_decision(
         DigThrough::Occluder(cell)
     } else {
         DigThrough::Nothing
+    }
+}
+
+/// The one item breaking `state` always drops, when its loot table has exactly
+/// one entry that cannot roll zero (a log, a crafting table, stone, dirt). A
+/// table with chances (leaves: sticks, saplings, apples) or several entries
+/// names no certain item, so no pickup is verified for it.
+fn sure_drop(state: BlockState) -> Option<&'static str> {
+    match gamedata::block_drops(blocks::name(state))? {
+        [only] if only.min >= 1 => Some(only.item),
+        _ => None,
     }
 }
 
@@ -767,6 +926,78 @@ fn kind_at(world: &praxion_world::World, pos: BlockPos) -> Option<BlockKind> {
     world.block_state(pos).map(BlockKind::from)
 }
 
+/// The four cells a body can stand in beside a block, at the block's own
+/// height.
+const STAND_SIDES: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+
+/// Whether `target` can be mined with the eyes out of the water: one of the
+/// four cells beside it is a dry cell the body fits in, meaning the feet and
+/// the eye cell are both passable (no fluid, no hazard, no collision shape).
+/// A lake-bed block has water beside it and over its stand cells, so every
+/// place a body could stand to mine it puts the eyes under water.
+///
+/// `lookup` is the block access: the world in `mine`, a map in the tests. An
+/// unloaded cell is not evidence of a dry stand, and a cell the body cannot
+/// stand in (stone beside the target) is not a stand cell either.
+fn dry_stand(target: BlockPos, lookup: impl Fn(BlockPos) -> Option<BlockState>) -> bool {
+    STAND_SIDES.iter().any(|(dx, dz)| {
+        let feet = BlockPos::new(target.x + dx, target.y, target.z + dz);
+        let eye = BlockPos::new(feet.x, feet.y + 1, feet.z);
+        lookup(feet).is_some_and(praxion_planner::blocks::is_passable)
+            && lookup(eye).is_some_and(praxion_planner::blocks::is_passable)
+    })
+}
+
+/// Whether the body's own eyes are under water: the cell the eye position
+/// falls in holds a swimmable water block (perception's own-state `eye_block`).
+fn eyes_in_water(ctx: &Ctx<'_>) -> bool {
+    ctx.perception
+        .eye_block(ctx.world)
+        .value()
+        .is_some_and(|state| blocks::is_water(*state))
+}
+
+/// Ticks the best item the body carries needs to break `state` from where it
+/// stands, or `u32::MAX` when nothing carried can break it. `submerged` adds
+/// the vanilla eye-in-water penalty, destroy speed divided by five
+/// (`Player.getDestroySpeed`), which the physics port leaves out: lake-bed
+/// deepslate takes about 22 ticks above water and about 112 with the eyes
+/// under, and no breath outlasts the second.
+fn break_ticks(ctx: &Ctx<'_>, state: BlockState, submerged: bool) -> u32 {
+    let progress = |item: &azalea_inventory::ItemStack| {
+        let progress = ctx.body.mine_progress(state, item);
+        if submerged { progress / 5.0 } else { progress }
+    };
+    let held = praxion_headless::held_item(ctx.world);
+    let best = ctx
+        .world
+        .inventory()
+        .iter()
+        .enumerate()
+        .filter(|(index, stack)| (9..=44).contains(index) && stack.count() > 0)
+        .map(|(_, stack)| progress(stack))
+        .fold(progress(&held), f32::max);
+    if best <= 0.0 {
+        return u32::MAX;
+    }
+    (1.0 / best).ceil().max(1.0) as u32
+}
+
+/// Whether a dig of `state` from where the body stands cannot finish inside the
+/// breath it has left: the eyes are under water and the block outlasts the air
+/// with [`AIR_MARGIN_TICKS`] to spare. Only a submerged eye is a risk; an
+/// unknown air count is not a reason to refuse a dig (the drowning reflex still
+/// guards the body).
+fn drowned_before_break(ctx: &mut Ctx<'_>, state: BlockState) -> bool {
+    if !eyes_in_water(ctx) {
+        return false;
+    }
+    let Some(air) = ctx.perception.air(ctx.world).value().copied() else {
+        return false;
+    };
+    break_ticks(ctx, state, true).saturating_add(AIR_MARGIN_TICKS) > air
+}
+
 /// Whether the body is close enough that the server should collect the drop.
 pub(crate) fn pickup_arrived(position: Vec3, target: Vec3) -> bool {
     let dx = position.x - target.x;
@@ -840,6 +1071,7 @@ mod tests {
             kind: EntityKind::Item,
             position: Vec3::new(x, y, z),
             distance,
+            item: None,
         }
     }
 
@@ -995,6 +1227,9 @@ mod tests {
             uphill: 0,
             rejected: Vec::new(),
             rejected_kind: None,
+            sure_drop: None,
+            settled: false,
+            held_before: None,
         }
     }
 
@@ -1136,6 +1371,7 @@ mod tests {
         // world (an unloaded cell is never proof of air): falling sand refilled
         // it. It must be dug again under a new receipt.
         mine.pickup = Some(Pickup::default());
+        mine.settled = true;
         mine.tool_waited = 9;
         let world = World::new();
         let mut perception = Perception::new(praxion_perception::Config::default());
@@ -1192,6 +1428,9 @@ mod tests {
             uphill: 0,
             rejected: Vec::new(),
             rejected_kind: None,
+            sure_drop: None,
+            settled: false,
+            held_before: None,
         };
         let mut ctx = Ctx {
             tick: 0,
@@ -1206,6 +1445,136 @@ mod tests {
             Some(dry),
             "the wet stone is nearer but cannot be worked"
         );
+    }
+
+    #[test]
+    fn mine_skips_a_stone_whose_stand_cells_are_under_water() {
+        use crate::test_world::{feet, set_block, swept, world};
+
+        // The nearer stone is beside a pond whose surface reaches the eye level
+        // of every cell a body could stand in to mine it. `workable` accepts it
+        // (no face of the block touches water), yet mining it would put the
+        // eyes under water; the farther stone has dry stand cells and wins.
+        let mut world = world();
+        let wet = BlockPos::new(0, 64, 2);
+        let dry = BlockPos::new(3, 64, 0);
+        set_block(&mut world, wet, BlockState::from(BlockKind::Stone));
+        set_block(&mut world, dry, BlockState::from(BlockKind::Stone));
+        for (dx, dz) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+            set_block(
+                &mut world,
+                BlockPos::new(wet.x + dx, wet.y + 1, wet.z + dz),
+                BlockState::from(BlockKind::Water),
+            );
+        }
+
+        let mut perception = swept(&world);
+        let body = Body::new(feet());
+        let mut mine = fresh_mine("stone", None);
+        let mut ctx = Ctx {
+            tick: 0,
+            body: &body,
+            world: &world,
+            perception: &mut perception,
+            style: praxion_planner::Personality::default(),
+        };
+        let _ = mine.tick(&mut ctx, false);
+        assert_eq!(
+            mine.target,
+            Some(dry),
+            "the nearer stone would be mined with the eyes under water"
+        );
+    }
+
+    #[test]
+    fn mine_fails_underwater_instead_of_digging_past_the_breath() {
+        use crate::test_world::{feet, hold, set_air, set_block, swept, world};
+        use azalea_registry::builtin::ItemKind;
+
+        // Live run A (2026-11-12): the body stood in a pool, `mine` dug the
+        // same stone for 185 ticks, the drowning reflex preempted it, and the
+        // skill restarted the same cell from zero. A block the remaining air
+        // cannot outlast is a typed failure, at once.
+        let mut world = world();
+        let cell = BlockPos::new(2, 64, 0);
+        set_block(&mut world, cell, BlockState::from(BlockKind::Stone));
+        for pos in [BlockPos::new(0, 64, 0), BlockPos::new(0, 65, 0)] {
+            set_block(&mut world, pos, BlockState::from(BlockKind::Water));
+        }
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        set_air(&mut world, 60);
+        let mut perception = swept(&world);
+        let body = Body::new(feet());
+        let eye = body.eye_position().to_block_pos_floor();
+        assert!(
+            world
+                .block_state(eye)
+                .is_some_and(praxion_planner::blocks::is_water),
+            "the test body's eyes are in the water column at {eye:?}"
+        );
+        let mut mine = fresh_mine("stone", Some(cell));
+        let mut ctx = Ctx {
+            tick: 0,
+            body: &body,
+            world: &world,
+            perception: &mut perception,
+            style: praxion_planner::Personality::default(),
+        };
+        let (_, pending, outcome) = mine.tick(&mut ctx, false);
+        assert_eq!(outcome, Some(Outcome::Failed(UNDERWATER.into())));
+        assert!(pending.is_none(), "no dig intent for a block out of breath");
+    }
+
+    #[test]
+    fn mine_digs_a_soft_block_under_water_when_the_breath_outlasts_it() {
+        use crate::test_world::{feet, set_air, set_block, swept, world};
+
+        // The rule is not "never dig with wet eyes": leaves break in about 150
+        // ticks with both water penalties, which a full breath covers.
+        let mut world = world();
+        let cell = BlockPos::new(2, 64, 0);
+        set_block(&mut world, cell, BlockState::from(BlockKind::OakLeaves));
+        for pos in [BlockPos::new(0, 64, 0), BlockPos::new(0, 65, 0)] {
+            set_block(&mut world, pos, BlockState::from(BlockKind::Water));
+        }
+        set_air(&mut world, 300);
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = fresh_mine("#leaves", Some(cell));
+        let (dug, outcome) = first_dig(&mut mine, &world, &mut perception, &mut body, 20);
+        assert_eq!(outcome, None, "a breakable block is not refused");
+        assert_eq!(dug, Some(cell), "the leaves are dug");
+    }
+
+    #[test]
+    fn dry_stand_needs_a_cell_beside_the_block_with_air_at_the_eye() {
+        let target = BlockPos::new(0, 64, 0);
+        let mut cells = known(&[(target, BlockKind::Stone)]);
+        // Open on all four sides: a body can stand there.
+        assert!(
+            !dry_stand(target, |pos| cells.get(&pos).copied()),
+            "an unloaded ring is no stand"
+        );
+        for (dx, dz) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+            cells.insert(BlockPos::new(dx, 64, dz), BlockState::from(BlockKind::Air));
+            cells.insert(BlockPos::new(dx, 65, dz), BlockState::from(BlockKind::Air));
+        }
+        assert!(dry_stand(target, |pos| cells.get(&pos).copied()));
+        // A stand cell the body does not fit in is no stand either: the eye
+        // cell is a full block here, so the body cannot occupy the column.
+        for (dx, dz) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+            cells.insert(BlockPos::new(dx, 65, dz), BlockState::from(BlockKind::Stone));
+        }
+        assert!(
+            !dry_stand(target, |pos| cells.get(&pos).copied()),
+            "a solid cell at the eye is not a stand"
+        );
+        // A pond over the whole ring: only water to stand in.
+        for (dx, dz) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+            cells.insert(BlockPos::new(dx, 64, dz), BlockState::from(BlockKind::Water));
+            cells.insert(BlockPos::new(dx, 65, dz), BlockState::from(BlockKind::Water));
+        }
+        assert!(!dry_stand(target, |pos| cells.get(&pos).copied()));
     }
 
     #[test]
@@ -1338,6 +1707,9 @@ mod tests {
             uphill: 0,
             rejected: Vec::new(),
             rejected_kind: None,
+            sure_drop: None,
+            settled: false,
+            held_before: None,
         }
     }
 
@@ -1576,6 +1948,264 @@ mod tests {
                 pos: target,
                 window: 160
             })
+        );
+    }
+    #[test]
+    fn a_new_target_does_not_inherit_the_settled_receipt_of_the_block_before() {
+        // Run B, 2026-11-12: after the first soft block of a dig-through broke,
+        // the settled flag stayed set, so every later target counted as
+        // "settled" the moment the runner registered it, was dug again under a
+        // new receipt and re-registered, nine times on one log.
+        let cell = BlockPos::new(0, 64, 2);
+        let mut mine = state_machine_mine(
+            cell,
+            Some(DigState {
+                occluders: 1,
+                digging_occluder: true,
+                target_started: true,
+            }),
+        );
+        mine.begin_pickup();
+        assert!(mine.settled, "the occluder's receipt settled");
+        mine.forget_target();
+        assert!(!mine.settled, "the broken occluder's receipt is spent");
+        mine.begin_pickup();
+        mine.set_target(BlockPos::new(0, 64, 3), false);
+        assert!(!mine.settled, "a selected target has no receipt yet");
+        assert!(mine.pickup.is_some(), "the marker keeps the runner's primitive alive");
+        assert_eq!(
+            target_check(false, mine.settled, true, false, true),
+            TargetCheck::Keep,
+            "a registered target is dug on, not registered again"
+        );
+    }
+
+    #[test]
+    fn a_hidden_log_above_reach_is_not_tunnelled_toward() {
+        use crate::test_world::{set_block, swept};
+        // Run B, 2026-11-12: the body at the bottom of its own dig dug the wall
+        // blocks over its head toward a log six blocks up, then clicked a log it
+        // could never hit, restarting for 1,400 ticks. A known log that no step
+        // brings within reach fails `out_of_reach` at once and digs nothing.
+        let log = BlockPos::new(0, 70, 0);
+        let mut world = floor_world();
+        set_block(&mut world, log, BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        for y in [68, 69] {
+            set_block(&mut world, BlockPos::new(0, y, 0), BlockState::from(BlockKind::Dirt));
+        }
+        let mut body = standing_body(&world);
+        let mut mine = fresh_mine("#logs", None);
+        let mut specs = Vec::new();
+        let mut result = None;
+        for tick in 0..60 {
+            let (pending, outcome) =
+                run_mine_tick(&mut mine, tick, false, &mut body, &world, &mut perception);
+            specs.extend(pending);
+            if let Some(outcome) = outcome {
+                result = Some((tick, outcome));
+                break;
+            }
+        }
+        let (tick, outcome) = result.expect("it fails");
+        assert_eq!(outcome, Outcome::Failed("out_of_reach".into()));
+        assert!(tick <= 3, "at once, not after a wait or a tunnel: tick {tick}");
+        assert!(specs.is_empty(), "no block was dug on the way: {specs:?}");
+    }
+
+    #[test]
+    fn a_hidden_log_within_reach_is_still_dug_through() {
+        use crate::test_world::{set_block, swept};
+        // The overhead rule must not switch off the dig-through for a log a
+        // person can reach: two leaf blocks on the way, the log at head height.
+        let log = BlockPos::new(0, 65, 3);
+        let mut world = floor_world();
+        set_block(&mut world, log, BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        for z in [1, 2] {
+            for y in [64, 65] {
+                set_block(&mut world, BlockPos::new(0, y, z), BlockState::from(BlockKind::Dirt));
+            }
+        }
+        let mut body = standing_body(&world);
+        let mut mine = fresh_mine("#logs", None);
+        let (dug, outcome) = first_dig(&mut mine, &world, &mut perception, &mut body, 40);
+        assert_eq!(outcome, None);
+        assert!(dug.is_some(), "a leaf block on the way is dug");
+    }
+
+    #[test]
+    fn only_a_certain_single_drop_is_watched() {
+        let state = |kind| BlockState::from(kind);
+        assert_eq!(sure_drop(state(BlockKind::CraftingTable)), Some("crafting_table"));
+        assert_eq!(sure_drop(state(BlockKind::OakLog)), Some("oak_log"));
+        assert_eq!(sure_drop(state(BlockKind::Stone)), Some("cobblestone"));
+        assert_eq!(
+            sure_drop(state(BlockKind::OakLeaves)),
+            None,
+            "leaves have no loot table here and drop by chance"
+        );
+        assert_eq!(sure_drop(state(BlockKind::Air)), None);
+    }
+
+    /// A mine whose break just settled on `cell`, walking to its drop.
+    fn mine_collecting(cell: BlockPos, item: &'static str) -> Mine {
+        let mut mine = fresh_mine("crafting_table", Some(cell));
+        mine.sure_drop = Some(item);
+        mine.begin_pickup();
+        mine
+    }
+
+    #[test]
+    fn a_vanished_drop_is_not_a_collected_one_while_the_inventory_has_not_grown() {
+        use crate::test_world::{add_item_entity, feet, give, remove_entity, swept, world};
+        use azalea_registry::builtin::ItemKind;
+        // Run B, 2026-11-12: the placed crafting table was mined "to take it
+        // along" and the body never held it. The pickup phase counted a drop
+        // that was seen and then missing for five ticks as collected, and
+        // followed whichever item entity was nearest.
+        let cell = BlockPos::new(2, 64, 0);
+        let mut world = world();
+        add_item_entity(&mut world, 30, ItemKind::CraftingTable, Vec3::new(2.5, 64.2, 0.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = mine_collecting(cell, "crafting_table");
+        for tick in 0..3 {
+            let (_, outcome) = run_mine_tick(&mut mine, tick, true, &mut body, &world, &mut perception);
+            assert_eq!(outcome, None);
+        }
+        assert_eq!(mine.pickup.as_ref().and_then(|p| p.target_id), Some(30));
+
+        // The entity leaves the body's view (despawned, or hidden).
+        remove_entity(&mut world, 30);
+        for tick in 3..30 {
+            let (_, outcome) = run_mine_tick(&mut mine, tick, true, &mut body, &world, &mut perception);
+            assert_eq!(
+                outcome, None,
+                "tick {tick}: the inventory did not grow, so the walk is not over"
+            );
+        }
+        // A second table drop shows up farther away: it is followed.
+        add_item_entity(&mut world, 31, ItemKind::CraftingTable, Vec3::new(3.5, 64.2, 0.5));
+        for tick in 30..34 {
+            let (_, outcome) = run_mine_tick(&mut mine, tick, true, &mut body, &world, &mut perception);
+            assert_eq!(outcome, None);
+        }
+        assert_eq!(mine.pickup.as_ref().and_then(|p| p.target_id), Some(31));
+
+        // The server hands the table over: the phase ends at once.
+        give(&mut world, 36, ItemKind::CraftingTable, 1);
+        let (_, outcome) = run_mine_tick(&mut mine, 34, true, &mut body, &world, &mut perception);
+        assert_eq!(outcome, Some(Outcome::Confirmed));
+    }
+
+    #[test]
+    fn the_walk_follows_the_drop_of_the_wanted_kind_not_the_nearest_item() {
+        use crate::test_world::{add_item_entity, feet, swept, world};
+        use azalea_registry::builtin::ItemKind;
+        let cell = BlockPos::new(3, 64, 0);
+        let mut world = world();
+        add_item_entity(&mut world, 40, ItemKind::Stick, Vec3::new(1.5, 64.2, 0.5));
+        add_item_entity(&mut world, 41, ItemKind::CraftingTable, Vec3::new(4.5, 64.2, 0.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = mine_collecting(cell, "crafting_table");
+        let _ = run_mine_tick(&mut mine, 0, true, &mut body, &world, &mut perception);
+        assert_eq!(
+            mine.pickup.as_ref().and_then(|p| p.target_id),
+            Some(41),
+            "the stick is nearer, the table is what the break dropped"
+        );
+    }
+
+    #[test]
+    fn without_a_certain_drop_a_drop_that_is_gone_still_ends_the_walk() {
+        use crate::test_world::{add_item_entity, feet, remove_entity, swept, world};
+        use azalea_registry::builtin::ItemKind;
+        let cell = BlockPos::new(2, 64, 0);
+        let mut world = world();
+        add_item_entity(&mut world, 30, ItemKind::Stick, Vec3::new(2.5, 64.2, 0.5));
+        let mut perception = swept(&world);
+        let mut body = Body::new(feet());
+        let mut mine = fresh_mine("oak_leaves", Some(cell));
+        mine.begin_pickup();
+        let _ = run_mine_tick(&mut mine, 0, true, &mut body, &world, &mut perception);
+        remove_entity(&mut world, 30);
+        let mut ended = None;
+        for tick in 1..20 {
+            let (_, outcome) = run_mine_tick(&mut mine, tick, true, &mut body, &world, &mut perception);
+            if outcome.is_some() {
+                ended = Some(tick);
+                break;
+            }
+        }
+        assert!(ended.is_some_and(|tick| tick <= 8), "a chance drop ends once it is gone: {ended:?}");
+    }
+    #[test]
+    fn a_dig_through_registers_one_intent_per_block_it_breaks() {
+        use crate::runner::Runner;
+        use crate::test_world::{set_block, swept};
+        use praxion_interpreter::StartAction;
+        use praxion_rules::ArgValue;
+        // Run B, 2026-11-12: from the second block of a dig-through on, every
+        // target was registered again and again while it was being dug. Driven
+        // the way production drives it (runner, registration, settled receipt),
+        // each block of the way gets exactly one intent.
+        let log = BlockPos::new(0, 65, 3);
+        let mut world = floor_world();
+        set_block(&mut world, log, BlockState::from(BlockKind::OakLog));
+        let mut perception = swept(&world);
+        for z in [1, 2] {
+            set_block(&mut world, BlockPos::new(0, 65, z), BlockState::from(BlockKind::Dirt));
+        }
+        let mut body = standing_body(&world);
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "mine".to_owned(),
+                args: vec![ArgValue::Name("oak_log".to_owned())],
+            })
+            .expect("mine starts");
+        let mut registered = Vec::new();
+        let mut breaking: Option<(u64, BlockPos)> = None;
+        let mut outcome = None;
+        for tick in 0..400u64 {
+            let result = {
+                let mut ctx = Ctx {
+                    tick,
+                    body: &body,
+                    world: &world,
+                    perception: &mut perception,
+                    style: praxion_planner::Personality::default(),
+                };
+                runner.tick(&mut ctx)
+            };
+            result.frame.apply(&mut body, tick).expect("the mine frame applies");
+            body.step(&result.frame.held, &world);
+            if let Some(IntentSpec::Dig { pos, .. }) = result.pending {
+                registered.push(pos);
+                runner.registered(registered.len() as u64);
+                // The server takes ten ticks to break the block.
+                breaking = Some((tick + 10, pos));
+            }
+            if let Some((due, pos)) = breaking
+                && tick >= due
+            {
+                breaking = None;
+                set_block(&mut world, pos, BlockState::from(BlockKind::Air));
+                perception.note_changed(&world, pos);
+                runner.settle(Outcome::Confirmed);
+            }
+            if result.outcome.is_some() {
+                outcome = result.outcome;
+                break;
+            }
+        }
+        assert_eq!(outcome, Some(Outcome::Confirmed));
+        assert_eq!(
+            registered,
+            vec![BlockPos::new(0, 65, 1), BlockPos::new(0, 65, 2), log],
+            "one intent per block, in order"
         );
     }
 }

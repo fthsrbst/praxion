@@ -714,6 +714,129 @@ fn preemption_abandons_the_action_and_starts_no_duplicate() {
 }
 
 #[test]
+fn a_rule_preempted_three_times_without_success_fails_no_progress() {
+    // Live run A (2026-11-12): every drowning reflex preempted the same `mine`
+    // and the skill restarted it on the same block, eight times, until the
+    // goal's budget ran out. Three restarts without a success of that rule is
+    // a loop, and it fails typed instead.
+    let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
+    let mut facts = Mock::default();
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    for restart in 1..=crate::MAX_PREEMPTIONS {
+        assert!(
+            matches!(
+                started(&mut interpreter, &mut facts, &mut act),
+                Decision::Run { .. }
+            ),
+            "restart {restart} fired the rule"
+        );
+        assert_eq!(interpreter.preempt(&mut act), Some(Outcome::Preempted));
+        interpreter.resume();
+    }
+    assert_eq!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Failed(crate::NO_PROGRESS.into()),
+        "the fourth restart is refused"
+    );
+    assert_eq!(
+        act.starts.len() as u32,
+        crate::MAX_PREEMPTIONS,
+        "no primitive is started for the refused restart"
+    );
+}
+
+#[test]
+fn a_success_clears_the_preemptions_of_its_rule() {
+    let program = program("skill s()\n  rules:\n    true -> mine(stone)\n");
+    let mut facts = Mock::default();
+    // A mine that is not preempted confirms on the next tick.
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    assert!(matches!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Run { .. }
+    ));
+    interpreter.preempt(&mut act);
+    interpreter.resume();
+
+    // One clean dig: the dig starts, and the next tick its confirmation both
+    // clears the count and lets the rule start the following dig.
+    assert!(matches!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Run { .. }
+    ));
+    assert!(matches!(
+        started(&mut interpreter, &mut facts, &mut act),
+        Decision::Run { .. }
+    ));
+
+    // Two restarts after that success stay under the cap: without the clear
+    // this would be the third preemption and the rule would fail.
+    for _ in 0..(crate::MAX_PREEMPTIONS - 1) {
+        interpreter.preempt(&mut act);
+        interpreter.resume();
+        assert!(
+            matches!(
+                started(&mut interpreter, &mut facts, &mut act),
+                Decision::Run { .. }
+            ),
+            "a rule that succeeded keeps its restarts"
+        );
+    }
+}
+
+#[test]
+fn the_preemption_cap_counts_in_the_frame_that_owns_the_action() {
+    // The dig lives in a child skill, as it does in get_cobblestone: the child
+    // frame owns the counter, and its typed failure is ONE failure of the calling
+    // rule, which then hands the tick to the rule below (get_cobblestone's
+    // surface search). The counter must not sit on the parent: `resume` clears
+    // the failure counts of every frame after each reflex, so only the frame
+    // that restarts the action can see the loop.
+    let program = program(
+        "skill s()\n  rules:\n    count(x) >= 0 -> do child()\n    true -> mine(stone)\n\nskill child()\n  rules:\n    true -> dig_down(stone)\n",
+    );
+    let mut facts = Mock::default();
+    facts.ints.insert("x".into(), 0);
+    let mut act = Mock::default();
+    let mut interpreter = Interpreter::new(program);
+    interpreter.start_skill("s", Vec::new()).unwrap();
+
+    let mut fallback = None;
+    for tick in 0..60 {
+        // The reflex always wins the tick after the action starts, so no dig
+        // ever settles: the loop the cap exists for.
+        let decision = interpreter.tick(&mut facts, &mut act);
+        assert!(
+            !matches!(decision, Decision::Failed(_) | Decision::Done),
+            "tick {tick}: the skill ended: {decision:?}"
+        );
+        if act.starts.last().is_some_and(|a| a.primitive == "mine") {
+            fallback = Some(tick);
+            break;
+        }
+        interpreter.preempt(&mut act);
+        interpreter.resume();
+    }
+    let fallback = fallback.expect("the rule below never took over");
+    let digs = act
+        .starts
+        .iter()
+        .filter(|a| a.primitive == "dig_down")
+        .count();
+    assert_eq!(
+        digs,
+        crate::MAX_PREEMPTIONS as usize,
+        "three restarts, then the child fails no_progress (tick {fallback})"
+    );
+}
+
+#[test]
 fn start_fills_defaults_and_resolves_parameters() {
     let program = program(
         "skill s(target: block, n: int = 3)\n  rules:\n    true -> mine($target) until count(oak_log) >= $n\n",

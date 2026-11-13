@@ -280,6 +280,10 @@ impl View {
             perception.air(world).value().copied(),
             perception.burning(world).value().copied(),
         );
+        // Hearing, the same way: a server fact of this tick, classified once
+        // and kept in the state beside the own facts (see `crate::hearing`).
+        // It costs no ray and no ledger entry.
+        state.set_heard(crate::hearing::heard_sounds(perception, world));
 
         let feet_cell = cell(perception, world, feet);
         // The head cell is one above the feet unless the eye already is there.
@@ -479,8 +483,14 @@ impl View {
 
     /// The horizontal (x/z) distance to a mob.
     pub fn horizontal_to(&self, mob: EntityView) -> f64 {
-        let dx = self.position.x - mob.position.x;
-        let dz = self.position.z - mob.position.z;
+        self.horizontal_to_point(mob.position)
+    }
+
+    /// The horizontal (x/z) distance from the feet to a point in the world,
+    /// e.g. where a sound was heard.
+    pub fn horizontal_to_point(&self, position: Vec3) -> f64 {
+        let dx = self.position.x - position.x;
+        let dz = self.position.z - position.z;
         (dx * dx + dz * dz).sqrt()
     }
 

@@ -31,11 +31,11 @@ mod workable;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use azalea_core::position::ChunkSectionPos;
 use azalea_entity::dimensions::EntityDimensions;
-use azalea_registry::builtin::{BlockKind, EntityKind};
+use azalea_registry::builtin::{BlockKind, EntityKind, ItemKind};
 use praxion_world::{BlockPos, BlockState, Entity, Health, ItemStack, Vec3, World};
 
 pub use answer::{Answer, Caller, Provenance, Reason};
@@ -70,6 +70,11 @@ pub struct EntityFact {
     pub kind: EntityKind,
     pub position: Vec3,
     pub distance: f64,
+    /// What an item entity holds: the kind of its stack, `None` for any other
+    /// entity and for an item entity whose stack the server has not sent yet.
+    /// A pickup walk reads it to follow the drop it wants, not just the
+    /// nearest item on the ground.
+    pub item: Option<ItemKind>,
 }
 
 /// A heard sound, with its own age.
@@ -400,6 +405,28 @@ impl Perception {
                 !exclude(pos) && accept(pos, state)
             })?;
         Some((pos, eye.distance_to(pos.center())))
+    }
+
+    /// Every cell the known map remembers within `radius` blocks of the eye,
+    /// visited one by one with the state it holds.
+    ///
+    /// `Some(())` means the visit ran; `None` means the eye is unknown (no
+    /// position, or a desynced world), so a caller can tell "nothing known"
+    /// from "cannot look", as with every other query. It spends no ray; a cell
+    /// whose chunk changed since it was last checked is re-validated against
+    /// the live world first, exactly like [`Perception::nearest_known`].
+    ///
+    /// The visit order is not part of the contract.
+    pub fn for_each_known(
+        &self,
+        world: &World,
+        radius: u32,
+        visit: impl FnMut(BlockPos, BlockState),
+    ) -> Option<()> {
+        let eye = self.valid_eye(world)?;
+        self.known
+            .seen_within(world, eye.to_block_pos_floor(), radius, visit);
+        Some(())
     }
 
     /// The world's eye position: player position plus the current eye height.
@@ -751,6 +778,45 @@ impl Perception {
         Answer::known(found, Provenance::Sight, 0)
     }
 
+    /// Counts of the visible entities within `radius` blocks, per kind.
+    ///
+    /// The player's own entity and item and experience-orb entities are left
+    /// out: the body is not around itself, and a dropped item or an orb is not
+    /// a creature the planner plans around. Every counted entity passed the
+    /// same line-of-sight test [`Perception::entities_near`] applies, within the
+    /// same budget and entity cap: when either runs out the whole answer is
+    /// `Unknown(budget)` rather than a partial count, because a partial count
+    /// would read as "the rest are not there".
+    pub fn entity_kinds_near(
+        &mut self,
+        caller: Caller,
+        world: &World,
+        radius: u32,
+    ) -> Answer<BTreeMap<EntityKind, u32>> {
+        let own = world.own_entity_id();
+        match self.entities_near(caller, world, radius, EntityFilter::Any) {
+            Answer::Known {
+                value,
+                provenance,
+                age_ticks,
+            } => {
+                let mut counts: BTreeMap<EntityKind, u32> = BTreeMap::new();
+                for fact in value {
+                    if Some(fact.id) == own || is_not_surrounding(fact.kind) {
+                        continue;
+                    }
+                    *counts.entry(fact.kind).or_insert(0) += 1;
+                }
+                Answer::Known {
+                    value: counts,
+                    provenance,
+                    age_ticks,
+                }
+            }
+            Answer::Unknown(reason) => Answer::Unknown(reason),
+        }
+    }
+
     /// The nearest visible entity of `kind` within `radius` blocks.
     pub fn nearest_entity(
         &mut self,
@@ -899,6 +965,21 @@ impl Perception {
         };
         match world.own_air() {
             Some(air) => Answer::known(air, Provenance::Sight, 0),
+            None => Answer::Unknown(Reason::NeverSeen),
+        }
+    }
+
+    /// The block the body's eyes are inside, from the live world: own state
+    /// like [`Perception::air`], an F3-class fact allowed without a ray. A
+    /// caller that asks "are my eyes under water" applies its own rule to this
+    /// state (the planner's `is_water`); reading the live cell, not memory,
+    /// means a body that has just surfaced is not told it is still under.
+    pub fn eye_block(&self, world: &World) -> Answer<BlockState> {
+        let Some(eye) = self.valid_eye(world) else {
+            return Answer::Unknown(Reason::NeverSeen);
+        };
+        match world.block_state(eye.to_block_pos_floor()) {
+            Some(state) => Answer::known(state, Provenance::Sight, 0),
             None => Answer::Unknown(Reason::NeverSeen),
         }
     }
@@ -1101,7 +1182,18 @@ fn fact(entity: &Entity, distance: f64) -> EntityFact {
         kind: entity.kind(),
         position: entity.position(),
         distance,
+        item: entity
+            .item_stack()
+            .map(|stack| stack.kind())
+            .filter(|kind| *kind != ItemKind::Air),
     }
+}
+
+/// Entities that are never part of the body's surroundings: the item stacks it
+/// or a mob dropped, and experience orbs. They are real tracked entities, but a
+/// count of them says nothing a planner can use.
+fn is_not_surrounding(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Item | EntityKind::ExperienceOrb)
 }
 
 /// One block position ordered by distance; the heap keeps the farthest on top

@@ -1,9 +1,33 @@
-# Walk until stone is within mining reach. It is a skill of its own so that a
-# failed search is ONE failure of the caller's rule: three failed explores
-# inside this frame (the per-rule cap) fail it with not_found, and the caller
-# then falls through to its next rule, see get_cobblestone.
+# Bring stone within mining reach by digging where the body stands. In flat
+# terrain stone lies three to six blocks under the dirt and no ray ever reaches
+# it from the surface, so `dig_down` cuts a one-wide staircase down until the
+# stone is known within mining reach and returns confirmed with the block in
+# reach of `mine`. A person with a pickaxe digs; walking the surface is the
+# fallback, not the first move.
+#
+# When the ground under the body refuses the stair (a drop beside it, water),
+# `dig_down` steps a few blocks aside to a cell it can dig from and starts
+# there, at most twice per call; only when no such cell lies within five blocks
+# does it fail, so a refusal here means the ground around is not diggable. The
+# refusal is deterministic, so the two retries the per-rule cap allows fail in
+# the same instant: the frame ends after a few ticks, not a long wait.
+#
+# It is a skill of its own for two reasons. A failed dig is ONE failure of the
+# caller's rule (three failed digs inside this frame, the per-rule cap, fail it
+# with the dig's kind), and a CHILD frame is the only way a caller reaches the
+# rule below on the same tick: a failed primitive retries in place on the next
+# tick and never falls through, so the dig has to be called as a skill. See
+# get_cobblestone: the surface search sits underneath this frame and fires on
+# the tick this one failed.
+#
+# It fails with the dig's own kind (`fluid`, `unsafe_drop`, `too_deep`,
+# `no_block`, `needs_tool`, `stuck`), so a caller must not read every failure as
+# "keep searching": a stair refused because it would open water or because the
+# floor of the next step is a drop, at the body's cell and at every cell within
+# five blocks of it, means this ground has no safe stair, not that stone is
+# absent. The caller decides what to try next.
 skill find_stone()
-  doc "Explore until stone is within mining reach; fails not_found when exploring runs out."
+  doc "Dig a staircase down to the stone under the body; fails with the dig's own kind when the ground refuses it."
   rules:
     near(stone, 5) -> done
-    true -> explore(stone)
+    not near(stone, 5) -> dig_down(stone)

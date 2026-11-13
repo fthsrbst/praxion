@@ -1,0 +1,23 @@
+# A village, found by its bell. `near(bell, 8)` is the marker every village has
+# and the villager check is the second half: a villager within eight blocks
+# means the body stands in one. Villages are rare. One may lie a few hundred
+# blocks away, so the search is bounded and honest rather than exhaustive:
+# `explore` walks for at most its 1200-tick budget per call, three failing
+# calls fail this skill with not_found, and the caller decides whether to try
+# again from a different place.
+#
+# Why the rules are ordered this way: both marker checks come first, so a body
+# that already stands in a village ends without taking a step, and the cheaper
+# bell check is above the villager check. `near_entity` answers unknown when no
+# villager is in sight (it is never false), so the villager rule costs nothing
+# on open ground and can never mask the search below it. The last rule explores
+# for a bell: the bell is the block a village cannot miss, while
+# `explore(villager)` is refused when the call starts, because villagers are
+# not on the hunt allowlist. The explore's `not_found` is this skill's failure
+# after its three tries.
+skill find_village()
+  doc "Walk until a village is near: a bell within 8 blocks or a villager within 8; fails not_found when the bounded search runs out."
+  rules:
+    near(bell, 8) -> done
+    near_entity(villager, 8) -> done
+    true -> explore(bell)

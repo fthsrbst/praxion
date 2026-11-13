@@ -8,6 +8,8 @@
 //!        ▼
 //! survival hard need ──> preempt now, eat (survival tier)
 //!        ▼
+//! heard hostile sound while the body is idle ──> gaze-only frame, no owner change
+//!        ▼
 //! command skill tick ──> interpreter decision
 //!        ▼
 //! soft need at a safe point ──> suspend the command, eat, resume after
@@ -24,7 +26,8 @@ use praxion_headless::{Body, ControlFrame, Held};
 use praxion_interpreter::{Actuator, Decision, Facts, Interpreter};
 use praxion_planner::KnownBlocks;
 use praxion_reflexes::{
-    EndermanGuard, Engine, ReflexKind, ReflexTick, Settings, View, action_note,
+    EndermanGuard, Engine, ReflexKind, ReflexTick, Settings, View, action_note, alert_look,
+    alert_note, fled_sound, with_heard,
 };
 use praxion_rules::{ArgValue, PrimitiveKind};
 
@@ -63,6 +66,9 @@ impl Owner {
 /// Where this tick's frame came from.
 #[derive(Clone, Debug)]
 pub enum FrameSource {
+    /// A reflex's frame, or the hearing glance: a frame the body must apply as
+    /// built. The glance names no reflex ([`ArbiterTick::reflex`] is `None`):
+    /// it carries a look and nothing else, and owns nothing.
     Reflex(ControlFrame),
     Maintenance(ControlFrame),
     Skill(ControlFrame),
@@ -412,9 +418,15 @@ impl Arbiter {
             } => {
                 self.preempt_for_reflex(interpreter, actuator);
                 self.set_owner(Owner::Reflex(kind), body.generation(), tick);
-                self.events.push(EventKind::Note {
-                    text: action_note(kind, action, view, false),
-                });
+                let mut note = action_note(kind, action, view, false);
+                // The creeper flee may have come from a fuse only heard: the
+                // log says which cue, in the same line.
+                if kind == ReflexKind::Creeper
+                    && let Some(sound) = fled_sound(view, self.engine.state(), settings)
+                {
+                    note = with_heard(note, sound);
+                }
+                self.events.push(EventKind::Note { text: note });
                 let frame = self.guard(frame, body, view);
                 return self.result(FrameSource::Reflex(frame), Some(kind), None, None);
             }
@@ -522,6 +534,19 @@ impl Arbiter {
                     "food at the hard threshold and no food in the inventory".to_owned(),
                 ),
             }
+        }
+
+        // 3b. A hostile sound the view cannot see turns the head toward it.
+        //     This is a gaze overlay, not a reflex: it takes no ownership,
+        //     bumps no generation and leaves the interpreter as it is. The
+        //     body has one look request per tick, so the glance runs only
+        //     while nothing else wants that look (`may_glance`: no command, no
+        //     meal, no primitive), and it is dropped the moment something
+        //     does. The reflex poll above already returned for any running
+        //     reflex, so no lethal reflex is ever interrupted here.
+        let may_glance = self.may_glance(interpreter);
+        if let Some(glance) = self.alert(view, body, tick, may_glance) {
+            return glance;
         }
 
         // 4. The command (or any lower-tier intent) runs the interpreter.
@@ -1007,6 +1032,48 @@ impl Arbiter {
         frame
     }
 
+    /// Reaction B (hearing): a freshly heard hostile sound whose source the
+    /// view does not track turns the head toward it. Returns the tick to emit,
+    /// or `None` when no turn is due.
+    ///
+    /// This is a gaze overlay, not a reflex: the owner, the generation and the
+    /// interpreter stay as they are, so it can never preempt a command. The
+    /// frame carries the look and no held key. A body has one look request per
+    /// tick, so the caller gates the glance on [`Arbiter::may_glance`]: no
+    /// reflex, no meal and no command, which is also what keeps a discrete
+    /// primitive from being interrupted. The glance asks for the same aim for
+    /// [`ALERT_TURN_TICKS`], because a gaze gesture outlives a frame; a command
+    /// that arrives mid-turn drops it at once.
+    fn alert(
+        &mut self,
+        view: &View,
+        body: &Body,
+        tick: u64,
+        may_look: bool,
+    ) -> Option<ArbiterTick> {
+        let alert = self.engine.state_mut().alert(view, tick, may_look)?;
+        let mut frame = ControlFrame::new(tick, body.generation(), Held::NONE);
+        frame.look = self
+            .look_guard
+            .apply(alert_look(view, &alert.sound), body.look(), view);
+        if alert.first {
+            self.events.push(EventKind::Note {
+                text: alert_note(view, &alert.sound),
+            });
+        }
+        Some(self.result(FrameSource::Reflex(frame), None, None, None))
+    }
+
+    /// Whether the body may spend ticks on a glance: no reflex and no meal own
+    /// it, no command is running (so no primitive builds a frame that competes
+    /// for the look) and the interpreter holds no primitive in flight.
+    fn may_glance(&self, interpreter: &Interpreter) -> bool {
+        matches!(self.owner, Owner::Idle)
+            && self.meal.is_none()
+            && self.stack.running().is_none()
+            && self.is_safe_point(interpreter)
+    }
+
     fn maybe_wake(&mut self, kind: ReflexKind, tick: u64, settings: &Settings, needs: Needs) {
         if self.wake_emitted {
             return;
@@ -1128,5 +1195,183 @@ mod carry_on {
             arbiter.stack.get(pushed.intent_id).map(|entry| entry.state),
             Some(IntentState::Running)
         );
+    }
+}
+
+#[cfg(test)]
+mod hearing_alert {
+    use azalea_block::BlockState;
+    use azalea_registry::builtin::EntityKind;
+    use praxion_headless::Look;
+    use praxion_planner::aim;
+    use praxion_reflexes::{EntityView, HeardSound, MAX_ARROWS, MAX_ENDERMEN, MAX_MELEE_OTHERS,
+        SoundClass, WeaponChoice};
+    use praxion_world::Vec3;
+
+    use super::*;
+
+    /// A standing body at `feet` with nothing around it.
+    fn bare_view(feet: Vec3) -> View {
+        let cell = feet.to_block_pos_floor();
+        View {
+            tick: 0,
+            position: feet,
+            eye: feet + Vec3::new(0.0, 1.62, 0.0),
+            rotation: (0.0, 0.0),
+            health: Some(20.0),
+            food: Some(20),
+            day_time: 1_000,
+            feet: cell,
+            eye_cell: cell.up(1),
+            feet_state: BlockState::AIR,
+            head_state: BlockState::AIR,
+            below_state: BlockState::AIR,
+            head_in_water: false,
+            feet_in_water: false,
+            feet_in_lava: false,
+            on_fire: false,
+            lava: None,
+            water: None,
+            next_cell: cell.south(1),
+            next_cell_lava: false,
+            next_drop: 0,
+            creeper: None,
+            melee: None,
+            melee_others: [None; MAX_MELEE_OTHERS],
+            endermen: [None; MAX_ENDERMEN],
+            enderman_count: 0,
+            arrows: [None; MAX_ARROWS],
+            arrow_count: 0,
+            best_food: None,
+            best_weapon: None::<WeaponChoice>,
+        }
+    }
+
+    fn zombie_sound() -> HeardSound {
+        HeardSound {
+            id: "entity.zombie.ambient".to_owned(),
+            class: SoundClass::Hostile,
+            position: Vec3::new(0.5, 64.0, -5.0),
+            age_ticks: 0,
+            entity: None,
+        }
+    }
+
+    fn feet() -> Vec3 {
+        Vec3::new(0.5, 64.0, 0.5)
+    }
+
+    #[test]
+    fn a_heard_hostile_sound_turns_the_head_without_taking_the_body() {
+        let mut arbiter = Arbiter::new(0);
+        let body = Body::new(feet());
+        let generation = arbiter.generation();
+        let view = bare_view(feet());
+        let sound = zombie_sound();
+        arbiter.engine.state_mut().set_heard(vec![sound.clone()]);
+
+        let tick = arbiter
+            .alert(&view, &body, 10, true)
+            .expect("a fresh hostile sound with a free gaze turns the head");
+
+        // The body was not taken from its owner and no frame went stale.
+        assert_eq!(arbiter.owner(), &Owner::Idle);
+        assert_eq!(tick.owner, Owner::Idle);
+        assert_eq!(arbiter.generation(), generation);
+        assert_eq!(tick.generation, generation);
+        assert_eq!(tick.reflex, None, "a glance is not a reflex owner");
+
+        // The frame is a look and nothing else.
+        let FrameSource::Reflex(frame) = &tick.source else {
+            panic!("the glance frame must reach the body: {:?}", tick.source);
+        };
+        let (yaw, pitch) = aim(view.eye, sound.position);
+        assert_eq!(frame.look, Look::Aim { yaw, pitch });
+        assert!(!frame.held.moves(), "a glance holds no key");
+        assert!(frame.clicks.is_empty());
+        // One event, in the reflex action shape, naming the sound.
+        let notes: Vec<&String> = tick
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EventKind::Note { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "{:?}", tick.events);
+        assert!(notes[0].starts_with("reflex_action kind=alert action=look"));
+        assert!(notes[0].ends_with("heard=entity.zombie.ambient"), "{}", notes[0]);
+
+        // The gaze controller needs the request on every tick of the turn, and
+        // the turn logs its reaction once.
+        let held = arbiter
+            .alert(&view, &body, 11, true)
+            .expect("the turn holds its aim");
+        let FrameSource::Reflex(held_frame) = &held.source else {
+            panic!("the held glance frame must reach the body");
+        };
+        assert_eq!(held_frame.look, frame.look);
+        assert!(held.events.is_empty(), "{:?}", held.events);
+    }
+
+    #[test]
+    fn a_refused_glance_spends_no_cooldown_and_a_busy_body_drops_the_turn() {
+        let mut arbiter = Arbiter::new(0);
+        let body = Body::new(feet());
+        let view = bare_view(feet());
+        arbiter.engine.state_mut().set_heard(vec![zombie_sound()]);
+
+        assert!(
+            arbiter.alert(&view, &body, 10, false).is_none(),
+            "a command that wants the look must not be interrupted"
+        );
+        // The refused turn did not spend the cooldown.
+        assert!(arbiter.alert(&view, &body, 10, true).is_some());
+        // A command takes the look back mid-turn: the glance yields at once.
+        assert!(arbiter.alert(&view, &body, 11, false).is_none());
+        // The dropped turn is not resumed, and the cooldown is still spent.
+        arbiter.engine.state_mut().set_heard(vec![zombie_sound()]);
+        assert!(arbiter.alert(&view, &body, 12, true).is_none());
+    }
+
+    #[test]
+    fn a_sound_of_a_tracked_mob_does_not_turn() {
+        let mut arbiter = Arbiter::new(0);
+        let body = Body::new(feet());
+        let mut view = bare_view(feet());
+        let position = Vec3::new(0.5, 64.0, 5.0);
+        view.melee = Some(EntityView {
+            id: 21,
+            kind: EntityKind::Zombie,
+            position,
+            distance: view.eye.distance_to(position),
+        });
+        let mut sound = zombie_sound();
+        sound.entity = Some(21);
+        arbiter.engine.state_mut().set_heard(vec![sound]);
+
+        assert!(arbiter.alert(&view, &body, 10, true).is_none());
+    }
+
+    #[test]
+    fn one_alert_turn_per_cooldown() {
+        let mut arbiter = Arbiter::new(0);
+        let body = Body::new(feet());
+        let view = bare_view(feet());
+        for tick in 10..70 {
+            arbiter.engine.state_mut().set_heard(vec![zombie_sound()]);
+            let glance = arbiter.alert(&view, &body, tick, true);
+            assert_eq!(glance.is_some(), tick < 40, "tick {tick}");
+            if let Some(glance) = glance {
+                let notes = glance
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event, EventKind::Note { .. }))
+                    .count();
+                assert_eq!(notes, usize::from(tick == 10), "tick {tick}");
+            }
+        }
+        // One turn per 60 ticks, counted from the tick it started.
+        assert!(arbiter.alert(&view, &body, 70, true).is_some());
     }
 }

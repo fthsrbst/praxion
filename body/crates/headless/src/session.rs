@@ -84,6 +84,22 @@ pub struct SessionStats {
     pub tick_end_packets: AtomicU64,
     /// `player_position` packets applied, including the spawn teleport.
     pub teleports: AtomicU64,
+    /// Real-client shadow mode only: frames the decision loop computed and threw
+    /// away, of which some asked for something (a held key, a look change, a
+    /// click, a slot, a menu action or chat). The pair says how much of the
+    /// operator's play the body would have wanted to control, without any hand
+    /// acting on it.
+    pub shadow_wanted: AtomicU64,
+    /// Hands mode only: frames translated and written to the helper.
+    pub hands_frames: AtomicU64,
+    /// Hands mode only: frames the helper refused.
+    pub hands_refused: AtomicU64,
+    /// Hands mode only: frames that asked for a control S3 cannot post (sneak,
+    /// sprint, a menu action, chat).
+    pub hands_unsupported: AtomicU64,
+    /// Hands mode only: takeovers (operator input, focus loss, helper bye or
+    /// exit) that stopped the frames.
+    pub hands_takeovers: AtomicU64,
     /// The last position physics produced, as three `f64::to_bits` values.
     position: [AtomicU64; 3],
     /// The first position physics produced (the spawn position).
@@ -165,7 +181,9 @@ impl SessionStats {
             "ticks: {}  physics: {}  frames: {}  dropped: {}  refused moves: {}\n\
              packets: input {}, sprint {}, position {}, tick_end {}\n\
              teleports: {} (corrections after spawn: {})\n\
-             clicks: attack {}, use {}",
+             clicks: attack {}, use {}\n\
+             shadow: {} of {} frames asked for something (real-client mode only)\n\
+             hands: {} sent, {} refused, {} unsupported, {} takeovers",
             Self::get(&self.ticks_ran),
             Self::get(&self.physics_ticks),
             Self::get(&self.frames),
@@ -179,6 +197,12 @@ impl SessionStats {
             self.corrections(),
             Self::get(&self.attack_clicks),
             Self::get(&self.use_clicks),
+            Self::get(&self.shadow_wanted),
+            Self::get(&self.frames),
+            Self::get(&self.hands_frames),
+            Self::get(&self.hands_refused),
+            Self::get(&self.hands_unsupported),
+            Self::get(&self.hands_takeovers),
         )
     }
 }
@@ -302,6 +326,41 @@ impl Drop for Session {
         // Dropping the command sender ends the session thread at its next loop
         // iteration. No join here: a thread blocked on a socket write must not be
         // able to hang its owner. `close` is the joining version.
+    }
+}
+
+/// What a process needs from a running body, shared by [`Session`] (a logged-in
+/// body) and [`crate::ShadowSession`] (the operator's own client in shadow
+/// mode), so the binary can treat both alike.
+pub trait Host {
+    /// Wait at most `timeout` for the next event. `None` means nothing arrived.
+    fn recv_event_timeout(&self, timeout: Duration) -> Option<Event>;
+
+    /// Whether the host thread is still running.
+    fn is_connected(&self) -> bool;
+
+    /// The counters of this host.
+    fn stats(&self) -> &SessionStats;
+
+    /// Ask the host to end. The `Disconnected` event follows.
+    fn disconnect(&self);
+}
+
+impl Host for Session {
+    fn recv_event_timeout(&self, timeout: Duration) -> Option<Event> {
+        Session::recv_event_timeout(self, timeout)
+    }
+
+    fn is_connected(&self) -> bool {
+        Session::is_connected(self)
+    }
+
+    fn stats(&self) -> &SessionStats {
+        Session::stats(self)
+    }
+
+    fn disconnect(&self) {
+        Session::disconnect(self);
     }
 }
 

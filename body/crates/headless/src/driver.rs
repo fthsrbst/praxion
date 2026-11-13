@@ -42,6 +42,12 @@ pub trait Driver: Send {
     /// message, if the kill packet carried one. The default does nothing.
     fn on_death(&mut self, _message: Option<String>) {}
 
+    /// The hands stopped applying frames after a takeover (`reason` is the
+    /// helper's own word: `foreign_input`, `focus_lost`, `tap_disabled`, or the
+    /// session's `helper exited`). The driver must stop reading its actuator's
+    /// receipts as proof of its own actions. The default does nothing.
+    fn on_takeover(&mut self, _reason: &str) {}
+
     /// A JSON summary for the owner's log, if the driver has one.
     fn summary_json(&self) -> Option<String> {
         None

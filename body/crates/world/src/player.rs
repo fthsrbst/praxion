@@ -168,6 +168,10 @@ pub(crate) struct Player {
     pos: Option<Vec3>,
     yaw: f32,
     pitch: f32,
+    /// The on-ground flag of the client's last serverbound movement packet.
+    /// `None` until one was seen in this life, so "not reported" never reads as
+    /// "in the air".
+    on_ground: Option<bool>,
     health: Option<Health>,
     experience: Option<Experience>,
     selected_slot: Option<u32>,
@@ -201,6 +205,19 @@ impl Player {
 
     pub(crate) fn clear_position(&mut self) {
         self.pos = None;
+    }
+
+    pub(crate) fn on_ground(&self) -> Option<bool> {
+        self.on_ground
+    }
+
+    pub(crate) fn set_on_ground(&mut self, on_ground: bool) {
+        self.on_ground = Some(on_ground);
+    }
+
+    /// Forget the grounded state with the position: a new life is a new entity.
+    pub(crate) fn clear_on_ground(&mut self) {
+        self.on_ground = None;
     }
 
     pub(crate) fn health(&self) -> Option<Health> {

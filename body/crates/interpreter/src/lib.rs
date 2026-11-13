@@ -21,13 +21,21 @@
 //! released when `G` becomes `T`, when the own guard stops being `T`, or at
 //! `max_ticks`. A primitive failure is retried, but a rule whose primitive or
 //! child skill fails [`MAX_PRIMITIVE_FAILURES`] times in a row fails its skill
-//! with the last kind. A success or a different rule firing resets the count.
+//! with the last kind. A rule's own success clears its count, and another rule
+//! firing leaves it alone.
+//!
+//! A preemption is not a failure and the stack comes back whole, but it is
+//! counted per rule: [`MAX_PREEMPTIONS`] preemptions of one rule's in-flight
+//! action without a success of that rule fail the skill `no_progress` instead of
+//! restarting the same action forever (live run A, 2026-11-12).
 
 mod interp;
 
 use praxion_rules::{ArgValue, FactCall, PrimitiveKind};
 
-pub use interp::{DEFAULT_MAX_TICKS, Interpreter, MAX_PRIMITIVE_FAILURES};
+pub use interp::{
+    DEFAULT_MAX_TICKS, Interpreter, MAX_PREEMPTIONS, MAX_PRIMITIVE_FAILURES, NO_PROGRESS,
+};
 
 /// A bounded, observable interpreter transition. The driver drains these once
 /// per tick and writes them to the event log; the interpreter itself never

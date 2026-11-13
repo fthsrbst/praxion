@@ -1,0 +1,41 @@
+# A camp is four blocks standing within six blocks of the body: a crafting
+# table, a furnace, a chest and a torch (decision 2026-11-12 "Camp"). This
+# skill places them from the inventory, table first, because that is the order
+# the body can work in: a table is what the chest and the furnace were crafted
+# at, and the torch is the light the camp is built around.
+#
+# Why the rules are ordered this way: the goal check is on top, so a standing
+# camp ends the skill at once and a body at its own camp never moves. Then one
+# rule per item, in order, each guarded by "not near yet and held": a rule whose
+# item is already standing or not carried is false, so the next item gets its
+# turn, and a body that holds all four places them one tick at a time in this
+# order. Every place is guarded by `has(...)` as well as `not near(...)`,
+# because `place` fails `no_item` and a failed primitive is retried three times
+# before it fails the skill (interpreter 6.1); the guard turns that into a
+# skip instead of a failure. The last rule is the honest end: a camp block the
+# body does not carry is missing, so the skill fails `no_item` and the caller
+# gets that rung first. Its guard reads the inventory only, never `near`, so an
+# unknown sight fact cannot turn into a wrong failure: with the four carried
+# and a `near` the perception cannot answer yet, no rule is true and the
+# interpreter observes that fact instead of ending the camp.
+#
+# Why it places but does not fetch the four blocks. Fetching one needs two
+# rules (place the held one, else call its getter), so all four would be nine
+# rules and the core keeps six. Inlining the getters does not fit either: the
+# furnace alone is eight cobblestone plus a table plus a craft, and one block's
+# fetch would then repeat what `get_furnace`, `get_chest` and `get_torch` already
+# do. The depth cap rules out the alternative as well: `get_furnace` and
+# `get_torch` are four frames by themselves (through `get_cobblestone` and
+# `get_coal`), so a camp that called them would be a five-frame chain the
+# loader rejects. The camp is the top of the ladder, so it takes the ladder's
+# output: the plan that builds a camp asks for the four blocks first, then for
+# this skill, and a missing one is `no_item` rather than a silent no-op.
+skill make_camp()
+  doc "Have a crafting table, a furnace, a chest and a torch standing within 6 blocks of the body, placed from the inventory; fails no_item when one is missing."
+  rules:
+    near(crafting_table, 6) and near(furnace, 6) and near(chest, 6) and near(torch, 6) -> done
+    not near(crafting_table, 6) and has(crafting_table) -> place(crafting_table)
+    not near(furnace, 6) and has(furnace) -> place(furnace)
+    not near(chest, 6) and has(chest) -> place(chest)
+    not near(torch, 6) and has(torch) -> place(torch)
+    not has(crafting_table) or not has(furnace) or not has(chest) or not has(torch) -> fail(no_item)

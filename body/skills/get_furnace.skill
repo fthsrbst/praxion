@@ -1,0 +1,26 @@
+# A furnace is eight cobblestone in a ring on a 3x3 grid, so it needs a placed
+# crafting table. This is the admitted draft (`local/skills/candidates/
+# get_furnace.skill`) promoted to core, with the input checks moved above the
+# actions the way every other core skill orders them.
+#
+# Depth 4, the deepest a core skill may load: get_furnace -> get_cobblestone ->
+# get_wooden_pickaxe -> get_planks (a leaf). get_cobblestone carries the whole
+# pickaxe chain and brings the placed table along when it has to walk, so the
+# only other step here is putting a table down again when none stands in reach.
+#
+# Why the rules are ordered this way: the goal check is on top, so a body that
+# already holds a furnace ends at once. The craft rule asks for both things it
+# cannot make itself: eight cobblestone and a table within reach. The rule
+# under it fetches the cobblestone, and a failed `get_cobblestone` makes that
+# rule ineligible for one tick, so the table rule gets its turn. The table rule
+# is last because it is the one that is always true when nothing else is
+# missing: `get_crafting_table_near` places the table the body holds, or crafts
+# and places one, and returns done at once when a table already stands in
+# reach. `craft` above it can then never fail `needs_table`.
+skill get_furnace()
+  doc "Have a furnace in the inventory: eight cobblestone crafted at a placed crafting table."
+  rules:
+    count(furnace) >= 1 -> done
+    count(cobblestone) >= 8 and near(crafting_table, 4) -> craft(furnace)
+    count(cobblestone) < 8 -> do get_cobblestone(8)
+    true -> do get_crafting_table_near()

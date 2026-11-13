@@ -20,6 +20,11 @@ pub enum Event {
     /// a zero-health update reported the death before the kill packet, or the
     /// server sends an empty message (`showDeathMessages` off).
     Died { message: Option<String> },
+    /// The hands stopped applying frames: the operator took control, or the
+    /// helper said `BYE` or exited. Frames are dropped again (shadow mode) and
+    /// the body generation moved on, so nothing built for the old control can
+    /// be applied.
+    TakenOver { reason: String },
 }
 
 /// Something the owner tells the session.

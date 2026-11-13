@@ -9,6 +9,7 @@
 pub mod chat;
 pub mod cli;
 pub mod driver;
+pub mod nearby;
 pub mod summary;
 
 use std::collections::BTreeSet;

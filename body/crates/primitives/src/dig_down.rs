@@ -1,6 +1,8 @@
-//! `dig_down` and `branch_mine`: dig a walkable one-wide passage toward a
-//! block that no ray can see. Both run on the [`Digger`] state machine and the
-//! [`plan_step`] planner; they differ only in their route (see [`Route`]).
+//! `dig_down`, `branch_mine` and `climb_out`: dig a walkable one-wide passage
+//! toward a block that no ray can see, or back up to the open sky. All three
+//! run on the [`Digger`] state machine; they differ in their route (see
+//! [`Route`]). The two ways down plan with [`plan_step`], the way up with
+//! [`plan_climb`].
 //!
 //! # `dig_down`
 //!
@@ -17,7 +19,16 @@
 //! first cuts the same staircase down to the ore's best height, then tunnels
 //! level, in legs that turn at right angles, until the ore is in sight.
 //!
-//! # One step
+//! # `climb_out`
+//!
+//! The way back up (`go_to_surface`): a body that tunnelled down stands under
+//! rock that no skill walks out of. `climb_out` cuts a staircase UP, the mirror
+//! of the descent, until the body stands under open sky ([`praxion_facts::sky_above`]).
+//! It walks an open stair when one is there (its own descent staircase, a cave
+//! slope) and digs only where the way is closed. See [`plan_climb`] for the
+//! step and its safety rules.
+//!
+//! # One step (down)
 //!
 //! One step goes from the feet cell `F = (x, y, z)` to the next column
 //! `(x + dx, ., z + dz)`:
@@ -39,15 +50,17 @@
 
 use azalea_core::position::BlockPos;
 use praxion_headless::{Click, ControlFrame};
+use praxion_facts::sky_above;
 use praxion_interpreter::Outcome;
 use praxion_perception::exposes_fluid;
 use praxion_planner::{blocks, center};
 use praxion_world::BlockState;
 
-use crate::branch_mine::{Branch, Candidates};
+use crate::branch_mine::{BRANCH_MAX_TICKS, Branch, Candidates};
 use crate::common::{HandSelect, ToolStep, aim_precise, hold_tool, idle, pickup_frame};
 use crate::frontier::nearest_known_block;
 use crate::mine::block_gone;
+use crate::move_to::Move;
 use crate::runner::{Ctx, IntentSpec};
 
 /// How deep the staircase may go below where the call started.
@@ -65,6 +78,20 @@ pub(crate) const MAX_DUGS: u32 = 40;
 /// `dig_down` always descends, so it never takes a level step and the counter
 /// stays at zero for it.
 pub(crate) const MAX_DRY_LEVEL_STEPS: u32 = 64;
+
+/// Ticks one `climb_out` call may run. A stair up is three digs (about 35 ticks
+/// each in stone) and the walk onto it: about 120 ticks a block, so 3,000 ticks
+/// climb some twenty-five blocks of closed rock, the depth a `branch_mine`
+/// tunnel reaches from the surface twice over. Past it the call fails
+/// `no_way_up`, between two digs like the other caps.
+pub(crate) const CLIMB_MAX_TICKS: u32 = 3000;
+
+/// How many blocks one `climb_out` call may dig: three a stair, forty stairs.
+pub(crate) const CLIMB_MAX_DUGS: u32 = 120;
+
+/// The failure kind of a climb that cannot go on: every axis refused, or a cap
+/// reached.
+const NO_WAY_UP: &str = "no_way_up";
 
 /// The window of each dig receipt, as in `mine`.
 const DIG_WINDOW: u64 = 160;
@@ -85,6 +112,20 @@ const SETTLE_TICKS: u32 = 40;
 /// Idle ticks after a dig under a gravity block, so the falling block lands
 /// before the next plan reads the cells.
 const GRAVITY_COOLDOWN_TICKS: u32 = 10;
+
+/// How far from where the body stands `dig_down` looks for another cell to
+/// start the staircase from when it refuses the one it stands on. A person who
+/// cannot dig here steps a few blocks aside; five is the reach of the
+/// stone-near guard (`near(stone, 5)`).
+pub(crate) const RELOCATE_RADIUS: i32 = 5;
+
+/// How many times one `dig_down` call may step aside. Two: the second try
+/// covers a spot that proved bad only once its neighbours were in view; past
+/// it the ground around is not diggable and the call says so with the refusal.
+const MAX_RELOCATIONS: u32 = 2;
+
+/// Ticks one walk to another start cell may take (about ten seconds).
+const RELOCATE_TICKS: u32 = 200;
 
 /// An axis direction as `(dx, dz)`.
 pub(crate) type Dir = (i32, i32);
@@ -240,6 +281,140 @@ pub(crate) fn plan_step(
     StairStep::Walk(tread)
 }
 
+/// The next move of a climb from the feet cell `feet` along `dir`: one stair UP.
+///
+/// ```text
+///   y+2  [A] [C]     A: clearance over the head, so the body can rise
+///   y+1   .  [T]     C: head room of the new stair
+///   y     F  [S]     T: the new feet cell, one higher
+///                    S: its floor, the block beside the feet: must be solid
+/// ```
+///
+/// The cells (C, A, T) are dug top-down. It is the mirror of the descent, with
+/// the roof where the descent has the floor: no cell is opened under fluid, and
+/// none under a block that falls (sand, gravel), because that block would drop
+/// into the stair on the body. Refusals are decided before the first dig, and
+/// nothing is dug when the stair is already open (a [`StairStep::Walk`]).
+///
+/// Pure over a block lookup, like [`plan_step`].
+pub(crate) fn plan_climb(
+    feet: BlockPos,
+    dir: Dir,
+    lookup: &impl Fn(BlockPos) -> Option<BlockState>,
+) -> StairStep {
+    let (dx, dz) = dir;
+    let tread = offset(feet, dx, 1, dz);
+    let floor = offset(feet, dx, 0, dz);
+
+    let Some(floor_state) = lookup(floor) else {
+        return StairStep::Refuse(Refusal::UnsafeDrop);
+    };
+    if blocks::fluid(floor_state).is_some() {
+        return StairStep::Refuse(Refusal::Fluid);
+    }
+    // The body stands on it: the block must hold and must not hurt.
+    if !blocks::is_solid(floor_state) || blocks::is_hazard(floor_state) {
+        return StairStep::Refuse(Refusal::UnsafeDrop);
+    }
+
+    let cells = [
+        offset(feet, dx, 2, dz),
+        offset(feet, 0, 2, 0),
+        tread,
+    ];
+    let mut first_closed = None;
+    for &cell in &cells {
+        let Some(state) = lookup(cell) else {
+            return StairStep::Refuse(Refusal::UnsafeDrop);
+        };
+        if blocks::fluid(state).is_some() {
+            return StairStep::Refuse(Refusal::Fluid);
+        }
+        if blocks::is_passable(state) {
+            continue;
+        }
+        if blocks::is_hazard(state) {
+            return StairStep::Refuse(Refusal::UnsafeDrop);
+        }
+        if !blocks::is_breakable(state) {
+            return StairStep::Refuse(Refusal::NoBlock);
+        }
+        // Breaking a cell that holds back water or lava floods the stair; the
+        // cell above counts (a lake over the roof falls in).
+        if exposes_fluid(cell, lookup) {
+            return StairStep::Refuse(Refusal::Fluid);
+        }
+        first_closed.get_or_insert(cell);
+    }
+    if let Some(cell) = first_closed {
+        // The block over the cell about to open must stay where it is. Sand or
+        // gravel would fall into the stair; an unloaded cell is not known to
+        // be safe. (The cell over the tread is the head room, dug before it.)
+        match lookup(offset(cell, 0, 1, 0)) {
+            Some(above) if !is_gravity(above) => {}
+            _ => return StairStep::Refuse(Refusal::UnsafeDrop),
+        }
+        return StairStep::Dig(cell);
+    }
+    StairStep::Walk(tread)
+}
+
+/// Whether the body can stand in `cell`: room for its feet and head, a solid
+/// floor under it that is no hazard.
+fn standable(cell: BlockPos, lookup: &impl Fn(BlockPos) -> Option<BlockState>) -> bool {
+    lookup(cell).is_some_and(blocks::is_passable)
+        && lookup(offset(cell, 0, 1, 0)).is_some_and(blocks::is_passable)
+        && lookup(offset(cell, 0, -1, 0))
+            .is_some_and(|floor| blocks::is_solid(floor) && !blocks::is_hazard(floor))
+}
+
+/// Whether a climbing body at `feet` is out of the ground: it can walk away on
+/// the level, to a side cell it can stand in. Open sky alone is not enough: the
+/// stair the climb cut is itself open to the sky a few blocks below the ground
+/// (its head rooms stack into a trench), and a body in that trench has no side
+/// cell to step to but the stair behind it, whose floor is a block lower.
+fn is_out(feet: BlockPos, lookup: &impl Fn(BlockPos) -> Option<BlockState>) -> bool {
+    axis_order((1, 0))
+        .into_iter()
+        .any(|(dx, dz)| standable(offset(feet, dx, 0, dz), lookup))
+}
+
+/// The nearest cell within [`RELOCATE_RADIUS`] of `feet` (not `feet` itself,
+/// which was refused) the body can stand in and from which at least one axis of
+/// the staircase is not refused. Nearest by horizontal distance, ties by
+/// position so the answer is deterministic; a cell at the same height or one
+/// lower or higher, so the walk there is a stroll, not a climb. Pure over a
+/// block lookup, so the choice is tested without a world.
+pub(crate) fn relocation_cell(
+    feet: BlockPos,
+    lookup: &impl Fn(BlockPos) -> Option<BlockState>,
+) -> Option<BlockPos> {
+    let mut columns: Vec<(i32, i32)> = (-RELOCATE_RADIUS..=RELOCATE_RADIUS)
+        .flat_map(|dx| (-RELOCATE_RADIUS..=RELOCATE_RADIUS).map(move |dz| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0) && dx * dx + dz * dz <= RELOCATE_RADIUS * RELOCATE_RADIUS)
+        .collect();
+    columns.sort_by_key(|&(dx, dz)| (dx * dx + dz * dz, dx, dz));
+    for (dx, dz) in columns {
+        for dy in [0, -1, 1] {
+            let cell = offset(feet, dx, dy, dz);
+            if !standable(cell, lookup) {
+                continue;
+            }
+            let min_y = cell.y - MAX_DEPTH;
+            let digs = axis_order((1, 0)).into_iter().any(|dir| {
+                !matches!(
+                    plan_step(cell, dir, Slope::Down, min_y, lookup),
+                    StairStep::Refuse(_)
+                )
+            });
+            if digs {
+                return Some(cell);
+            }
+        }
+    }
+    None
+}
+
 /// The axis direction a yaw (degrees, Minecraft convention: 0 faces south)
 /// points at, rounded.
 fn facing(yaw: f32) -> Dir {
@@ -281,6 +456,9 @@ enum Route {
     Staircase(Option<Dir>),
     /// `branch_mine`: down to the ore's height, then level legs.
     Branch(Branch),
+    /// `climb_out`: stairs up, along the axis of the last accepted step (an
+    /// axis only prefers; any axis the planner does not refuse may be taken).
+    Climb(Option<Dir>),
 }
 
 impl Route {
@@ -289,6 +467,24 @@ impl Route {
         match self {
             Self::Staircase(_) => Slope::Down,
             Self::Branch(branch) => branch.slope(feet_y),
+            // Not read by the climb: it plans with `plan_climb` and the
+            // level-step counters never see it.
+            Self::Climb(_) => Slope::Down,
+        }
+    }
+
+    /// The step along `dir` from `feet`.
+    fn plan(
+        &self,
+        feet: BlockPos,
+        dir: Dir,
+        slope: Slope,
+        min_y: i32,
+        lookup: &impl Fn(BlockPos) -> Option<BlockState>,
+    ) -> StairStep {
+        match self {
+            Self::Climb(_) => plan_climb(feet, dir, lookup),
+            _ => plan_step(feet, dir, slope, min_y, lookup),
         }
     }
 
@@ -296,7 +492,7 @@ impl Route {
     fn min_y(&self, start_y: i32) -> i32 {
         match self {
             Self::Staircase(_) => start_y - MAX_DEPTH,
-            Self::Branch(_) => i32::MIN,
+            Self::Branch(_) | Self::Climb(_) => i32::MIN,
         }
     }
 
@@ -306,13 +502,15 @@ impl Route {
             Self::Staircase(Some(dir)) => Candidates::single(*dir),
             Self::Staircase(None) => Candidates::from_axes(axis_order(facing), None),
             Self::Branch(branch) => branch.candidates(facing),
+            Self::Climb(Some(dir)) => Candidates::from_axes(axis_order(*dir), None),
+            Self::Climb(None) => Candidates::from_axes(axis_order(facing), None),
         }
     }
 
     /// A step along `dir` was accepted.
     fn accept(&mut self, dir: Dir) {
         match self {
-            Self::Staircase(fixed) => *fixed = Some(dir),
+            Self::Staircase(fixed) | Self::Climb(fixed) => *fixed = Some(dir),
             Self::Branch(branch) => branch.accept(dir),
         }
     }
@@ -330,6 +528,18 @@ impl Route {
         match self {
             Self::Staircase(_) => (MAX_DUGS, "no_block"),
             Self::Branch(branch) => (branch.dig_budget(start_y), "not_found"),
+            Self::Climb(_) => (CLIMB_MAX_DUGS, NO_WAY_UP),
+        }
+    }
+
+    /// The tick cap of the route, and the failure when it passes: the routes
+    /// that dig through rock without a natural end (see [`BRANCH_MAX_TICKS`],
+    /// [`CLIMB_MAX_TICKS`]).
+    fn tick_cap(&self) -> Option<(u32, &'static str)> {
+        match self {
+            Self::Staircase(_) => None,
+            Self::Branch(_) => Some((BRANCH_MAX_TICKS, "not_found")),
+            Self::Climb(_) => Some((CLIMB_MAX_TICKS, NO_WAY_UP)),
         }
     }
 }
@@ -342,6 +552,8 @@ pub(crate) struct Digger {
     start_y: Option<i32>,
     route: Route,
     dug: u32,
+    /// Ticks the call has run; see [`BRANCH_MAX_TICKS`].
+    ticks: u32,
     /// Level steps walked since the last accepted dig, of the branch route.
     /// Reset by every dig; see [`MAX_DRY_LEVEL_STEPS`].
     dry_level_steps: u32,
@@ -353,6 +565,20 @@ pub(crate) struct Digger {
     settle_waited: u32,
     cooldown: u32,
     airborne: u32,
+    /// Walks to another start cell made so far; see [`MAX_RELOCATIONS`].
+    relocations: u32,
+    /// The walk to another start cell, while one is under way.
+    relocating: Option<Relocation>,
+}
+
+/// The walk `dig_down` makes to a start cell it can dig from.
+#[derive(Debug)]
+struct Relocation {
+    walk: Move,
+    ticks: u32,
+    /// Why the cell the body stood on was refused: the failure kind if the
+    /// walk does not get there.
+    refusal: Refusal,
 }
 
 impl Digger {
@@ -367,12 +593,18 @@ impl Digger {
         Self::new(wanted, Route::Branch(branch))
     }
 
+    /// `climb_out()`: no wanted block, the sky is the goal.
+    pub(crate) fn climb_out() -> Self {
+        Self::new(String::new(), Route::Climb(None))
+    }
+
     fn new(wanted: String, route: Route) -> Self {
         Self {
             wanted,
             start_y: None,
             route,
             dug: 0,
+            ticks: 0,
             dry_level_steps: 0,
             target: None,
             walking: None,
@@ -381,7 +613,30 @@ impl Digger {
             settle_waited: 0,
             cooldown: 0,
             airborne: 0,
+            relocations: 0,
+            relocating: None,
         }
+    }
+
+    /// Whether the call's goal is met: the wanted block is known within mining
+    /// reach, or (for a climb) the body is out of the ground ([`is_out`]).
+    fn reached(
+        &self,
+        ctx: &mut Ctx<'_>,
+        feet: BlockPos,
+        lookup: &impl Fn(BlockPos) -> Option<BlockState>,
+    ) -> bool {
+        if matches!(self.route, Route::Climb(_)) {
+            return sky_above(ctx.perception, ctx.world) == Some(true) && is_out(feet, lookup);
+        }
+        nearest_known_block(
+            ctx.perception,
+            ctx.world,
+            &self.wanted,
+            praxion_rules::registry::EXPLORE_NEAR_RADIUS,
+            &[],
+        )
+        .is_some()
     }
 
     /// The runner registered the pending dig intent.
@@ -402,23 +657,28 @@ impl Digger {
         &mut self,
         ctx: &mut Ctx<'_>,
     ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
+        self.ticks = self.ticks.saturating_add(1);
         if self.target.is_some() {
             return self.tick_target(ctx);
         }
         let frame = idle(ctx);
         // The stop condition is checked between digs only: a dig in flight
         // always settles its receipt first.
-        if self.walking.is_none()
-            && nearest_known_block(
-                ctx.perception,
-                ctx.world,
-                &self.wanted,
-                praxion_rules::registry::EXPLORE_NEAR_RADIUS,
-                &[],
-            )
-            .is_some()
-        {
+        let feet = ctx.body.position().to_block_pos_floor();
+        let world = ctx.world;
+        let lookup = |pos: BlockPos| world.block_state(pos);
+        if self.walking.is_none() && self.reached(ctx, feet, &lookup) {
             return (frame, None, Some(Outcome::Confirmed));
+        }
+        // The tick cap of the routes that have one, checked between digs like
+        // the stop condition: a dig in flight settles its receipt first.
+        if let Some((cap, kind)) = self.route.tick_cap()
+            && self.ticks > cap
+        {
+            return (frame, None, Some(Outcome::Failed(kind.into())));
+        }
+        if self.relocating.is_some() {
+            return self.tick_relocation(ctx, frame);
         }
         if self.cooldown > 0 {
             self.cooldown -= 1;
@@ -429,10 +689,18 @@ impl Digger {
             if self.airborne > AIRBORNE_TICKS {
                 return (frame, None, Some(Outcome::Failed("unsafe_drop".into())));
             }
+            // A climb jumps onto each stair: the forward key stays held in the
+            // air until the body lands on it, or the jump falls back at the
+            // foot of the next block (a body that lets go at the top of the
+            // jump has no speed left to clear the edge).
+            if matches!(self.route, Route::Climb(_))
+                && let Some((tread, _)) = self.walking
+            {
+                return (pickup_frame(ctx, center(tread)), None, None);
+            }
             return (frame, None, None);
         }
         self.airborne = 0;
-        let feet = ctx.body.position().to_block_pos_floor();
         if let Some((tread, ticks)) = &mut self.walking {
             if feet == *tread {
                 self.walking = None;
@@ -446,18 +714,29 @@ impl Digger {
         }
 
         let start_y = *self.start_y.get_or_insert(feet.y);
-        let world = ctx.world;
-        let lookup = |pos: BlockPos| world.block_state(pos);
         let slope = self.route.slope(feet.y);
         let min_y = self.route.min_y(start_y);
         let dirs = self.route.candidates(facing(ctx.body.look().y_rot()));
         let mut first_refusal = None;
+        // The first axis the planner does not refuse. A climb looks on for an
+        // open stair first: walking up its own descent costs no dig.
+        let climbing = matches!(self.route, Route::Climb(_));
+        let mut chosen: Option<(Dir, StairStep)> = None;
         for dir in dirs.iter().copied() {
-            let step = plan_step(feet, dir, slope, min_y, &lookup);
+            let step = self.route.plan(feet, dir, slope, min_y, &lookup);
             if let StairStep::Refuse(refusal) = step {
                 first_refusal.get_or_insert(refusal);
                 continue;
             }
+            let open = matches!(step, StairStep::Walk(_));
+            if chosen.is_none() || open {
+                chosen = Some((dir, step));
+            }
+            if open || !climbing {
+                break;
+            }
+        }
+        if let Some((dir, step)) = chosen {
             self.route.accept(dir);
             match step {
                 StairStep::Dig(cell) => {
@@ -501,8 +780,69 @@ impl Digger {
             }
             return (frame, None, None);
         }
-        let kind = first_refusal.map_or("no_block", Refusal::kind);
+        // Every axis refused. A person who cannot dig where they stand steps
+        // a few blocks aside and digs there; they do not walk the surface for
+        // minutes (run B, 2026-11-12: three `unsafe_drop` refusals at one spot
+        // in as many ticks, then three minutes of exploring, then a stair dug
+        // at the first cell of the new ground). Only a staircase that has dug
+        // nothing yet steps aside, and only for a refusal another cell can
+        // cure: a drop or water here says nothing about the ground five blocks
+        // away, `too_deep` and bedrock say the same everywhere.
+        if let Some(refusal) = first_refusal
+            && matches!(refusal, Refusal::UnsafeDrop | Refusal::Fluid)
+            && matches!(self.route, Route::Staircase(_))
+            && self.dug == 0
+            && self.relocations < MAX_RELOCATIONS
+            && let Some(cell) = relocation_cell(feet, &lookup)
+        {
+            log::debug!(
+                "dig_down: {:?} refused at {feet:?}; stepping aside to {cell:?}",
+                refusal.kind()
+            );
+            self.relocations += 1;
+            self.relocating = Some(Relocation {
+                walk: Move::to_cell(cell),
+                ticks: 0,
+                refusal,
+            });
+            return (frame, None, None);
+        }
+        let kind = if climbing {
+            NO_WAY_UP
+        } else {
+            first_refusal.map_or("no_block", Refusal::kind)
+        };
         (frame, None, Some(Outcome::Failed(kind.into())))
+    }
+
+    /// One tick of the walk to another start cell. Arriving starts the
+    /// staircase over from there (depth is measured from the new cell); a walk
+    /// that fails or runs out of ticks fails the call with the refusal that
+    /// sent the body off.
+    fn tick_relocation(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        idle_frame: ControlFrame,
+    ) -> (ControlFrame, Option<IntentSpec>, Option<Outcome>) {
+        let relocation = self.relocating.as_mut().expect("checked by the caller");
+        relocation.ticks += 1;
+        let refusal = relocation.refusal;
+        if relocation.ticks > RELOCATE_TICKS {
+            return (idle_frame, None, Some(Outcome::Failed(refusal.kind().into())));
+        }
+        // No movement intent: the walk is one step of this primitive's own
+        // work, and the dig receipts stay the only receipts of the call.
+        let (frame, _, outcome) = relocation.walk.tick(ctx, true);
+        match outcome {
+            None => (frame, None, None),
+            Some(Outcome::Confirmed) => {
+                self.relocating = None;
+                self.start_y = None;
+                self.route = Route::Staircase(None);
+                (frame, None, None)
+            }
+            Some(_) => (idle_frame, None, Some(Outcome::Failed(refusal.kind().into()))),
+        }
     }
 
     /// Break the current target: tool, aim, click until its receipt settles.
@@ -736,6 +1076,80 @@ mod tests {
         assert_eq!(step, StairStep::Refuse(Refusal::Fluid), "lava is the floor");
     }
 
+    /// A dirt flat with a hole under every neighbour of the start cell: each
+    /// of the four first steps lands on a floor that is air.
+    fn ridge_map() -> Map {
+        let mut map = Map::flat(63, 59);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for y in 60..=62 {
+                    map.set(BlockPos::new(dx, y, dz), BlockKind::Air);
+                }
+            }
+        }
+        map
+    }
+
+    #[test]
+    fn a_start_cell_where_every_step_drops_is_refused_on_all_four_axes() {
+        let map = ridge_map();
+        let feet = BlockPos::new(0, 64, 0);
+        for dir in axis_order(EAST) {
+            assert_eq!(
+                plan_step(feet, dir, Slope::Down, DOWN_FLOOR, &map.lookup()),
+                StairStep::Refuse(Refusal::UnsafeDrop),
+                "{dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_relocation_cell_is_the_nearest_standable_one_with_a_step_that_digs() {
+        let map = ridge_map();
+        let feet = BlockPos::new(0, 64, 0);
+        let cell = relocation_cell(feet, &map.lookup()).expect("a cell next door");
+        // The hole is one block wide on every side, so the cell one block west
+        // (the first of the nearest, by position) stands on dirt and its own
+        // westward step lands on dirt two blocks from the hole.
+        assert_eq!(cell, BlockPos::new(-1, 64, 0));
+        let step = (0..4)
+            .map(|i| axis_order(EAST)[i])
+            .map(|dir| plan_step(cell, dir, Slope::Down, cell.y - MAX_DEPTH, &map.lookup()))
+            .any(|step| !matches!(step, StairStep::Refuse(_)));
+        assert!(step, "{cell:?} digs");
+        // Deterministic: asked again, the same cell.
+        assert_eq!(relocation_cell(feet, &map.lookup()), Some(cell));
+    }
+
+    #[test]
+    fn a_start_with_no_diggable_cell_around_has_no_relocation() {
+        // Water everywhere within five blocks: every cell is a fluid refusal.
+        let mut map = Map::flat(63, 59);
+        for dx in -6..=6 {
+            for dz in -6..=6 {
+                map.set(BlockPos::new(dx, 63, dz), BlockKind::Water);
+            }
+        }
+        assert_eq!(relocation_cell(BlockPos::new(0, 64, 0), &map.lookup()), None);
+        // Unloaded ground is no evidence of a safe cell either.
+        let unloaded = |_: BlockPos| None;
+        assert_eq!(relocation_cell(BlockPos::new(0, 64, 0), &unloaded), None);
+    }
+
+    #[test]
+    fn the_relocation_stays_inside_its_radius_and_on_a_floor() {
+        let mut map = Map::flat(63, 59);
+        // Only one good column exists, six blocks off: out of range.
+        for dx in -8..=8 {
+            for dz in -8..=8 {
+                if (dx, dz) != (6, 0) {
+                    map.set(BlockPos::new(dx, 63, dz), BlockKind::Lava);
+                }
+            }
+        }
+        assert_eq!(relocation_cell(BlockPos::new(0, 64, 0), &map.lookup()), None);
+    }
+
     #[test]
     fn a_hole_under_the_new_stair_is_an_unsafe_drop() {
         let mut map = Map::flat(63, 59);
@@ -956,6 +1370,153 @@ mod tests {
         assert_eq!(step, StairStep::Refuse(Refusal::TooDeep));
     }
 
+    /// A stone world to `top` with the pocket the body stands in at `feet`
+    /// (feet and head cell open), and a way to read a step up from there.
+    fn climb_map(top: i32, feet: BlockPos) -> Map {
+        let mut map = Map {
+            cells: HashMap::new(),
+            layers: vec![(top, BlockKind::Stone)],
+        };
+        map.set(feet, BlockKind::Air);
+        map.set(BlockPos::new(feet.x, feet.y + 1, feet.z), BlockKind::Air);
+        map
+    }
+
+    fn climb(map: &Map, feet: BlockPos) -> StairStep {
+        plan_climb(feet, EAST, &map.lookup())
+    }
+
+    #[test]
+    fn a_climb_digs_the_head_room_over_the_stair_first_then_the_clearance_then_the_tread() {
+        let feet = BlockPos::new(0, 56, 0);
+        let mut map = climb_map(63, feet);
+        let mut order = Vec::new();
+        loop {
+            match climb(&map, feet) {
+                StairStep::Dig(cell) => {
+                    order.push(cell);
+                    map.set(cell, BlockKind::Air);
+                }
+                StairStep::Walk(tread) => {
+                    assert_eq!(tread, BlockPos::new(1, 57, 0), "one block up, one along");
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        // Top-down: the two y+2 cells (head room of the new stair, clearance
+        // over the body), then the tread. The floor beside the feet is never
+        // dug.
+        assert_eq!(
+            order,
+            [
+                BlockPos::new(1, 58, 0),
+                BlockPos::new(0, 58, 0),
+                BlockPos::new(1, 57, 0),
+            ]
+        );
+        assert!(!order.contains(&BlockPos::new(1, 56, 0)), "the floor stays");
+    }
+
+    #[test]
+    fn an_open_stair_is_walked_without_a_dig() {
+        let feet = BlockPos::new(0, 56, 0);
+        let mut map = climb_map(63, feet);
+        for cell in [
+            BlockPos::new(1, 58, 0),
+            BlockPos::new(0, 58, 0),
+            BlockPos::new(1, 57, 0),
+        ] {
+            map.set(cell, BlockKind::Air);
+        }
+        assert_eq!(climb(&map, feet), StairStep::Walk(BlockPos::new(1, 57, 0)));
+    }
+
+    #[test]
+    fn a_climb_needs_a_solid_floor_beside_the_feet() {
+        let feet = BlockPos::new(0, 56, 0);
+        for (kind, refusal) in [
+            (BlockKind::Air, Refusal::UnsafeDrop),
+            (BlockKind::Lava, Refusal::Fluid),
+            (BlockKind::Water, Refusal::Fluid),
+            (BlockKind::MagmaBlock, Refusal::UnsafeDrop),
+        ] {
+            let mut map = climb_map(63, feet);
+            map.set(BlockPos::new(1, 56, 0), kind);
+            assert_eq!(climb(&map, feet), StairStep::Refuse(refusal), "{kind:?}");
+        }
+        // An unloaded floor is not known to hold.
+        let lookup = |pos: BlockPos| (pos != BlockPos::new(1, 56, 0)).then(|| BlockState::from(BlockKind::Stone));
+        assert_eq!(
+            plan_climb(feet, EAST, &lookup),
+            StairStep::Refuse(Refusal::UnsafeDrop)
+        );
+    }
+
+    #[test]
+    fn a_climb_never_opens_a_cell_under_or_beside_fluid() {
+        let feet = BlockPos::new(0, 56, 0);
+        // Water in a cell of the stair itself.
+        let mut map = climb_map(63, feet);
+        map.set(BlockPos::new(1, 58, 0), BlockKind::Water);
+        assert_eq!(climb(&map, feet), StairStep::Refuse(Refusal::Fluid));
+        // Water or lava over the first cell to open (a lake over the roof
+        // falls into the stair), and beside the second.
+        for fluid in [BlockKind::Water, BlockKind::Lava] {
+            let mut over = climb_map(63, feet);
+            over.set(BlockPos::new(1, 59, 0), fluid);
+            assert_eq!(climb(&over, feet), StairStep::Refuse(Refusal::Fluid), "{fluid:?} over");
+            let mut beside = climb_map(63, feet);
+            beside.set(BlockPos::new(1, 58, 1), fluid);
+            assert_eq!(climb(&beside, feet), StairStep::Refuse(Refusal::Fluid), "{fluid:?} beside");
+        }
+    }
+
+    #[test]
+    fn a_climb_never_opens_a_cell_under_a_block_that_falls() {
+        let feet = BlockPos::new(0, 56, 0);
+        for kind in [BlockKind::Sand, BlockKind::Gravel, BlockKind::RedSand] {
+            let mut map = climb_map(63, feet);
+            map.set(BlockPos::new(1, 59, 0), kind);
+            assert_eq!(
+                climb(&map, feet),
+                StairStep::Refuse(Refusal::UnsafeDrop),
+                "{kind:?} over the first cell"
+            );
+        }
+        // Once the first cell is open the second is checked on its own: gravel
+        // over the clearance cell refuses the step half way.
+        let mut map = climb_map(63, feet);
+        map.set(BlockPos::new(1, 58, 0), BlockKind::Air);
+        map.set(BlockPos::new(0, 59, 0), BlockKind::Gravel);
+        assert_eq!(climb(&map, feet), StairStep::Refuse(Refusal::UnsafeDrop));
+        // Sand that is the cell to dig, with solid rock over it, is dug: it
+        // falls nowhere.
+        let mut map = climb_map(63, feet);
+        map.set(BlockPos::new(1, 58, 0), BlockKind::Sand);
+        assert_eq!(climb(&map, feet), StairStep::Dig(BlockPos::new(1, 58, 0)));
+        // An unloaded cell over the one to open is not known to be safe.
+        let lookup = |pos: BlockPos| {
+            (pos != BlockPos::new(1, 59, 0)).then(|| BlockState::from(BlockKind::Stone))
+        };
+        assert_eq!(
+            plan_climb(feet, EAST, &lookup),
+            StairStep::Refuse(Refusal::UnsafeDrop)
+        );
+    }
+
+    #[test]
+    fn a_climb_refuses_bedrock_and_hazards_in_the_stair() {
+        let feet = BlockPos::new(0, 56, 0);
+        let mut map = climb_map(63, feet);
+        map.set(BlockPos::new(0, 58, 0), BlockKind::Bedrock);
+        map.set(BlockPos::new(1, 58, 0), BlockKind::Air);
+        assert_eq!(climb(&map, feet), StairStep::Refuse(Refusal::NoBlock));
+        let mut map = climb_map(63, feet);
+        map.set(BlockPos::new(1, 57, 0), BlockKind::MagmaBlock);
+        assert_eq!(climb(&map, feet), StairStep::Refuse(Refusal::UnsafeDrop));
+    }
+
     #[test]
     fn gravity_blocks_are_recognised() {
         for kind in [BlockKind::Sand, BlockKind::RedSand, BlockKind::Gravel] {
@@ -1068,6 +1629,9 @@ mod digger_tests {
         receipt: Receipt,
         watch: Option<BlockKind>,
         max_ticks: u64,
+        /// Run the background sweep each tick, as production does, so the
+        /// known map the planner walks over fills in.
+        sweep: bool,
     }
 
     impl Call {
@@ -1079,6 +1643,7 @@ mod digger_tests {
                 receipt: Receipt::Confirmed,
                 watch: None,
                 max_ticks: 1500,
+                sweep: false,
             }
         }
     }
@@ -1111,6 +1676,7 @@ mod digger_tests {
             receipt,
             watch,
             max_ticks,
+            sweep,
         } = call;
         let mut body = Body::new(feet_position(start));
         set_body_look(&mut body, look.0, look.1);
@@ -1124,6 +1690,9 @@ mod digger_tests {
             // at this position.
             move_body(world, body.position());
             perception.begin_tick(world);
+            if sweep {
+                perception.sweep(world);
+            }
             if let Some(kind) = watch
                 && let Some(eye) = perception.eye_cell(world)
             {
@@ -1206,8 +1775,94 @@ mod digger_tests {
         }
     }
 
+    /// A runner with one `dig_down(block)` started through `Runner::start`.
+    fn dig_down_call(block: &str) -> Runner {
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "dig_down".to_owned(),
+                args: vec![ArgValue::Name(block.to_owned())],
+            })
+            .expect("dig_down starts");
+        runner
+    }
+
+    /// Run B, 2026-11-12: `dig_down` refused the cell the body stood on
+    /// (`unsafe_drop`, three times in three ticks), the skill then explored the
+    /// surface for three minutes, and a stair dug at the first cell of the new
+    /// ground worked. The body steps a block aside instead and digs there.
+    #[test]
+    fn a_refused_start_steps_aside_and_digs_the_stair_from_the_next_cell() {
+        let start = BlockPos::new(24, 64, 24);
+        let mut world = world_with(3, 63, move |pos| {
+            let hole = (pos.x - start.x).abs() <= 1
+                && (pos.z - start.z).abs() <= 1
+                && (60..=62).contains(&pos.y);
+            if hole {
+                BlockState::from(BlockKind::Air)
+            } else if pos.y >= 60 {
+                BlockState::from(BlockKind::Dirt)
+            } else {
+                BlockState::from(BlockKind::Stone)
+            }
+        });
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = dig_down_call("stone");
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call {
+                watch: Some(BlockKind::Stone),
+                sweep: true,
+                ..Call::new(start)
+            },
+            |_| false,
+        );
+        assert_eq!(run.outcome, Some(Outcome::Confirmed), "{:?}", run.path);
+        let first_dug = *run.dug.first().expect("it dug a stair");
+        assert!(
+            (first_dug.x - start.x).abs() > 1 || (first_dug.z - start.z).abs() > 1,
+            "the first dig is not beside the hole: {first_dug:?} (path {:?})",
+            run.path
+        );
+        assert!(
+            run.path.iter().any(|pos| *pos != start && pos.y == 64),
+            "the body stepped aside on the surface: {:?}",
+            run.path
+        );
+    }
+
+    /// When no cell within the radius can be dug from, the call still ends with
+    /// the refusal's own kind, at once, not after a long search.
+    #[test]
+    fn with_no_diggable_cell_around_the_refusal_is_the_failure() {
+        let start = BlockPos::new(24, 64, 24);
+        let mut world = world_with(3, 63, move |pos| {
+            // Dirt on top, a hollow under every cell within eight blocks.
+            let near = (pos.x - start.x).abs() <= 8 && (pos.z - start.z).abs() <= 8;
+            if near && (60..=62).contains(&pos.y) {
+                BlockState::from(BlockKind::Air)
+            } else if pos.y >= 60 {
+                BlockState::from(BlockKind::Dirt)
+            } else {
+                BlockState::from(BlockKind::Stone)
+            }
+        });
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        let mut runner = dig_down_call("stone");
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call::new(start),
+            |_| false,
+        );
+        assert_eq!(run.outcome, Some(Outcome::Failed("unsafe_drop".into())));
+        assert!(run.dug.is_empty());
+        assert_eq!(run.path, vec![start], "the body never moved");
+    }
+
     /// Guards the real state machine's two phases: over a `World` with real
-    /// chunks, `branch_mine(coal_ore)` cuts 16 one-block-down stairs along one
+    /// chunks, `branch_mine(coal_ore)` cuts 8 one-block-down stairs along one
     /// axis to the ore height and then tunnels level at that height.
     #[test]
     fn branch_mine_descends_to_the_ore_height_then_tunnels_level() {
@@ -1220,18 +1875,18 @@ mod digger_tests {
             &mut world,
             &mut runner,
             Call::new(start),
-            |path| path.iter().filter(|pos| pos.y == 48).count() >= 6,
+            |path| path.iter().filter(|pos| pos.y == 56).count() >= 6,
         );
         assert_eq!(run.outcome, None, "no ore in the world: nothing confirms");
-        assert!(run.path.len() > 17, "the tunnel was cut: {:?}", run.path);
-        assert_eq!(run.path[16], BlockPos::new(16, 48, 0), "{:?}", run.path);
-        for pair in run.path[..=16].windows(2) {
+        assert!(run.path.len() > 9, "the tunnel was cut: {:?}", run.path);
+        assert_eq!(run.path[8], BlockPos::new(8, 56, 0), "{:?}", run.path);
+        for pair in run.path[..=8].windows(2) {
             assert_eq!(pair[1].y, pair[0].y - 1, "one block down per stair");
             assert_eq!(pair[1].x, pair[0].x + 1, "one column along the axis");
             assert_eq!(pair[1].z, pair[0].z);
         }
         // Every stair broke its tread, once.
-        for step in 1..=16 {
+        for step in 1..=8 {
             let tread = BlockPos::new(step, 64 - step, 0);
             assert_eq!(
                 run.dug.iter().filter(|pos| **pos == tread).count(),
@@ -1260,12 +1915,12 @@ mod digger_tests {
         );
         // From the target height on the tunnel is level.
         assert!(
-            run.path[16..].iter().all(|pos| pos.y == 48),
+            run.path[8..].iter().all(|pos| pos.y == 56),
             "{:?}",
-            &run.path[16..]
+            &run.path[8..]
         );
         assert!(
-            run.path.iter().filter(|pos| pos.y == 48).count() >= 6,
+            run.path.iter().filter(|pos| pos.y == 56).count() >= 6,
             "five level steps after the last stair: {:?}",
             run.path
         );
@@ -1276,7 +1931,7 @@ mod digger_tests {
     /// break the ore itself.
     #[test]
     fn branch_mine_confirms_when_the_tunnel_exposes_the_ore() {
-        let ore = BlockPos::new(20, 48, 0);
+        let ore = BlockPos::new(20, 56, 0);
         let mut world = world_with(3, 63, move |pos| {
             if pos.y > 63 {
                 BlockState::from(BlockKind::Air)
@@ -1298,17 +1953,17 @@ mod digger_tests {
             |_| false,
         );
         assert_eq!(run.outcome, Some(Outcome::Confirmed));
-        // The last dig was the feet cell (19, 48); it opened the ore's west
-        // face at (20, 48). The next dig in line, the head cell (20, 49), was
+        // The last dig was the feet cell (19, 56); it opened the ore's west
+        // face at (20, 56). The next dig in line, the head cell (20, 57), was
         // never requested, and the ore itself was never touched.
         assert_eq!(
             run.dug.last(),
-            Some(&BlockPos::new(19, 48, 0)),
+            Some(&BlockPos::new(19, 56, 0)),
             "the exposing dig is the last one: {:?}",
             run.dug
         );
         assert!(
-            !run.dug.contains(&BlockPos::new(20, 49, 0)),
+            !run.dug.contains(&BlockPos::new(20, 57, 0)),
             "no dig intent follows the ore exposure: {:?}",
             run.dug
         );
@@ -1324,11 +1979,11 @@ mod digger_tests {
         );
         // It descended to the ore height and tunneled level from there.
         assert!(
-            run.path.iter().any(|pos| pos.y == 48 && pos.x >= 18),
+            run.path.iter().any(|pos| pos.y == 56 && pos.x >= 18),
             "{:?}",
             run.path
         );
-        assert!(run.path.iter().all(|pos| pos.y >= 48));
+        assert!(run.path.iter().all(|pos| pos.y >= 56));
     }
 
     /// Guards the branch dig budget: a wanted block with no known height
@@ -1388,6 +2043,61 @@ mod digger_tests {
         assert!(run.path.iter().all(|pos| pos.y == 48), "{:?}", run.path);
     }
 
+    /// Guards the time bound of the branch route: past [`BRANCH_MAX_TICKS`]
+    /// the digger fails `not_found` between two digs, before it plans another
+    /// one; `dig_down` has no tick cap of its own, and a dig in flight is never
+    /// cut off mid-receipt.
+    #[test]
+    fn branch_mine_fails_not_found_past_its_tick_cap() {
+        let start = BlockPos::new(0, 56, 0);
+        let world = world_with(3, 55, stone_below(55));
+        let mut body = Body::new(feet_position(start));
+        set_body_look(&mut body, EAST_YAW, 0.0);
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        perception.begin_tick(&world);
+
+        let mut tick_once = |digger: &mut Digger| {
+            let mut ctx = Ctx {
+                tick: 0,
+                body: &body,
+                world: &world,
+                perception: &mut perception,
+                style: Personality::default(),
+            };
+            digger.tick(&mut ctx).2
+        };
+
+        let mut branch = Digger::branch_mine("coal_ore".to_owned());
+        branch.ticks = BRANCH_MAX_TICKS - 1;
+        assert_eq!(tick_once(&mut branch), None, "the last tick inside the cap");
+        assert_eq!(
+            tick_once(&mut branch),
+            Some(Outcome::Failed("not_found".into())),
+            "the first tick past it"
+        );
+
+        // A dig in flight finishes its receipt first: the cap is not read
+        // while a target is set.
+        let mut digging = Digger::branch_mine("coal_ore".to_owned());
+        digging.ticks = BRANCH_MAX_TICKS + 500;
+        digging.target = Some(Target {
+            cell: BlockPos::new(1, 56, 0),
+            started: true,
+            settled: false,
+            gravity_over: false,
+            waited: 0,
+        });
+        assert_eq!(tick_once(&mut digging), None);
+
+        let mut staircase = Digger::dig_down("stone".to_owned());
+        staircase.ticks = BRANCH_MAX_TICKS + 500;
+        assert_ne!(
+            tick_once(&mut staircase),
+            Some(Outcome::Failed("not_found".into())),
+            "the staircase has its own dig cap, not the tick cap"
+        );
+    }
+
     /// Names a gap in the primitive rather than guarding a feature: once the
     /// block is air and the dig started, `tick_target` has no timeout of its
     /// own for "started, not settled", so a receipt that never settles holds the
@@ -1429,6 +2139,169 @@ mod digger_tests {
         assert!(
             runner.is_active(),
             "the call is still in flight, bounded only by the flight deadline"
+        );
+    }
+
+    /// A world of stone to `top` (a surface grassless world: the heightmap is
+    /// the stone's top) with the pocket `feet`/head open, the body in it.
+    fn pocket_world(top: i32, feet: BlockPos) -> World {
+        use crate::test_world::world_with_surface;
+        // Chunk sections are loaded up to `top + 8`, so the air over the ground
+        // is real air a body can jump in, not an unloaded section.
+        let mut world = world_with_surface(3, top + 8, stone_below(top));
+        for dy in 0..2 {
+            set_block(
+                &mut world,
+                BlockPos::new(feet.x, feet.y + dy, feet.z),
+                BlockState::from(BlockKind::Air),
+            );
+        }
+        hold(&mut world, ItemKind::WoodenPickaxe);
+        world
+    }
+
+    fn climb_out() -> Runner {
+        let mut runner = Runner::new();
+        runner
+            .start(&StartAction {
+                primitive: "climb_out".to_owned(),
+                args: Vec::new(),
+            })
+            .expect("climb_out starts");
+        runner
+    }
+
+    /// Guards the whole climb: from a closed pocket in solid stone eight
+    /// blocks under the surface, `climb_out` cuts a stair up, one block per
+    /// step along one axis, digs every cell once, and confirms as soon as the
+    /// body stands under open sky.
+    #[test]
+    fn climb_out_cuts_a_stair_up_to_the_open_sky() {
+        let start = BlockPos::new(2, 56, 2);
+        let mut world = pocket_world(63, start);
+        let mut runner = climb_out();
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call {
+                look: (EAST_YAW, 0.0),
+                max_ticks: 2500,
+                ..Call::new(start)
+            },
+            |_| false,
+        );
+        assert_eq!(run.outcome, Some(Outcome::Confirmed), "{:?}", run.path);
+        let top = *run.path.last().expect("a path");
+        assert!(top.y >= 63, "the body came up to the ground: {:?}", run.path);
+        // One block up and one along per stair, all on one axis.
+        for pair in run.path.windows(2) {
+            assert_eq!(pair[1].y, pair[0].y + 1, "{:?}", run.path);
+            assert_eq!(pair[1].x, pair[0].x + 1, "{:?}", run.path);
+            assert_eq!(pair[1].z, pair[0].z);
+        }
+        // Every cell dug once; the floor beside the start was never dug.
+        let unique: HashSet<BlockPos> = run.dug.iter().copied().collect();
+        assert_eq!(unique.len(), run.dug.len(), "a block was dug twice: {:?}", run.dug);
+        assert!(!run.dug.contains(&BlockPos::new(3, 56, 2)));
+        // Three digs per stair, except where the stair opens into the sky.
+        assert!(run.dug.len() >= 3 * 6 && run.dug.len() <= 3 * 8, "{}", run.dug.len());
+    }
+
+    /// Guards the open stair: a body at the foot of a staircase that is
+    /// already cut (its own descent) climbs it without a single dig.
+    #[test]
+    fn climb_out_walks_an_open_staircase_without_digging() {
+        // The descent `branch_mine` leaves: a stair down along +x from the
+        // surface at y 64 to y 56, then solid stone on.
+        let mut world = pocket_world(63, BlockPos::new(8, 56, 0));
+        for step in 0..=8 {
+            let feet_y = 64 - step;
+            for dy in 0..3 {
+                set_block(
+                    &mut world,
+                    BlockPos::new(step, feet_y + dy, 0),
+                    BlockState::from(BlockKind::Air),
+                );
+            }
+        }
+        let mut runner = climb_out();
+        let run = drive(
+            &mut world,
+            &mut runner,
+            Call {
+                look: (EAST_YAW + 180.0, 0.0),
+                max_ticks: 600,
+                ..Call::new(BlockPos::new(8, 56, 0))
+            },
+            |_| false,
+        );
+        assert_eq!(run.outcome, Some(Outcome::Confirmed), "{:?}", run.path);
+        assert!(run.dug.is_empty(), "an open stair needs no dig: {:?}", run.dug);
+        let top = *run.path.last().expect("a path");
+        assert!(top.y >= 63, "{:?}", run.path);
+        assert!(top.x < 8, "it walked back up the way it came: {:?}", run.path);
+    }
+
+    /// Guards the start state: under open sky the call confirms on its first
+    /// tick, without a dig or a step.
+    #[test]
+    fn climb_out_under_open_sky_confirms_at_once() {
+        let start = BlockPos::new(2, 64, 2);
+        let mut world = pocket_world(63, BlockPos::new(8, 40, 8));
+        let mut runner = climb_out();
+        let run = drive(&mut world, &mut runner, Call::new(start), |_| false);
+        assert_eq!(run.outcome, Some(Outcome::Confirmed));
+        assert!(run.dug.is_empty());
+        assert_eq!(run.path, vec![start]);
+    }
+
+    /// Guards the typed failure: a body whose floor beside it holds on no side
+    /// has no stair to cut, and the call says `no_way_up` without a dig.
+    #[test]
+    fn climb_out_fails_no_way_up_when_every_side_is_refused() {
+        let start = BlockPos::new(2, 56, 2);
+        let mut world = pocket_world(63, start);
+        // The four floors beside the feet are air: a pillar in a void.
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            set_block(
+                &mut world,
+                BlockPos::new(start.x + dx, start.y, start.z + dz),
+                BlockState::from(BlockKind::Air),
+            );
+        }
+        let mut runner = climb_out();
+        let run = drive(&mut world, &mut runner, Call::new(start), |_| false);
+        assert_eq!(run.outcome, Some(Outcome::Failed("no_way_up".into())));
+        assert!(run.dug.is_empty(), "{:?}", run.dug);
+    }
+
+    /// Guards the time bound: past [`CLIMB_MAX_TICKS`] the climb fails
+    /// `no_way_up` between two digs, never while a dig is in flight.
+    #[test]
+    fn climb_out_fails_no_way_up_past_its_tick_cap() {
+        let start = BlockPos::new(2, 56, 2);
+        let world = pocket_world(63, start);
+        let mut body = Body::new(feet_position(start));
+        set_body_look(&mut body, EAST_YAW, 0.0);
+        let mut perception = Perception::new(praxion_perception::Config::default());
+        perception.begin_tick(&world);
+        let mut tick_once = |digger: &mut Digger| {
+            let mut ctx = Ctx {
+                tick: 0,
+                body: &body,
+                world: &world,
+                perception: &mut perception,
+                style: Personality::default(),
+            };
+            digger.tick(&mut ctx).2
+        };
+        let mut climb = Digger::climb_out();
+        climb.ticks = CLIMB_MAX_TICKS - 1;
+        assert_eq!(tick_once(&mut climb), None, "the last tick inside the cap");
+        assert_eq!(
+            tick_once(&mut climb),
+            Some(Outcome::Failed("no_way_up".into())),
+            "the first tick past it"
         );
     }
 }

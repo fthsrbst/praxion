@@ -1,0 +1,22 @@
+# Back to the open sky after a tunnel (run D, 2026-11-12: `get_coal` dug down to
+# a level tunnel and every later goal failed `not_found` from underground,
+# because no skill climbed back up). It is a core skill of its own, not part of
+# the ore skills: the planner (or the operator) asks for it before any goal
+# that needs trees, animals or exploring while the body is below ground.
+#
+# `climb_out` cuts a staircase UP, the mirror of the descent of `dig_down`:
+# it walks an open stair when one is there (the body's own descent) and digs
+# only where the way is closed, never under fluid, sand or gravel. It ends when
+# the body stands under open sky and can walk away on the level (a stair of its
+# own is open to the sky a few blocks below the ground too, so open sky alone
+# is not the end of the climb). The rule on top makes a body that already has
+# open sky over its head done at once, so a body at the bottom of a pit or a
+# ravine open to the sky is not climbed out of: the fact says what is over the
+# head, not how deep the body is. `climb_out` ends itself with `no_way_up` after 3000 ticks, or
+# when no axis has a solid step up; the failure cap (three) then fails this
+# skill with that kind, which the caller must not read as "keep climbing".
+skill go_to_surface()
+  doc "Return to the surface from underground (a tunnel, a pit or a cave): climbs until the body stands under open sky. Use it before any goal that needs trees, animals or exploring when the body is below ground."
+  rules:
+    sky_above() -> done
+    true -> climb_out()

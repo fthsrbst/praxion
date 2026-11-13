@@ -24,12 +24,15 @@ use azalea_protocol::packets::{
         ClientboundAddEntity, ClientboundBlockUpdate, ClientboundContainerSetSlot,
         ClientboundGamePacket, ClientboundLevelChunkWithLight, ClientboundLogin,
         ClientboundRemoveEntities, ClientboundSetEntityData, ClientboundSetHealth,
-        ClientboundSetTime, ServerboundGamePacket, ServerboundMovePlayerPosRot,
+        ClientboundSetTime, ClientboundSound, ClientboundSoundEntity, ServerboundGamePacket,
+        ServerboundMovePlayerPosRot,
         c_level_chunk_with_light::ClientboundLevelChunkPacketData, c_set_time::ClockState,
+        c_sound::SoundSource,
     },
 };
 use azalea_registry::{
-    builtin::{BlockKind, EntityKind, ItemKind},
+    Holder,
+    builtin::{BlockKind, EntityKind, ItemKind, SoundEvent},
     data::{DimensionKind, WorldClock},
     identifier::Identifier,
     DataRegistry,
@@ -133,6 +136,41 @@ pub fn add_entity(world: &mut World, id: i32, kind: EntityKind, pos: Vec3) {
             y_rot: 0,
             y_head_rot: 0,
             data: 0,
+        }),
+    );
+}
+
+/// A positional sound packet: what a player hears from a source the server did
+/// not name (a block, a fuse, a mob behind a wall). Positions are fixed point
+/// with three fractional bits.
+pub fn add_sound(world: &mut World, event: SoundEvent, pos: Vec3) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::Sound(ClientboundSound {
+            sound: Holder::Reference(event),
+            source: SoundSource::Hostile,
+            x: (pos.x * 8.0) as i32,
+            y: (pos.y * 8.0) as i32,
+            z: (pos.z * 8.0) as i32,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: 0,
+        }),
+    );
+}
+
+/// A sound packet that names the entity that made it, as a mob's step or hurt
+/// sound does. The world drops the packet when it does not know the entity.
+pub fn add_entity_sound(world: &mut World, event: SoundEvent, entity: i32) {
+    world.apply_clientbound_play(
+        0,
+        &ClientboundGamePacket::SoundEntity(ClientboundSoundEntity {
+            sound: Holder::Reference(event),
+            source: SoundSource::Hostile,
+            id: MinecraftEntityId(entity),
+            volume: 1.0,
+            pitch: 1.0,
+            seed: 0,
         }),
     );
 }
@@ -351,6 +389,16 @@ impl Sim {
 
     pub fn add_mob(&mut self, id: i32, kind: EntityKind, pos: Vec3) {
         add_entity(&mut self.world, id, kind, pos);
+    }
+
+    /// A positional sound, as a `Sound` packet carries it.
+    pub fn add_sound(&mut self, event: SoundEvent, pos: Vec3) {
+        add_sound(&mut self.world, event, pos);
+    }
+
+    /// A sound that names the entity that made it (`SoundEntity`).
+    pub fn add_entity_sound(&mut self, event: SoundEvent, entity: i32) {
+        add_entity_sound(&mut self.world, event, entity);
     }
 
     pub fn remove_mob(&mut self, id: i32) {

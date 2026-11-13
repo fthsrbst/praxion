@@ -1,7 +1,11 @@
 # Have a crafting table placed within 4 blocks: craft and place one if needed.
 # Leaf skill, because get_wooden_pickaxe calls it at the core depth limit. It
 # only places while no table is near, which keeps duplicate placements at zero.
-# When no log is in sight it explores before mining.
+# When no log is in sight it explores before mining. A body that holds a table
+# places it where it stands, a pit included (rule 1 comes before any log). A log
+# it cannot hit from where it stands (`out_of_reach`, overhead) fails the mine
+# at once and typed; the rules below do not climb out, they are a leaf at the
+# core depth limit and have no fact that says "in a pit".
 skill get_crafting_table_near()
   doc "Have a crafting table placed within 4 blocks."
   rules:

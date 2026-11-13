@@ -14,6 +14,7 @@ use azalea_registry::builtin::{EntityKind, ItemKind};
 use praxion_planner::KnownBlocks;
 use praxion_world::{BlockPos, Vec3};
 
+use crate::hearing::{Alert, HeardSound, Hearing, PRIMED_FLEE_RANGE};
 use crate::settings::{HUMAN_FLOOR_TICKS, Settings};
 use crate::view::{ArrowMemory, EntityView, View};
 
@@ -143,7 +144,9 @@ impl ReflexKind {
             // The server's shared flags when they exist, the fire block under
             // the body otherwise: both mean "the body is burning now".
             ReflexKind::Fire => state.burning() || view.on_fire,
-            ReflexKind::Creeper => view.threat_within(view.creeper, settings.creeper_flee_range),
+            // A creeper in sight, or the fuse heard through a wall or from
+            // behind (see [`creeper_source`]).
+            ReflexKind::Creeper => creeper_source(view, state, settings).is_some(),
             ReflexKind::Arrow => view.incoming_arrow().is_some(),
             ReflexKind::Melee => melee_target(view, state, settings)
                 .is_some_and(|mob| view.horizontal_to(mob) <= f64::from(settings.melee_range)),
@@ -163,6 +166,19 @@ impl ReflexKind {
             ReflexKind::Melee => melee_target(view, state, settings).is_some_and(|mob| {
                 view.horizontal_to(mob) <= f64::from(settings.melee_range) + MELEE_EXIT_MARGIN
             }),
+            // A heard fuse holds the flee for the whole run: the sound's
+            // position is fixed, so a body that ran the flee is at most the
+            // trigger range plus the flee distance from it. Without this the
+            // trigger would drop one step into the run and cut the flee short.
+            ReflexKind::Creeper => {
+                self.triggered(view, state, settings)
+                    || state
+                        .primed_within(
+                            view,
+                            PRIMED_FLEE_RANGE + f64::from(settings.flee_distance),
+                        )
+                        .is_some()
+            }
             _ => self.triggered(view, state, settings),
         }
     }
@@ -211,6 +227,9 @@ pub struct ReflexState {
     /// The last cell where the player stood safely; `StepBack` returns here.
     pub last_safe_cell: Option<BlockPos>,
     pub arrows: ArrowMemory,
+    /// The sounds heard this tick, newest first, and the alert turn's clock.
+    /// [`View::capture`] replaces it once per tick (see `crate::hearing`).
+    hearing: Hearing,
     /// The mob kind the running skill is fighting or walking to (its in-flight
     /// primitive is `attack` or `move_to` of that kind), without the
     /// `minecraft:` namespace. The arbiter sets it from the interpreter's
@@ -234,6 +253,7 @@ impl ReflexState {
             own_burning: None,
             last_safe_cell: None,
             arrows: ArrowMemory::default(),
+            hearing: Hearing::default(),
             engaged: None,
         }
     }
@@ -291,6 +311,28 @@ impl ReflexState {
     /// and `false` (the fire-block view alone decides then) while they do not.
     pub fn burning(&self) -> bool {
         self.own_burning.unwrap_or(false)
+    }
+
+    /// The sounds heard this tick, newest first (see `crate::hearing`).
+    pub fn heard(&self) -> &[HeardSound] {
+        self.hearing.sounds()
+    }
+
+    /// Replace the heard snapshot. [`View::capture`] calls this once per tick,
+    /// beside the own-entity facts.
+    pub fn set_heard(&mut self, sounds: Vec<HeardSound>) {
+        self.hearing.capture(sounds);
+    }
+
+    /// The nearest primed creeper heard within `range` blocks (horizontal), if
+    /// any.
+    pub fn primed_within(&self, view: &View, range: f64) -> Option<&HeardSound> {
+        self.hearing.primed_within(view, range)
+    }
+
+    /// The alert head turn due this tick, if any (see `crate::hearing`).
+    pub fn alert(&mut self, view: &View, tick: u64, may_look: bool) -> Option<Alert> {
+        self.hearing.alert(view, tick, may_look)
     }
 
     /// When the trigger was first visible, or `None` when it is not visible.
@@ -409,8 +451,8 @@ pub fn action_for(
                 Some(ReflexAction::OffFire { to })
             }
         },
-        ReflexKind::Creeper => view.creeper.map(|creeper| ReflexAction::Flee {
-            from: creeper.position,
+        ReflexKind::Creeper => creeper_source(view, state, settings).map(|from| ReflexAction::Flee {
+            from,
             distance: settings.flee_distance,
         }),
         ReflexKind::Arrow => view.incoming_arrow().map(|arrow| ReflexAction::Strafe {
@@ -455,6 +497,37 @@ fn melee_target(view: &View, state: &ReflexState, settings: &Settings) -> Option
     view.melee_mobs()
         .filter(|mob| !state.leaves_to_skill(*mob, view, settings))
         .min_by(|a, b| view.horizontal_to(*a).total_cmp(&view.horizontal_to(*b)))
+}
+
+/// Where the creeper reflex flees from: the tracked creeper the existing sight
+/// reflex handles, or the fused creeper it only heard.
+///
+/// The sight wins whenever it already has a creeper inside its own range: that
+/// position is a fact of this tick, and the sound below only covers the cases
+/// sight cannot see (a creeper behind a wall or behind the body, out of the
+/// view). The heard fuse is the one lethal sound
+/// ([`SoundClass::CreeperPrimed`](crate::SoundClass)), so the same
+/// [`ReflexAction::Flee`] runs either way: there is one flee in this crate.
+fn creeper_source(view: &View, state: &ReflexState, settings: &Settings) -> Option<Vec3> {
+    if view.threat_within(view.creeper, settings.creeper_flee_range) {
+        return view.creeper.map(|creeper| creeper.position);
+    }
+    state
+        .primed_within(view, PRIMED_FLEE_RANGE)
+        .map(|sound| sound.position)
+}
+
+/// The primed sound a running creeper flee came from, for the action log:
+/// `None` when the flee is about a creeper in sight.
+pub fn fled_sound<'a>(
+    view: &View,
+    state: &'a ReflexState,
+    settings: &Settings,
+) -> Option<&'a HeardSound> {
+    if view.threat_within(view.creeper, settings.creeper_flee_range) {
+        return None;
+    }
+    state.primed_within(view, PRIMED_FLEE_RANGE)
 }
 
 /// Evaluate the whole set in priority order. Returns the first action whose

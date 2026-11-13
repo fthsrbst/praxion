@@ -11,7 +11,7 @@ use praxion_body::{
     read_skill_files, resolve_goal_args, settings_path, skills_dir, summary,
 };
 use praxion_blueprint::{Limits, parse, validate};
-use praxion_headless::{ConnectOptions, DriverHandle, Event, Session, TICK};
+use praxion_headless::{ConnectOptions, DriverHandle, Event, Host, Session, ShadowSession, TICK};
 use praxion_manifest::Manifest;
 use praxion_port::{PortConfig, PortServer};
 use praxion_reflexes::Settings;
@@ -24,6 +24,10 @@ const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BLUEPRINT_BYTES: usize = 64 * 1024;
 
 fn main() -> ExitCode {
+    if std::env::args().skip(1).any(|arg| arg == "--help" || arg == "-h") {
+        print!("{}", praxion_body::cli::USAGE);
+        return ExitCode::SUCCESS;
+    }
     // `--verbose` shows the debug diagnostics (packet traces); RUST_LOG overrides.
     let level = if std::env::args().any(|a| a == "--verbose") {
         "debug"
@@ -322,6 +326,27 @@ fn run() -> Result<ExitCode, String> {
         args.goal_args.clone(),
     )));
 
+    // The hands: the helper, the client it posts to and that client's own
+    // options. Parsed before the driver starts, so a non-default binding (or an
+    // inverted mouse) refuses the run instead of pressing the wrong keys later.
+    let hands = match (&args.hands, args.client_pid, &args.client_options) {
+        (Some(helper), Some(client_pid), Some(options)) => {
+            let text = std::fs::read_to_string(options)
+                .map_err(|error| format!("cannot read {}: {error}", options.display()))?;
+            let options = praxion_headless::ClientOptions::parse(&text)
+                .map_err(|error| format!("{}: {error}", options.display()))?;
+            Some(praxion_headless::HandsConfig {
+                helper: helper.clone(),
+                client_pid,
+                activate: args.hands_activate,
+                options,
+                look_latency_ticks: args.hands_look_latency,
+            })
+        }
+        _ => None,
+    };
+    let hands_mode = hands.is_some();
+
     // The body listens when the brain is in the loop (proposal §2.1). The
     // driver owns the event, snapshot and command channels; main keeps a
     // handle to send `bye shutdown` at exit.
@@ -350,6 +375,9 @@ fn run() -> Result<ExitCode, String> {
             own_name: args.name.clone(),
             operators: args.operators.clone(),
             chat_prefix: args.chat_prefix.clone(),
+            // The client's own dig/place packet arrives a tick or two after the
+            // frame in hands mode; a logged-in body reports the same tick.
+            report_grace_ticks: if hands_mode { 8 } else { 0 },
         },
         args.run_dir.clone(),
         program,
@@ -367,22 +395,56 @@ fn run() -> Result<ExitCode, String> {
     }
     let handle: DriverHandle = Arc::new(Mutex::new(Box::new(driver)));
 
-    let options = ConnectOptions {
-        auto_respawn: true,
-        tune_loop: true,
-        trace_packets: args.verbose,
-        script: None,
-        driver: Some(Arc::clone(&handle)),
-        tee: Some(args.tee),
+    // Two play modes on one event loop: a logged-in body of our own, or shadow
+    // mode on the operator's client, where every frame is computed and dropped.
+    let session: Box<dyn Host> = if args.real_client {
+        if args.forwarder.is_some() {
+            log::warn!("praxion-body: --forwarder is ignored with --real-client");
+        }
+        match hands {
+            Some(config) => {
+                let session =
+                    ShadowSession::start_with_hands(args.tee, Arc::clone(&handle), config)
+                        .map_err(|error| {
+                            format!("cannot start the hands on tee {}: {error}", args.tee)
+                        })?;
+                eprintln!(
+                    "praxion-body: hands mode on tee {}: frames are applied to the operator's client",
+                    args.tee
+                );
+                Box::new(session)
+            }
+            None => {
+                let session = ShadowSession::start(args.tee, Arc::clone(&handle))
+                    .map_err(|error| format!("cannot attach to the tee at {}: {error}", args.tee))?;
+                eprintln!(
+                    "praxion-body: shadow mode on tee {}: frames are computed and dropped, nothing is sent",
+                    args.tee
+                );
+                Box::new(session)
+            }
+        }
+    } else {
+        let forwarder = args
+            .forwarder
+            .ok_or("--forwarder is required without --real-client")?;
+        let options = ConnectOptions {
+            auto_respawn: true,
+            tune_loop: true,
+            trace_packets: args.verbose,
+            script: None,
+            driver: Some(Arc::clone(&handle)),
+            tee: Some(args.tee),
+        };
+        let session = Session::connect_with(forwarder, &args.name, options)
+            .map_err(|error| format!("cannot connect through the forwarder: {error}"))?;
+        eprintln!(
+            "praxion-body: connected to {forwarder} through tee {}, goal {}",
+            args.tee,
+            args.goal.as_deref().unwrap_or("(brain)")
+        );
+        Box::new(session)
     };
-    let session = Session::connect_with(args.forwarder, &args.name, options)
-        .map_err(|error| format!("cannot connect through the forwarder: {error}"))?;
-    eprintln!(
-        "praxion-body: connected to {} through tee {}, goal {}",
-        args.forwarder,
-        args.tee,
-        args.goal.as_deref().unwrap_or("(brain)")
-    );
 
     let linger = Duration::from_millis(args.linger_ticks.saturating_mul(50));
     let mut settled_at: Option<Instant> = None;
@@ -455,6 +517,12 @@ fn run() -> Result<ExitCode, String> {
                 lock(&handle).on_death(message);
                 eprintln!("died");
             }
+            Some(Event::TakenOver { reason }) => {
+                // The helper released every key and button; the frames are
+                // dropped again. The body generation already moved on.
+                lock(&handle).on_takeover(&reason);
+                eprintln!("praxion-body: taken over ({reason}): frames are dropped again");
+            }
             Some(Event::Disconnected(reason)) => {
                 eprintln!("disconnected: {reason}");
                 if port_mode {
@@ -471,6 +539,9 @@ fn run() -> Result<ExitCode, String> {
     {
         let stats = session.stats();
         let world = stats.world_summary();
+        // The shadow counters exist only in real-client mode; the summary must
+        // not claim the body was in shadow mode when it logged in instead.
+        let shadow = args.real_client;
         lock(&shared).session = Some(SessionSummary {
             ticks_ran: stats.ticks_ran.load(std::sync::atomic::Ordering::Relaxed),
             physics_ticks: stats
@@ -486,6 +557,20 @@ fn run() -> Result<ExitCode, String> {
                 .load(std::sync::atomic::Ordering::Relaxed),
             use_clicks: stats.use_clicks.load(std::sync::atomic::Ordering::Relaxed),
             world,
+            shadow_wanted: shadow.then(|| {
+                stats
+                    .shadow_wanted
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            }),
+            shadow: shadow.then_some(true),
+            hands_frames: hands_mode
+                .then(|| stats.hands_frames.load(std::sync::atomic::Ordering::Relaxed)),
+            hands_refused: hands_mode
+                .then(|| stats.hands_refused.load(std::sync::atomic::Ordering::Relaxed)),
+            hands_unsupported: hands_mode
+                .then(|| stats.hands_unsupported.load(std::sync::atomic::Ordering::Relaxed)),
+            hands_takeovers: hands_mode
+                .then(|| stats.hands_takeovers.load(std::sync::atomic::Ordering::Relaxed)),
         });
     }
 

@@ -21,6 +21,26 @@ pub const DEFAULT_MAX_TICKS: u32 = 1200;
 /// count, and only that rule's own success clears it.
 pub const MAX_PRIMITIVE_FAILURES: u32 = 3;
 
+/// Consecutive preemptions of one rule's in-flight discrete action, with no
+/// success of that rule in between, before that skill fails `no_progress`.
+///
+/// A preemption is not a failure: the reflex ends and the skill re-evaluates
+/// from the top, and [`Interpreter::resume`] drops the per-rule failure counts
+/// so the interrupted skill gets its counts back. That is right for a reflex
+/// that cost the body nothing, and wrong for the loop it hid: a `mine` or a
+/// `dig_down` under water was preempted by the drowning reflex, restarted from
+/// zero on the very same block, and preempted again, eight times, until the
+/// goal's budget ran out (live run A, 2026-11-12). The count lives in the rule
+/// for the same reason [`MAX_PRIMITIVE_FAILURES`] does: it covers every
+/// discrete primitive, not only the dig that was measured, and only a success
+/// of that rule clears it (another rule firing in between does not).
+/// `resume` keeps it, because it is the only record of a loop that survives a
+/// reflex.
+pub const MAX_PREEMPTIONS: u32 = 3;
+
+/// The failure kind of a rule that keeps restarting without progress.
+pub const NO_PROGRESS: &str = "no_progress";
+
 /// Guards a selection loop against a pathological ruleset. The load-time
 /// depth cap makes this unreachable for a checked program.
 const MAX_SELECTION_STEPS: usize = 64;
@@ -46,6 +66,11 @@ struct Frame {
     /// Consecutive failures per rule index, primitive or child skill. A rule's
     /// own success clears only its entry; another rule firing leaves it alone.
     failures: BTreeMap<usize, u32>,
+    /// Consecutive preemptions per rule index of an action that was in flight.
+    /// Kept apart from `failures` because a preemption is not a failure: it
+    /// survives [`Interpreter::resume`], and when it reaches
+    /// [`MAX_PREEMPTIONS`] the skill fails `no_progress`.
+    preemptions: BTreeMap<usize, u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +191,7 @@ impl Interpreter {
             ineligible: None,
             retry: None,
             failures: BTreeMap::new(),
+            preemptions: BTreeMap::new(),
         });
         self.in_flight = None;
         self.until = None;
@@ -275,10 +301,16 @@ impl Interpreter {
     }
 
     /// Suspends the stack and abandons an in-flight discrete action. The
-    /// abandoned action settles `preempted`.
+    /// abandoned action settles `preempted`, and it counts against its rule:
+    /// [`MAX_PREEMPTIONS`] of them in a row without that rule succeeding fail
+    /// the skill `no_progress` when the stack resumes.
     pub fn preempt(&mut self, actuator: &mut dyn Actuator) -> Option<Outcome> {
         self.stop_continuous(actuator);
-        let outcome = if self.in_flight.take().is_some() {
+        let flight = self.in_flight.take();
+        if let Some(flight) = &flight {
+            self.count_preemption(flight.depth, flight.rule);
+        }
+        let outcome = if flight.is_some() {
             actuator.cancel()
         } else {
             None
@@ -408,6 +440,21 @@ impl Interpreter {
                 continue;
             };
 
+            // A rule that was preempted MAX_PREEMPTIONS times in a row without
+            // succeeding is restarting the same action with nothing to show:
+            // fail it typed instead of letting it restart again (see
+            // [`MAX_PREEMPTIONS`]).
+            if self.stack[depth]
+                .preemptions
+                .get(&index)
+                .is_some_and(|count| *count >= MAX_PREEMPTIONS)
+            {
+                if let Some(decision) = self.fail_skill(depth, NO_PROGRESS.into(), actuator) {
+                    return decision;
+                }
+                continue;
+            }
+
             if let Some(decision) = self.dispatch_action(depth, index, actuator) {
                 return decision;
             }
@@ -515,6 +562,9 @@ impl Interpreter {
                 // clears only that rule's failure count.
                 if let Some(parent) = self.stack.get_mut(depth - 1) {
                     parent.failures.remove(&call_rule);
+                    // A child that completed is progress for the rule that
+                    // called it, exactly like its own primitive confirming.
+                    parent.preemptions.remove(&call_rule);
                 }
                 // A commitment owned by this frame ends with it; a parent's
                 // commitment survives a child completing.
@@ -559,6 +609,7 @@ impl Interpreter {
                     ineligible: None,
                     retry: None,
                     failures: BTreeMap::new(),
+                    preemptions: BTreeMap::new(),
                 });
                 None
             }
@@ -617,6 +668,17 @@ impl Interpreter {
     fn succeeded_rule(&mut self, depth: usize, rule: usize) {
         if depth < self.stack.len() {
             self.stack[depth].failures.remove(&rule);
+            // Progress: the restarts before this one are history.
+            self.stack[depth].preemptions.remove(&rule);
+        }
+    }
+
+    /// Counts one preemption of `rule`'s in-flight action at `depth`. The count
+    /// survives [`Interpreter::resume`]: a preemption is not a failure of the
+    /// rule, but [`MAX_PREEMPTIONS`] restarts without a success is a loop.
+    fn count_preemption(&mut self, depth: usize, rule: usize) {
+        if let Some(frame) = self.stack.get_mut(depth) {
+            *frame.preemptions.entry(rule).or_insert(0) += 1;
         }
     }
 

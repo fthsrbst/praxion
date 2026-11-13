@@ -1,29 +1,13 @@
 //! `praxion-body`'s command line.
 //!
-//! ```text
-//! praxion-body --forwarder 127.0.0.1:PORT --tee 127.0.0.1:PORT --name Praxion
-//!              --goal get_wooden_pickaxe [--goal-args 3] --run-dir runs/<id>
-//!              [--max-ticks N] [--settings body/config/reflexes.toml]
-//!              [--skills body/skills] [--candidates DIR]
-//!              [--start-delay-ticks N] [--style-seed N] [--linger-ticks N]
-//!              [--operator NAME]... [--verbose]
+//! [`USAGE`] is what `--help` prints: both play modes, the subcommands and every
+//! flag.
 //!
-//! praxion-body --forwarder ... --tee ... --run-dir runs/<id> --port 127.0.0.1:P
-//!
-//! praxion-body check-skills --candidates DIR [--skills body/skills]
-//!
-//! praxion-body check-blueprint <file> [--inventory '{"block": n}']
-//!              [--max-placements N] [--emit-plan] [--anchor X Y Z]
-//! praxion-body export-gamedata [--out local/gamedata/26.3.json]
-//! ```
-//!
-//! `--forwarder` is the forwarder's game listener (the address a client would
-//! connect to), `--tee` its tee listener. `--candidates` adds learned
-//! `.skill` files to the core skills; `check-skills` checks them without a
-//! server or network and prints one JSON report. In a port session the
-//! directory is watched: a new or changed file reloads the program before the
-//! next command is accepted, so a skill admitted after the body started is
-//! playable without a restart.
+//! `--candidates` adds learned `.skill` files to the core skills; `check-skills`
+//! checks them without a server or network and prints one JSON report. In a port
+//! session the directory is watched: a new or changed file reloads the program
+//! before the next command is accepted, so a skill admitted after the body
+//! started is playable without a restart.
 //!
 //! `export-gamedata` writes the recipes, smelting recipes and item tags of the
 //! pinned jar as one JSON file for the brain (decision 2026-11-09 "Five next
@@ -46,11 +30,75 @@ use std::str::FromStr;
 
 use praxion_rules::{ArgValue, Program};
 
+/// `--help`: both play modes, the subcommands and every flag.
+pub const USAGE: &str = concat!(
+    "usage: praxion-body --forwarder 127.0.0.1:PORT --tee 127.0.0.1:PORT\n",
+    "                    --name Praxion --goal SKILL [--goal-args ...]\n",
+    "                    --run-dir runs/<id> [options]\n",
+    "       praxion-body --real-client --tee 127.0.0.1:PORT --name NAME\n",
+    "                    --run-dir runs/<id> [--hands PATH --client-pid PID\n",
+    "                    --client-options FILE [--hands-activate]] [options]\n",
+    "       praxion-body check-skills --candidates DIR [--skills body/skills]\n",
+    "       praxion-body check-blueprint <file> [--inventory JSON]\n",
+    "                    [--max-placements N] [--emit-plan] [--anchor X Y Z]\n",
+    "       praxion-body export-gamedata [--out local/gamedata/26.3.json]\n",
+    "\n",
+    "flags:\n",
+    "  --forwarder ADDR       the forwarder's game listener, the address a client uses;\n",
+    "                         required unless --real-client is set\n",
+    "  --tee ADDR             the forwarder's tee listener; always required\n",
+    "  --name NAME            the player name the body logs in with; with --real-client,\n",
+    "                         the operator's own player name\n",
+    "  --real-client          shadow mode: attach to the tee only and run the decision\n",
+    "                         loop once per observed client tick; without --hands every\n",
+    "                         frame is dropped and no OS input is posted\n",
+    "  --hands PATH           the praxion-hands helper; with --client-pid and\n",
+    "                         --client-options the frames are applied to the operator's\n",
+    "                         own client instead of dropped (--real-client only)\n",
+    "  --client-pid PID       the Minecraft client process the helper posts to\n",
+    "  --client-options FILE  the client's options.txt (mouseSensitivity and the\n",
+    "                         default key bindings the hands press)\n",
+    "  --hands-activate       ask macOS to bring the client forward before arming\n",
+    "  --hands-look-latency N ticks between a posted look and the client's own\n",
+    "                         rotation packet (default 2)\n",
+    "  --goal SKILL           the goal to play; with --port the body takes goals from the\n",
+    "                         brain and this one is injected as command `cli`\n",
+    "  --goal-args ...        the goal's arguments\n",
+    "  --run-dir DIR          where the event log and summary.json go (required)\n",
+    "  --port ADDR            listen for the brain on this address\n",
+    "  --max-ticks N          stop after N client ticks\n",
+    "  --settings FILE        the reflex settings (body/config/reflexes.toml)\n",
+    "  --skills DIR           the core skills (body/skills)\n",
+    "  --candidates DIR       extra learned skills, watched for reloads in a port session\n",
+    "  --start-delay-ticks N  ticks to wait before the first goal\n",
+    "  --style-seed N         the movement-style seed; the same seed is the same personality\n",
+    "  --linger-ticks N       ticks to linger after a settled goal\n",
+    "  --operator NAME        a player whose chat the body obeys (repeatable)\n",
+    "  --chat-prefix TEXT     the prefix an operator's task line needs (`p:` by default)\n",
+    "  --verbose              print the packet traces\n",
+    "  -h, --help             this text\n",
+);
+
 /// Parsed arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
-    pub forwarder: SocketAddr,
+    /// The forwarder's game listener. `None` only in `--real-client` mode, which
+    /// never logs in.
+    pub forwarder: Option<SocketAddr>,
     pub tee: SocketAddr,
+    /// Shadow mode: run the decision loop on the operator's own client through
+    /// the tee, without logging in and without acting.
+    pub real_client: bool,
+    /// The `praxion-hands` helper; the three hands paths are all or nothing.
+    pub hands: Option<PathBuf>,
+    /// The client process the helper posts to.
+    pub client_pid: Option<u32>,
+    /// The client's `options.txt`.
+    pub client_options: Option<PathBuf>,
+    /// Ask macOS to bring the client forward before arming.
+    pub hands_activate: bool,
+    /// Ticks between a posted look and the client's rotation packet.
+    pub hands_look_latency: usize,
     pub name: String,
     /// The hand-written goal. `None` is allowed only with `--port`.
     pub goal: Option<String>,
@@ -82,6 +130,13 @@ impl Args {
     pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Self, String> {
         let mut forwarder = None;
         let mut tee = None;
+        let mut real_client = false;
+        let mut hands = None;
+        let mut client_pid = None;
+        let mut client_options = None;
+        let mut hands_activate = false;
+        let mut hands_look_latency: usize = 2;
+        let mut hands_look_latency_given = false;
         let mut name = "Praxion".to_owned();
         let mut goal = None;
         let mut goal_args = Vec::new();
@@ -103,6 +158,26 @@ impl Args {
             match flag.as_str() {
                 "--forwarder" => forwarder = Some(address(&mut args, "--forwarder")?),
                 "--tee" => tee = Some(address(&mut args, "--tee")?),
+                "--real-client" => real_client = true,
+                "--hands" => hands = Some(PathBuf::from(value(&mut args, "--hands")?)),
+                "--client-pid" => {
+                    let text = value(&mut args, "--client-pid")?;
+                    client_pid = Some(
+                        text.parse()
+                            .map_err(|_| format!("--client-pid wants a process id, got {text:?}"))?,
+                    );
+                }
+                "--client-options" => {
+                    client_options = Some(PathBuf::from(value(&mut args, "--client-options")?));
+                }
+                "--hands-activate" => hands_activate = true,
+                "--hands-look-latency" => {
+                    let text = value(&mut args, "--hands-look-latency")?;
+                    hands_look_latency = text.parse().map_err(|_| {
+                        format!("--hands-look-latency wants a number, got {text:?}")
+                    })?;
+                    hands_look_latency_given = true;
+                }
                 "--name" => name = value(&mut args, "--name")?,
                 "--operator" => operators.push(value(&mut args, "--operator")?),
                 "--chat-prefix" => chat_prefix = value(&mut args, "--chat-prefix")?,
@@ -158,7 +233,13 @@ impl Args {
             }
         }
 
-        let forwarder = forwarder.ok_or("--forwarder is required")?;
+        let forwarder = match (forwarder, real_client) {
+            (Some(forwarder), _) => Some(forwarder),
+            // Shadow mode attaches to the tee only: it never logs in, so there is
+            // no game listener to name.
+            (None, true) => None,
+            (None, false) => return Err("--forwarder is required".to_owned()),
+        };
         let tee = tee.ok_or("--tee is required")?;
         if goal.is_none() && port.is_none() {
             return Err("--goal is required (or --port for a brain session)".to_owned());
@@ -168,9 +249,43 @@ impl Args {
         }
         let run_dir = run_dir.ok_or("--run-dir is required")?;
 
+        // The hands are one mode: a helper, a client and its options, all
+        // three or none. They only make sense on the operator's own client.
+        let hands_requested = hands.is_some()
+            || client_pid.is_some()
+            || client_options.is_some()
+            || hands_activate
+            || hands_look_latency_given;
+        if hands_requested && !real_client {
+            return Err(
+                "--hands, --client-pid, --client-options, --hands-activate and \
+                 --hands-look-latency need --real-client"
+                    .to_owned(),
+            );
+        }
+        let hands_any = hands.is_some() || client_pid.is_some() || client_options.is_some();
+        if hands_any && !(hands.is_some() && client_pid.is_some() && client_options.is_some()) {
+            return Err(
+                "--hands, --client-pid and --client-options are required together".to_owned(),
+            );
+        }
+        if (hands_activate || hands_look_latency_given) && hands.is_none() {
+            return Err(
+                "--hands-activate and --hands-look-latency need --hands, --client-pid and \
+                 --client-options"
+                    .to_owned(),
+            );
+        }
+
         Ok(Self {
             forwarder,
             tee,
+            real_client,
+            hands,
+            client_pid,
+            client_options,
+            hands_activate,
+            hands_look_latency,
             name,
             goal,
             goal_args,
@@ -419,8 +534,9 @@ mod tests {
             "7",
         ])
         .unwrap();
-        assert_eq!(args.forwarder.port(), 25640);
+        assert_eq!(args.forwarder.map(|address| address.port()), Some(25640));
         assert_eq!(args.tee.port(), 25641);
+        assert!(!args.real_client, "a live session logs in");
         assert_eq!(args.name, "Praxy");
         assert_eq!(args.goal.as_deref(), Some("get_wood(2)"));
         assert_eq!(args.port, None);
@@ -602,6 +718,98 @@ mod tests {
             parse(&["--forwarder", "127.0.0.1:1", "--tee", "127.0.0.1:2"]).unwrap_err(),
             "--goal is required (or --port for a brain session)"
         );
+    }
+
+    #[test]
+    fn real_client_mode_needs_no_forwarder() {
+        let args = parse(&[
+            "--real-client",
+            "--tee",
+            "127.0.0.1:2",
+            "--run-dir",
+            "r",
+            "--port",
+            "127.0.0.1:3",
+            "--name",
+            "Fatih",
+        ])
+        .unwrap();
+        assert!(args.real_client);
+        assert_eq!(args.forwarder, None, "shadow mode never logs in");
+        assert_eq!(args.name, "Fatih", "the name is the operator's player");
+    }
+
+    #[test]
+    fn the_hands_flags_are_one_mode_for_real_client_only() {
+        let base = [
+            "--real-client",
+            "--tee",
+            "127.0.0.1:2",
+            "--run-dir",
+            "r",
+            "--port",
+            "127.0.0.1:3",
+        ];
+        let mut full = base.to_vec();
+        full.extend([
+            "--hands",
+            "hands/macos/build/praxion-hands",
+            "--client-pid",
+            "1234",
+            "--client-options",
+            "options.txt",
+            "--hands-activate",
+            "--hands-look-latency",
+            "3",
+        ]);
+        let args = parse(&full).unwrap();
+        assert_eq!(
+            args.hands,
+            Some(PathBuf::from("hands/macos/build/praxion-hands"))
+        );
+        assert_eq!(args.client_pid, Some(1234));
+        assert_eq!(args.client_options, Some(PathBuf::from("options.txt")));
+        assert!(args.hands_activate);
+        assert_eq!(args.hands_look_latency, 3);
+
+        // The latency has a default and the modifier flags are optional.
+        let mut minimal = base.to_vec();
+        minimal.extend(["--hands", "h", "--client-pid", "1", "--client-options", "o"]);
+        let args = parse(&minimal).unwrap();
+        assert_eq!(args.hands_look_latency, 2);
+        assert!(!args.hands_activate);
+
+        // The three paths are all or nothing.
+        let mut partial = base.to_vec();
+        partial.extend(["--hands", "h"]);
+        assert_eq!(
+            parse(&partial).unwrap_err(),
+            "--hands, --client-pid and --client-options are required together"
+        );
+
+        // A modifier alone is not a mode.
+        let mut modifier = base.to_vec();
+        modifier.extend(["--hands-activate"]);
+        assert!(parse(&modifier).unwrap_err().contains("--hands-activate"));
+
+        let mut bad_pid = base.to_vec();
+        bad_pid.extend(["--client-pid", "many"]);
+        assert!(parse(&bad_pid).unwrap_err().contains("process id"));
+
+        // A logged-in body has no hands.
+        let mut logged_in = [
+            "--forwarder",
+            "127.0.0.1:1",
+            "--tee",
+            "127.0.0.1:2",
+            "--goal",
+            "g",
+            "--run-dir",
+            "r",
+        ]
+        .to_vec();
+        logged_in.extend(["--hands", "h", "--client-pid", "1", "--client-options", "o"]);
+        assert!(parse(&logged_in).unwrap_err().contains("--real-client"));
     }
 
     #[test]
