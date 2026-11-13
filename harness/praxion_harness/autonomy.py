@@ -41,14 +41,14 @@ from .rcon import RconError
 DEFAULT_START_TIME = 0
 
 
-def _peaceful(fixture, referee, session) -> None:
+def peaceful_setup(fixture, referee, session) -> None:
     """The old run: the clock frozen at 1000, no mobs."""
     fixture.advance_time(False)
     fixture.spawn_mobs(False)
     fixture.time_set(1000)
 
 
-def _survival(start_time: int):
+def survival_setup(start_time: int):
     """The survival run: the day cycle on, mobs on, the clock at ``start_time``."""
 
     def setup(fixture, referee, session) -> None:
@@ -57,6 +57,12 @@ def _survival(start_time: int):
         fixture.time_set(start_time)
 
     return setup
+
+
+#: Old names kept for callers that imported them before the console reused the
+#: same two setups (the argument list and the fixture calls are unchanged).
+_peaceful = peaceful_setup
+_survival = survival_setup
 
 
 def survival_report(referee, player: str = "Praxion") -> dict:
@@ -132,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = repo_root()
-    setup = _peaceful if args.peaceful else _survival(args.start_time)
+    setup = peaceful_setup if args.peaceful else survival_setup(args.start_time)
     with start_session(
         args.seed,
         setup=setup,

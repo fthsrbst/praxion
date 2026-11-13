@@ -4,6 +4,10 @@ import { getJSON } from "./api.js";
 
 let returnFocus = null;
 
+export function isOpen() {
+  return !el("drawer").hidden;
+}
+
 export function closeDrawer() {
   el("drawer").hidden = true;
   el("scrim").hidden = true;
@@ -37,7 +41,7 @@ export function tint(source) {
   return out;
 }
 
-const code = (source) => {
+export const code = (source) => {
   const pre = h("pre.code");
   pre.append(tint(source));
   return pre;
@@ -72,15 +76,25 @@ export async function openExchange(line) {
     return;
   }
   const req = x.request || {}, res = x.response || {};
-  const title = { proposal: "Goal proposal", router: "Jev routing", writer: "Skill writer" }[x.kind] || x.kind;
+  const title = { proposal: "Goal proposal", router: "Jev routing", writer: "Skill writer", plan: "Planner", command_map: "Command mapping" }[x.kind] || x.kind;
+  const parsed = res.parsed && typeof res.parsed === "object" ? res.parsed : null;
+  const thinking = x.kind === "plan" && parsed
+    ? h("div.block", {}, h("h4", { text: "Thought" }), h("p.thought-read", { text: parsed.thought || "" }),
+      (parsed.goals || []).map((g, i) => h("div.practice", {}, h("span.muted", { text: `${i + 1}` }), h("span", { text: g.text }),
+        h("code", { text: g.condition || "(skill-verified)" }), g.skill ? h("span.muted", { text: g.skill }) : null)))
+    : null;
   const meta = h("div.meta", {},
     chip(`${req.provider || res.provider || ""} / ${res.model || req.model || ""}`),
     chip(`${num(x.input_tokens)} in, ${num(x.output_tokens)} out`),
     chip(money(x.cost)),
     chip(x.latency_s === null ? "latency unknown" : x.latency_s.toFixed(1) + " s"),
     req.purpose ? chip(req.purpose) : null,
-    x.decision ? chip("decision: " + x.decision.decision + (x.decision.skill ? " " + x.decision.skill : "")) : null);
+    x.decision ? chip("decision: " + x.decision.decision + (x.decision.skill ? " " + x.decision.skill : "")) : null,
+    x.decision && x.decision.source ? chip("source: " + x.decision.source) : null,
+    x.decision && x.decision.hint ? chip("hint: " + x.decision.hint) : null,
+    res.after_death ? chip("after a death") : null);
   show(title, `evidence line ${line}`, meta,
+    thinking,
     scores(res),
     section("System prompt", req.system, false),
     section("Briefing", req.briefing),
@@ -92,7 +106,7 @@ export async function openExchange(line) {
 }
 
 // -- skills ------------------------------------------------------------- //
-function practices(report) {
+export function practices(report) {
   if (!report) return null;
   const rows = [];
   report.attempts.forEach((attempt) => {

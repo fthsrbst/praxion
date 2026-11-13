@@ -1,0 +1,63 @@
+/* Voice controls: two buttons that sit in the dock row (or a fixed corner card
+   when the page has no dock slot). */
+.voice {
+  position: fixed;
+  right: 18px;
+  bottom: 92px;
+  z-index: 21;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 300px;
+  padding: 10px 12px;
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+  font-size: 12.5px;
+  user-select: none;
+}
+
+.voice[data-state="off"] { opacity: .82; }
+
+.voice-btn {
+  border: 0;
+  border-radius: 99px;
+  padding: 7px 13px;
+  font: 600 12.5px var(--sans);
+  background: var(--card-2);
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.voice-btn:hover { background: color-mix(in srgb, var(--card-2) 70%, var(--line)); }
+.voice-btn:disabled { opacity: .45; cursor: default; }
+.voice-btn[aria-pressed="false"] { opacity: .6; }
+
+.voice-talk { background: var(--accent); color: var(--accent-ink); }
+.voice.recording .voice-talk { background: var(--bad); color: #fff; }
+
+.voice-status,
+.voice-heard {
+  flex-basis: 100%;
+  margin: 0;
+  line-height: 1.35;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.voice-status.err { color: var(--bad); }
+.voice-heard { color: var(--ink); }
+.voice-heard:empty { display: none; }
+
+@media (max-width: 700px) {
+  .voice { right: 10px; left: 10px; bottom: 148px; max-width: none; }
+}
+
+/* In the dock: no card of its own, just the two buttons. */
+.voice.in-dock {
+  position: static; display: flex; flex-wrap: nowrap; gap: 6px; padding: 0; max-width: none;
+  background: none; backdrop-filter: none; box-shadow: none; border-radius: 0;
+}
+.voice.in-dock .voice-btn { padding: 11px 16px; }
+.voice.in-dock .voice-status, .voice.in-dock .voice-heard { display: none; }

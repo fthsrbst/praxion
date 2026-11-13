@@ -13,6 +13,7 @@ from praxion_brain.admission import (
     WRITE_OUTPUT_ESTIMATE,
     AdmissionReport,
 )
+from praxion_brain.commands import CommandPlan
 from praxion_brain.curriculum import GoalProposal
 from praxion_brain.evidence import Evidence
 from praxion_brain.goal import Goal
@@ -27,13 +28,14 @@ from praxion_brain.loop import (
     LoopState,
 )
 from praxion_brain.memory import GoalRecord, Memory
+from praxion_brain.planner import Plan, PlannedGoal
 from praxion_brain.practice import PracticeResult
 from praxion_brain.port import Bye, PortClient, Snapshot, StackEntry
-from praxion_brain.proposer import (
+from praxion_brain.planner import (
     ESCALATE_AFTER,
     INPUT_ESTIMATE,
     OUTPUT_ESTIMATE,
-    estimate as propose_estimate,
+    estimate as plan_estimate,
 )
 from praxion_brain.records import GoalRecords
 from praxion_brain.router import Route
@@ -85,17 +87,44 @@ def proposal(condition: str, text: str = "do the thing", rung: str | None = None
     return GoalProposal(text=text, condition=condition, rung=rung, rationale="because")
 
 
+def one_goal_plan(propose_fn):
+    """Adapt a fake that answers one :class:`GoalProposal` per call to a planner.
+
+    Each call becomes a one-goal plan (no thought), so the tests that play one
+    goal at a time keep their fakes. A fake may also return a ready ``Plan``.
+    """
+
+    def plan_fn(**kwargs):
+        answer = propose_fn(**kwargs)
+        if isinstance(answer, Plan):
+            return answer
+        return Plan(
+            thought="",
+            goals=[
+                PlannedGoal(
+                    text=answer.text,
+                    condition=answer.condition,
+                    rationale=answer.rationale,
+                )
+            ],
+        )
+
+    return plan_fn
+
+
 def make_loop(
     body: FakeBody,
     tmp_path: Path,
     *,
-    propose_fn,
+    propose_fn=None,
+    plan_fn=None,
     route_fn,
     skills: SkillCatalog | None = None,
     memory: Memory | None = None,
     clock: Clock | None = None,
     governor_kwargs: dict | None = None,
     governor_class: type[Governor] = Governor,
+    wiki: bool = False,
     **kwargs,
 ) -> Loop:
     clock = clock if clock is not None else Clock()
@@ -115,7 +144,7 @@ def make_loop(
     )
     port = PortClient(body.port, handshake_timeout=2.0)
     logger = kwargs.pop("logger", lambda _message: None)
-    return Loop(
+    loop = Loop(
         port,
         world_id="w",
         memory=memory,
@@ -123,13 +152,18 @@ def make_loop(
         ledger=ledger,
         evidence=evidence,
         governor=governor,
-        propose_fn=propose_fn,
+        plan_fn=plan_fn if plan_fn is not None else one_goal_plan(propose_fn),
         route_fn=route_fn,
         clock=clock,
         wall_clock=clock,
         logger=logger,
         **kwargs,
     )
+    if not wiki:
+        # The real wiki index (when one exists on this machine) must not make a
+        # loop test depend on it; the wiki tests ask for it with `wiki=True`.
+        loop._knowledge = lambda: []
+    return loop
 
 
 def pump(loop: Loop, predicate, timeout: float = 4.0, what: str = "state") -> None:
@@ -872,12 +906,12 @@ def test_propose_timeout_falls_back_to_code_only(tmp_path) -> None:
             loop.start()
             pump(
                 loop,
-                lambda: "proposal_timeout" in evidence_kinds(loop),
-                what="propose timeout",
+                lambda: "plan_timeout" in evidence_kinds(loop),
+                what="plan timeout",
             )
             pump(loop, lambda: len(body.commands) >= 1, what="code-only command")
             assert body.commands[0].skill == "get_wood"
-            assert "proposal_error" not in evidence_kinds(loop)
+            assert "plan_error" not in evidence_kinds(loop)
         finally:
             loop.close()
 
@@ -1007,9 +1041,9 @@ def test_propose_estimate_uses_the_escalated_model(tmp_path) -> None:
             ]
             assert estimates
             assert estimates[0] == pytest.approx(
-                estimate_cost("gpt-6.1-terra", INPUT_ESTIMATE, OUTPUT_ESTIMATE)
+                estimate_cost("gpt-6.1-sol", INPUT_ESTIMATE, OUTPUT_ESTIMATE)
             )
-            assert estimates[0] > propose_estimate(0)
+            assert estimates[0] > plan_estimate(0)
         finally:
             loop.close()
 
@@ -1311,10 +1345,9 @@ def test_repeating_the_goal_being_written_is_excluded_not_invalid(tmp_path) -> N
             pump(loop, lambda: len(body.commands) >= 1, what="side goal played")
 
             assert body.commands[0].skill == "get_coal"
-            excluded = evidence_entries(loop, "proposal_writing_excluded")
-            assert len(excluded) == 1
-            assert excluded[0]["writing"] == "get_furnace"
-            assert not evidence_entries(loop, "proposal_invalid")
+            excluded = evidence_entries(loop, "plan_step_skipped")
+            assert [entry["reason"] for entry in excluded] == ["writing"]
+            assert not evidence_entries(loop, "plan_invalid")
             assert loop._invalid_proposals == 0
         finally:
             release.set()
@@ -1468,9 +1501,9 @@ def test_a_rejected_job_records_the_goal_failed(tmp_path) -> None:
             assert loop._job is None
             assert loop._written is None
             assert loop._consecutive_failures == 1
-            gap = evidence_entries(loop, "pick_gap")[-1]
-            assert gap["ticks"] == FAILURE_GAP_TICKS
-            assert loop.memory.failures()["has(furnace)"].attempts == 1
+            gap = evidence_entries(loop, "pick_gap")[0]
+            assert gap["ticks"] == 0  # the first failure holds nothing
+            assert loop.memory.failures()["has(furnace)"].attempts >= 1
             assert body.commands == []
         finally:
             loop.close()
@@ -1752,22 +1785,9 @@ def test_code_only_passes_the_count_and_blocks_after_two_wrong_skills(tmp_path) 
             wait_accepted(body, first.id)
             body.settle(first.id, outcome="done", condition="false")  # skill_wrong
 
-            pump(
-                loop,
-                lambda: loop.state == LoopState.IDLE
-                and loop._consecutive_failures == 1,
-                what="first failure",
-            )
-            deadline = loop._next_pick_tick
-            assert deadline == int(loop.session.tick or 0) + FAILURE_GAP_TICKS
-
-            set_tick(loop, body, deadline - 1)
-            for _ in range(20):
-                loop.step(0.0)
-            assert len(body.commands) == 1  # still inside the gap
-            assert loop.state == LoopState.IDLE
-
-            set_tick(loop, body, deadline)
+            pump(loop, lambda: loop._consecutive_failures == 1, what="first failure")
+            # The first failure holds nothing: the next pick starts at once.
+            assert evidence_entries(loop, "pick_gap")[0]["ticks"] == 0
             pump(loop, lambda: len(body.commands) >= 2, what="second code-only command")
             second = body.commands[1]
             assert second.skill == "get_cobblestone"
@@ -1782,6 +1802,8 @@ def test_code_only_passes_the_count_and_blocks_after_two_wrong_skills(tmp_path) 
                 what="blocked goal",
             )
             assert loop._consecutive_failures == 2
+            # From the second failure in a row on, the pick waits the gap.
+            assert loop._next_pick_tick == int(loop.session.tick or 0) + FAILURE_GAP_TICKS
 
             set_tick(loop, body, loop._next_pick_tick)
             for _ in range(40):
@@ -1794,7 +1816,7 @@ def test_code_only_passes_the_count_and_blocks_after_two_wrong_skills(tmp_path) 
             loop.close()
 
 
-def test_a_failed_goal_waits_the_gap_and_three_failures_wait_longer(tmp_path) -> None:
+def test_the_first_failure_waits_nothing_the_second_the_gap_and_three_longer(tmp_path) -> None:
     clock = Clock()
     proposals = [
         proposal("has(furnace)", "get a furnace", "furnace"),
@@ -1826,24 +1848,26 @@ def test_a_failed_goal_waits_the_gap_and_three_failures_wait_longer(tmp_path) ->
                 body.settle(command.id, outcome="done", condition="false")
                 pump(
                     loop,
-                    lambda expected=attempt + 1: loop.state == LoopState.IDLE
-                    and loop._consecutive_failures == expected,
+                    lambda expected=attempt + 1: loop._consecutive_failures == expected,
                     what=f"failure {attempt + 1}",
                 )
-                expected_gap = (
-                    FAILURE_STREAK_GAP_TICKS
-                    if loop._consecutive_failures >= FAILURE_STREAK
-                    else FAILURE_GAP_TICKS
-                )
-                deadline = loop._next_pick_tick
-                assert deadline == int(loop.session.tick or 0) + expected_gap
+                if loop._consecutive_failures >= FAILURE_STREAK:
+                    expected_gap = FAILURE_STREAK_GAP_TICKS
+                elif loop._consecutive_failures >= 2:
+                    expected_gap = FAILURE_GAP_TICKS
+                else:
+                    expected_gap = 0  # the first failure holds nothing
+                gap = evidence_entries(loop, "pick_gap")[attempt]
+                assert gap["ticks"] == expected_gap
+                deadline = gap["next_pick_tick"]
 
-                set_tick(loop, body, deadline - 1)
-                for _ in range(20):
-                    loop.step(0.0)
-                assert len(body.commands) == attempt + 1  # no pick inside the gap
-
-                set_tick(loop, body, deadline)
+                if expected_gap:
+                    assert loop.state == LoopState.IDLE
+                    set_tick(loop, body, deadline - 1)
+                    for _ in range(20):
+                        loop.step(0.0)
+                    assert len(body.commands) == attempt + 1  # no pick inside the gap
+                    set_tick(loop, body, deadline)
                 pump(
                     loop,
                     lambda count=attempt + 2: len(body.commands) >= count,
@@ -1852,11 +1876,7 @@ def test_a_failed_goal_waits_the_gap_and_three_failures_wait_longer(tmp_path) ->
 
             assert loop._consecutive_failures == FAILURE_STREAK
             gaps = [entry["ticks"] for entry in evidence_entries(loop, "pick_gap")]
-            assert gaps == [
-                FAILURE_GAP_TICKS,
-                FAILURE_GAP_TICKS,
-                FAILURE_STREAK_GAP_TICKS,
-            ]
+            assert gaps == [0, FAILURE_GAP_TICKS, FAILURE_STREAK_GAP_TICKS]
 
             # A good goal ends the streak; the next failure gets the short gap.
             last = body.commands[FAILURE_STREAK]
@@ -2052,3 +2072,30 @@ def test_a_stop_before_the_body_accepts_is_sent_on_accept() -> None:
     loop._on_receipt({"command_id": "c-0001", "state": "accepted", "intent_id": 7})
     assert pops == [7]
     assert "stop_sent_on_accept" in lines
+
+
+# --------------------------------------------------------------------------- #
+# The operator's sentence: the answer names why it could not be understood
+# --------------------------------------------------------------------------- #
+def test_an_unsupported_sentence_carries_the_maps_detail(tmp_path) -> None:
+    plan = CommandPlan(text="", condition="", unsupported="dans etmeyi bilmiyorum")
+    with FakeBody(
+        skills={"get_wood"}, caps=["command", "snapshot", "pop", "say"], facts={"inventory": {}}
+    ) as body:
+        loop = make_loop(
+            body,
+            tmp_path,
+            propose_fn=lambda *args, **kwargs: proposal("count(dirt) >= 99"),
+            route_fn=lambda *args, **kwargs: Route(kind="play", skill="get_wood"),
+            map_fn=lambda text, **kwargs: plan,
+        )
+        loop._paused = True
+        try:
+            loop.start()
+            pump(loop, lambda: loop.session.snapshot is not None, what="snapshot")
+            assert loop._handle_user_text("dans et", source="console") == "unsupported"
+            # The map's own `unsupported` line reaches the operator, not just
+            # the evidence (review finding 4).
+            assert "dans etmeyi bilmiyorum" in loop._last_reply["text"]
+        finally:
+            loop.close()

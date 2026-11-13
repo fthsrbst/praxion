@@ -5,6 +5,17 @@ night, armed and healthy hunt the hostiles that come near, else take shelter.
 Design: ``logs/mac1109/design/survival.out.md`` (D10: the conditions are
 verifiable) and its critique.
 
+Decision 2026-11-13 "night mining" (run B, seed 37960): in run B the bot
+survived the night sealed in its shelter for nine minutes, half of every
+20-minute day. A real player with a pickaxe spends the night mining, so a body
+that holds any pickaxe and is healthy above :data:`SHELTER_HEALTH` starts no
+night goal at all: :func:`night_work` is true, :func:`choose` returns no night
+goal and :func:`night_hold` drops its night reasons, and the loop plans again,
+restricted to :data:`NIGHT_WORK_SKILLS` (work that digs down, tunnels, crafts or
+smelts). Without a pickaxe, or hurt, the night behaviour above is unchanged.
+A body that is already sheltered keeps its running ``take_shelter``: it is not
+interrupted mid-night by the new rule.
+
 The body already eats what it holds (the arbiter's meal) and wakes the brain with
 ``hunger_no_food`` when it has nothing to eat. This module is the brain half: it
 reads the snapshot facts and names the survival goal that is due, if any. The
@@ -40,6 +51,34 @@ SHELTER_HEALTH = 10
 FOOD_SKILL = "get_food"
 NIGHT_SKILL = "night_watch"
 SHELTER_SKILL = "take_shelter"
+
+#: The public skills a body may play at night while it works instead of
+#: sheltering (decision 2026-11-13 "night mining"): they dig down, tunnel to
+#: ore, craft or smelt, so they need no surface light and hunt nothing. The
+#: loop refuses every other plan step at night (``night_unsafe``), and the
+#: briefing lists the ones the catalog has under ``## Night``.
+NIGHT_WORK_SKILLS = frozenset(
+    {
+        "get_cobblestone",
+        "get_coal",
+        "get_raw_iron",
+        "find_ore",
+        "get_iron_ingot",
+        "get_iron_pickaxe",
+        "get_furnace",
+        "get_torch",
+        "get_stone_pickaxe",
+        "get_stone_sword",
+        "get_stone_axe",
+        "get_sticks",
+        "get_planks",
+        "get_crafting_table",
+        "get_chest",
+        "make_camp",
+        "cook_food",
+        "eat_food",
+    }
+)
 
 #: The survival skills, so a live one in the snapshot's stack means "already
 #: running", never "start another".
@@ -118,6 +157,40 @@ def _armed(inventory: Mapping[str, int]) -> bool:
     return any(
         normalize_item(str(key)).endswith("_sword") and int(amount) > 0
         for key, amount in inventory.items()
+    )
+
+
+def _holds_pickaxe(inventory: Mapping[str, int]) -> bool:
+    """Whether any pickaxe is in the inventory (wooden to netherite)."""
+    return any(
+        normalize_item(str(key)).endswith("_pickaxe") and int(amount) > 0
+        for key, amount in inventory.items()
+    )
+
+
+def night_work(
+    facts: Optional[Mapping[str, Any]], inventory: Mapping[str, int]
+) -> bool:
+    """Whether the body should work underground instead of sheltering now.
+
+    Decision 2026-11-13 "night mining" (run B, seed 37960): a pickaxe body
+    spends the night mining. True when ``is_night`` is true, the world mirror is
+    valid, a pickaxe is held and ``health`` is a number above
+    :data:`SHELTER_HEALTH`; a hurt body shelters as it always did. Callers use
+    it twice: :func:`choose` and :func:`night_hold` step aside for it, and the
+    loop restricts the plan to :data:`NIGHT_WORK_SKILLS` while it holds.
+    """
+    if not facts or facts.get("world_valid") is False:
+        return False
+    if facts.get("is_night") is not True:
+        return False
+    if not _holds_pickaxe(inventory):
+        return False
+    health = facts.get("health")
+    return (
+        isinstance(health, (int, float))
+        and not isinstance(health, bool)
+        and health > SHELTER_HEALTH
     )
 
 
@@ -244,7 +317,11 @@ def choose(
     at night while unarmed or sheltered, where ``get_food`` (which hunts) waits
     until food is at :data:`CRITICAL_FOOD_AT` or below. Then
     night: ``night_watch`` when armed and healthy, ``take_shelter`` when hurt or
-    unarmed. By day a body still sealed in (:func:`sealed_by_day`) gets
+    unarmed -- but no night goal at all while :func:`night_work` holds (decision
+    2026-11-13): a pickaxe body that is healthy above :data:`SHELTER_HEALTH`
+    works instead, and a ``take_shelter`` already running keeps running (this
+    function starts nothing, and the loop never interrupts its own night goal).
+    By day a body still sealed in (:func:`sealed_by_day`) gets
     ``take_shelter`` again, which waits for sunrise and then leaves the
     shelter (its goal is ``not sheltered()``). A goal whose skill the catalog
     lacks is skipped (the body's own
@@ -304,7 +381,7 @@ def choose(
             reason="sealed in by day",
         )
 
-    if facts.get("is_night") is True:
+    if facts.get("is_night") is True and not night_work(facts, inventory):
         skill = _night_skill(facts, inventory)
         if usable(skill, NIGHT_CONDITION):
             return SurvivalGoal(
@@ -335,7 +412,9 @@ def night_hold(
     "Unarmed at night: avoid contact" and "Survival goals are never
     failure-blocked"): while unarmed, while the night skill is backing off after
     a failure, and while a night skill is already live in ``stack`` (the body's
-    own fallback: a ladder command would preempt it). By day a body still
+    own fallback: a ladder command would preempt it). While :func:`night_work`
+    holds, none of those night reasons applies (decision 2026-11-13): the pick
+    keeps planning, restricted to :data:`NIGHT_WORK_SKILLS`. By day a body still
     sealed in waits too (:func:`sealed_by_day`): every ladder goal would fail
     inside the shelter, so the pick waits until ``take_shelter`` has opened it
     (it is backing off, running, or missing from the catalog). Call it only
@@ -349,6 +428,8 @@ def night_hold(
             return f"sealed in by day, {SHELTER_SKILL} is running"
         return "sealed in by day"
     if not facts or facts.get("world_valid") is False or facts.get("is_night") is not True:
+        return None
+    if night_work(facts, inventory):
         return None
     if not _armed(inventory):
         return "unarmed at night"
@@ -373,6 +454,7 @@ __all__ = [
     "NIGHT_CONDITION",
     "NIGHT_SKILL",
     "NIGHT_SKILLS",
+    "NIGHT_WORK_SKILLS",
     "SHELTER_HEALTH",
     "SHELTER_SKILL",
     "SURVIVAL_BACKOFF_TICKS",
@@ -383,5 +465,6 @@ __all__ = [
     "choose",
     "critical_food",
     "night_hold",
+    "night_work",
     "sealed_by_day",
 ]

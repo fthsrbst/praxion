@@ -17,6 +17,20 @@ export async function control(body) {
   return payload;
 }
 
+/** Ask the managed console for a fixed lifecycle action: start/stop server,
+ * start/stop bot, or join. The action is the only value sent: the server owns
+ * the seed, operator, paths and ports. */
+export async function sessionAction(action) {
+  const response = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  return payload;
+}
+
 /** Open the SSE stream from line `since`; EventSource reconnects by itself and
  * sends `Last-Event-ID`, which is where the server resumes. */
 export function stream(since, handlers) {
@@ -26,4 +40,13 @@ export function stream(since, handlers) {
   source.onopen = () => handlers.link(true);
   source.onerror = () => handlers.link(false);
   return source;
+}
+
+/** Free-text task for the loop's command path (the same one chat uses). */
+export function sendTask(text) {
+  return control({ action: "task", text });
+}
+
+export function searchWiki(query) {
+  return getJSON(`/api/wiki/search?q=${encodeURIComponent(query)}`);
 }

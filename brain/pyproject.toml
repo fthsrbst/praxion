@@ -13,6 +13,9 @@ dependencies = [
 [project.optional-dependencies]
 # The only test tool; runtime dependencies are above.
 test = ["pytest>=8"]
+# The local Minecraft Wiki RAG (`python -m praxion_brain wiki ...`): a local
+# ONNX embedding model and the vector maths. Not needed by the brain itself.
+wiki = ["fastembed>=0.9", "numpy>=2"]
 
 [tool.pytest.ini_options]
 # Run pytest from `brain/` and `import praxion_brain` still resolves; `tests`

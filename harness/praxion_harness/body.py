@@ -26,6 +26,13 @@ for the body port in a brain session. The server keeps its own random port from
 ``start_session`` (proposal §2.6) starts the same stack with ``--port`` and no
 ``--goal``: the body listens for the brain and runs goal after goal in one
 process. Its ``BodySession`` adds the port number to the usual handles.
+
+The stack can also be split. ``start_server`` starts only :class:`TestServer`
+plus its referee and one-time setup; ``start_session(..., server=that)`` then
+starts only the forwarder and the body against the already-running server, in a
+fresh attempt directory under the server's run directory. A borrowed server is
+never stopped by the body's cleanup, so a bot crash or a cancelled start leaves
+the world alive for the next attempt and the console can restart just the bot.
 """
 
 from __future__ import annotations
@@ -52,6 +59,24 @@ BODY_JOIN_TIMEOUT = 90.0
 FORWARDER_READY_TIMEOUT = 30.0
 
 Setup = Callable[[FixtureChannel, Referee, "BodyRun"], None]
+
+
+class StartAborted(RuntimeError):
+    """The caller asked to stop before the next startup stage was launched.
+
+    ``start_session`` raises it from a ``should_stop`` callback so the owner of
+    the session can tear down a half-started stack (server, forwarder, body)
+    instead of letting it come up while nobody wants it.
+    """
+
+
+def _should_stop(should_stop: Optional[Callable[[], bool]]) -> bool:
+    return should_stop is not None and bool(should_stop())
+
+
+def _check_abort(should_stop: Optional[Callable[[], bool]]) -> None:
+    if _should_stop(should_stop):
+        raise StartAborted("startup stopped by the caller")
 
 
 def _binary(name: str) -> Path:
@@ -102,8 +127,56 @@ def _free_ports(count: int, used: Optional[set[int]] = None) -> list[int]:
     return ports
 
 
+class ServerSession:
+    """An independently owned server with its referee and one-time setup.
+
+    ``start_server`` returns one. Its ``run_dir`` names the managed world (the
+    brain uses that name as ``world_id``), its ``port`` is the game port Join
+    uses, and one :class:`BodySession` may borrow it at a time. Stopping the
+    owner stops Java; a borrowed body never does.
+    """
+
+    def __init__(
+        self,
+        run_dir: Path,
+        server: TestServer,
+        referee: Referee,
+        fixture: FixtureChannel,
+        *,
+        keep: bool,
+        owns_server: bool = True,
+    ) -> None:
+        self.run_dir = Path(run_dir)
+        self.server = server
+        self.referee = referee
+        self.fixture = fixture
+        self.keep = keep
+        self.owns_server = owns_server
+        self._stopped = False
+
+    @property
+    def port(self) -> int:
+        return int(self.server.port)
+
+    def stop(self) -> None:
+        """Stop the server only when this session owns it; borrowed ones stay up."""
+        if self._stopped:
+            return
+        self._stopped = True
+        if not self.owns_server:
+            return
+        if self.keep:
+            self.server.keep = True
+        self.server.stop()
+
+
 class BodyRun:
-    """A started body, forwarder and server, and how to read what it did."""
+    """A started body and forwarder, and how to read what it did.
+
+    ``owns_server`` decides whether :meth:`stop` also stops the :class:`TestServer`:
+    a run started by ``start_body``/``start_session`` owns its server, while a
+    body borrowed onto a ``ServerSession`` only tears down its own two processes.
+    """
 
     def __init__(
         self,
@@ -118,6 +191,7 @@ class BodyRun:
         *,
         keep: bool,
         skills_dir: Optional[Path] = None,
+        owns_server: bool = True,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.body_dir = self.run_dir / "body"
@@ -129,6 +203,7 @@ class BodyRun:
         self.referee = referee
         self.fixture = fixture
         self.keep = keep
+        self.owns_server = owns_server
         #: The directory a port session watches for newly admitted skills.
         self.skills_dir = Path(skills_dir) if skills_dir is not None else None
         self._out = None
@@ -206,6 +281,8 @@ class BodyRun:
                 self._forwarder_out.close()
         except Exception:
             pass
+        if not self.owns_server:
+            return
         if self.keep:
             self.server.keep = True
         self.server.stop()
@@ -286,9 +363,17 @@ def _terminate(process: Optional[subprocess.Popen], timeout: float) -> None:
         pass
 
 
-def _wait_for(path: Path, needle: str, process: subprocess.Popen, timeout: float) -> None:
+def _wait_for(
+    path: Path,
+    needle: str,
+    process: subprocess.Popen,
+    timeout: float,
+    *,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        _check_abort(should_stop)
         if process.poll() is not None:
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -348,6 +433,58 @@ def start_body(
     )
 
 
+def start_server(
+    seed: int,
+    *,
+    setup: Optional[Setup] = None,
+    name: str = "Praxion",
+    run_dir: Optional[Path] = None,
+    keep: Optional[bool] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> ServerSession:
+    """Start one independently owned server and run ``setup`` once.
+
+    Blocks until Java and RCON are ready and the setup callback returned, so the
+    returned game ``port`` is joinable immediately. Nothing else is running yet:
+    a caller may expose Join before it starts a body.
+
+    ``setup`` receives the server's referee and fixture, with ``None`` as the
+    run argument (the same signature ``start_session`` uses). It runs here and
+    only here, once per server: a body borrowed later must not reset the clock,
+    the mob spawning or anything else the world already has.
+
+    A failed start stops the half-started server; a caller that stops during
+    startup gets :class:`StartAborted` and no server is left behind.
+    """
+    _check_abort(should_stop)
+    run_dir = Path(run_dir) if run_dir is not None else (
+        repo_root() / "runs" / f"server-{uuid.uuid4().hex}"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    server = TestServer(run_dir, seed, keep=keep)
+    try:
+        server.start()
+        _check_abort(should_stop)
+        referee = Referee(server.rcon, player=name)
+        referee.setup_death_objective()
+        fixture = FixtureChannel(server.rcon, fixture_log_path(run_dir))
+        _check_abort(should_stop)
+        if setup is not None:
+            setup(fixture, referee, None)  # type: ignore[arg-type]
+        _check_abort(should_stop)
+        return ServerSession(
+            run_dir,
+            server,
+            referee,
+            fixture,
+            keep=server.keep,
+            owns_server=True,
+        )
+    except BaseException:
+        server.stop()
+        raise
+
+
 def start_session(
     seed: int,
     *,
@@ -359,6 +496,8 @@ def start_session(
     run_dir: Optional[Path] = None,
     keep: Optional[bool] = None,
     extra_args: Iterable[str] = (),
+    should_stop: Optional[Callable[[], bool]] = None,
+    server: Optional[ServerSession] = None,
 ) -> BodySession:
     """Start a body in port mode: it runs goal after goal for the brain.
 
@@ -376,7 +515,23 @@ def start_session(
     run is playable by the next command. The directory is created when missing.
 
     ``max_ticks`` is only the process-wide safety cap, not a goal budget.
+
+    ``should_stop`` is polled between startup stages (server, forwarder, body)
+    and while waiting for the body's ``joined`` line; when it returns true the
+    call raises :class:`StartAborted` after tearing the half-started stack down.
+    It lets an owner stop a startup without waiting for a 90 s join timeout.
+
+    With ``server`` set, this is a borrowed run: the server from
+    :func:`start_server` is reused as-is, only the forwarder and body start, and
+    neither :meth:`BodySession.stop` nor a failed start ever stops the server.
+    The body runs in ``run_dir`` when given, else in a unique attempt directory
+    under the server's run directory. ``setup`` is refused for a borrowed
+    server: its world setup already ran once in :func:`start_server`.
     """
+    if server is not None and setup is not None:
+        raise ValueError(
+            "a borrowed server already ran its setup; pass setup to start_server"
+        )
     return _start(
         seed,
         None,
@@ -391,6 +546,8 @@ def start_session(
         run_dir=run_dir,
         keep=keep,
         extra_args=extra_args,
+        should_stop=should_stop,
+        server=server,
     )
 
 
@@ -409,7 +566,15 @@ def _start(
     run_dir: Optional[Path],
     keep: Optional[bool],
     extra_args: Iterable[str],
+    should_stop: Optional[Callable[[], bool]] = None,
+    server: Optional[ServerSession] = None,
 ) -> BodySession:
+    _check_abort(should_stop)
+    borrowed = server is not None
+    if borrowed and setup is not None:
+        raise ValueError(
+            "a borrowed server already ran its setup; pass setup to start_server"
+        )
     for binary in ("praxion-body", "praxion-forwarder"):
         path = _binary(binary)
         if not path.exists():
@@ -424,31 +589,45 @@ def _start(
     if skills_dir is not None:
         skills_dir.mkdir(parents=True, exist_ok=True)
 
-    run_dir = Path(run_dir) if run_dir is not None else (
-        repo_root() / "runs" / f"test-body-{uuid.uuid4().hex}"
-    )
+    if borrowed:
+        # A unique attempt directory per bot, under the one managed world, so
+        # a restart never overwrites the previous attempt's logs and the
+        # server's own files stay untouched.
+        default_run_dir = server.run_dir / "bots" / f"attempt-{uuid.uuid4().hex}"
+    else:
+        default_run_dir = repo_root() / "runs" / f"test-body-{uuid.uuid4().hex}"
+    run_dir = Path(run_dir) if run_dir is not None else default_run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
-    server = TestServer(run_dir, seed, keep=keep)
+    server_obj: Optional[TestServer] = None
     forwarder: Optional[subprocess.Popen] = None
     body: Optional[subprocess.Popen] = None
     body_out = None
     forwarder_out = None
     try:
-        server.start()
-        referee = Referee(server.rcon, player=name)
-        referee.setup_death_objective()
-        fixture = FixtureChannel(server.rcon, fixture_log_path(run_dir))
+        if borrowed:
+            referee = server.referee
+            fixture = server.fixture
+            server_obj = server.server
+        else:
+            server_obj = TestServer(run_dir, seed, keep=keep)
+            server_obj.start()
+            _check_abort(should_stop)
+            referee = Referee(server_obj.rcon, player=name)
+            referee.setup_death_objective()
+            fixture = FixtureChannel(server_obj.rcon, fixture_log_path(run_dir))
 
+        assert server_obj is not None
         ports = _free_ports(3 if port_mode else 2)
         game_port, tee_port = ports[0], ports[1]
         body_port = ports[2] if port_mode else 0
+        _check_abort(should_stop)
         forwarder_out_path = run_dir / "forwarder.out"
         forwarder_out = forwarder_out_path.open("w", encoding="utf-8", errors="replace")
         forwarder = subprocess.Popen(
             [
                 str(_binary("praxion-forwarder")),
                 "--listen", f"127.0.0.1:{game_port}",
-                "--upstream", f"127.0.0.1:{server.port}",
+                "--upstream", f"127.0.0.1:{server_obj.port}",
                 "--tee-listen", f"127.0.0.1:{tee_port}",
                 "--stats", str(run_dir / "forwarder.jsonl"),
             ],
@@ -456,7 +635,14 @@ def _start(
             stdout=forwarder_out,
             stderr=subprocess.STDOUT,
         )
-        _wait_for(forwarder_out_path, "tee on", forwarder, FORWARDER_READY_TIMEOUT)
+        _wait_for(
+            forwarder_out_path,
+            "tee on",
+            forwarder,
+            FORWARDER_READY_TIMEOUT,
+            should_stop=should_stop,
+        )
+        _check_abort(should_stop)
 
         body_dir = run_dir / "body"
         body_out_path = run_dir / "body.out"
@@ -488,23 +674,32 @@ def _start(
             stdout=body_out,
             stderr=subprocess.STDOUT,
         )
-        _wait_for(body_out_path, "joined", body, BODY_JOIN_TIMEOUT)
+        _wait_for(
+            body_out_path,
+            "joined",
+            body,
+            BODY_JOIN_TIMEOUT,
+            should_stop=should_stop,
+        )
+        _check_abort(should_stop)
 
         run = BodySession(
             run_dir,
-            server,
+            server_obj,
             forwarder,
             forwarder_out_path,
             body,
             body_out_path,
             referee,
             fixture,
-            keep=server.keep,
+            keep=server_obj.keep if not borrowed else True,
             port=body_port,
             skills_dir=skills_dir,
+            owns_server=not borrowed,
         )
         run._out = body_out
         run._forwarder_out = forwarder_out
+        _check_abort(should_stop)
         if setup is not None:
             setup(fixture, referee, run)
         return run
@@ -521,7 +716,10 @@ def _start(
                 forwarder_out.close()
         except Exception:
             pass
-        server.stop()
+        # Only an owned server is cleaned up here. A borrowed server belongs to
+        # its owner and must survive a cancelled or failed bot start.
+        if not borrowed and server_obj is not None:
+            server_obj.stop()
         raise
 
 
@@ -529,7 +727,10 @@ __all__ = [
     "BODY_PORT_RANGE",
     "BodyRun",
     "BodySession",
+    "ServerSession",
+    "StartAborted",
     "active_skills_dir",
     "start_body",
+    "start_server",
     "start_session",
 ]

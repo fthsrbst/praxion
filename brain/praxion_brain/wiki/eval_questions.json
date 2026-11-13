@@ -1,0 +1,22 @@
+[
+  {"question": "demir hangi yükseklikte bulunur", "title": "Iron Ore", "language": "tr"},
+  {"question": "creeper nasıl patlar", "title": "Creeper", "language": "tr"},
+  {"question": "kömür olmadan meşale yapılır mı", "title": "Torch", "language": "tr"},
+  {"question": "elmas nerede bulunur", "title": "Diamond Ore", "language": "tr"},
+  {"question": "yemek nasıl pişirilir", "title": "Smelting", "language": "tr"},
+  {"question": "köylüler neyle ticaret yapar", "title": "Trading", "language": "tr"},
+  {"question": "yatak nasıl yapılır", "title": "Bed", "language": "tr"},
+  {"question": "açlık nasıl giderilir", "title": "Food", "language": "tr"},
+  {"question": "nether portalı nasıl yapılır", "title": "Nether Portal", "language": "tr"},
+  {"question": "ilk gece nasıl hayatta kalınır", "title": "Tutorial:Your first 10 minutes", "language": "tr"},
+  {"question": "how do I make a crafting table", "title": "Crafting Table", "language": "en"},
+  {"question": "where does gold spawn", "title": "Gold Ore", "language": "en"},
+  {"question": "what does a creeper drop", "title": "Creeper", "language": "en"},
+  {"question": "how do I make an iron pickaxe", "title": "Pickaxe", "language": "en"},
+  {"question": "how do I find diamonds", "title": "Tutorial:Mining/Diamonds", "language": "en"},
+  {"question": "how do I find a stronghold", "title": "Stronghold", "language": "en"},
+  {"question": "how do I breed animals", "title": "Breeding", "language": "en"},
+  {"question": "how do I get obsidian", "title": "Obsidian", "language": "en"},
+  {"question": "how do I smelt iron ore", "title": "Smelting", "language": "en"},
+  {"question": "how do I survive a raid", "title": "Raid", "language": "en"}
+]

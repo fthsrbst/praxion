@@ -23,14 +23,35 @@ from .skills import SkillCatalog
 PLAY_THRESHOLD = 0.7
 #: Every skill below this probability means the goal needs a new skill.
 WRITE_THRESHOLD = 0.3
+#: The planner's own named skill plays at or above this probability: the
+#: planner already chose it with the arguments in view, so Jev only vetoes. The
+#: bar is the write threshold (below it Jev says "no"). At 0.5 a correct choice
+#: was thrown away live: `hunt(pig, porkchop)` for `count(porkchop) >= 2`
+#: scored 0.49, because Jev sees the skill's doc but not its arguments, and the
+#: loop went to write `get_porkchop` instead (run B, seed 37960, 2026-11-12).
+HINT_THRESHOLD = WRITE_THRESHOLD
 #: The Jev model the router calls and the loop estimates with.
 DEFAULT_MODEL = "jev-latest"
+#: Child skills that other skills call (``do cut_log(`` ...). They are never a
+#: goal's own skill: Jev scored the helper ``cut_log`` level with ``get_wood``
+#: and the helper once won (run A, seed 584146). Hidden from routing and from
+#: the planner's skill list.
+PUBLIC_EXCLUDE = frozenset(
+    {"cut_log", "hunt_food", "get_crafting_table_near", "search_surface", "find_stone"}
+)
 
 
 class Route(BaseModel):
     kind: Literal["play", "write", "ask"]
     skill: str | None = None
     scores: dict[str, float] = Field(default_factory=dict)
+
+
+def public_skills(skills: SkillCatalog) -> SkillCatalog:
+    """The catalog without the helper skills of :data:`PUBLIC_EXCLUDE`."""
+    return SkillCatalog(
+        skills=[skill for skill in skills.skills if skill.name not in PUBLIC_EXCLUDE]
+    )
 
 
 def question_text(skill: str, goal: Goal) -> str:
@@ -58,19 +79,32 @@ def route(
     ledger: Ledger | None = None,
     evidence: Evidence | None = None,
     model: str = DEFAULT_MODEL,
+    hint: str | None = None,
 ) -> Route:
-    """Ask Jev about every known skill and decide from the probabilities.
+    """Ask Jev about every public skill and decide from the probabilities.
 
     Code decides first where code can: a known skill named exactly
-    ``get_<item>`` plays without a Jev call.
+    ``get_<item>`` plays without a Jev call. ``hint`` is the skill the planner
+    named: it plays when Jev scores it at :data:`HINT_THRESHOLD` or more, and
+    the normal decision runs otherwise.
     """
     ledger = ledger if ledger is not None else Ledger()
     evidence = evidence if evidence is not None else Evidence(config.local_brain_dir())
 
+    # Helpers are never a goal's own skill; only public skills are considered.
+    skills = public_skills(skills)
+
     # `oak_planks` is served by `get_planks`: try the item, then its last word.
     for name in (f"get_{goal.item}", f"get_{goal.item.rsplit('_', 1)[-1]}"):
         if name in skills.names:
-            evidence.write("router_decision", decision="play", skill=name, scores={}, source="exact_name")
+            evidence.write(
+                "router_decision",
+                decision="play",
+                skill=name,
+                scores={},
+                hint=hint,
+                source="exact_name",
+            )
             return Route(kind="play", skill=name, scores={})
 
     # Jev sees what a person would look at: the doc line and the rules, which
@@ -134,23 +168,32 @@ def route(
     )
     ledger.record("typesafe", model, input_tokens, output_tokens, "route")
 
-    kind, skill = decide(scores)
+    if hint is not None and scores.get(hint, 0.0) >= HINT_THRESHOLD:
+        kind, skill, source = "play", hint, "hint"
+    else:
+        kind, skill = decide(scores)
+        source = "jev"
     result = Route(kind=kind, skill=skill, scores=scores)
     evidence.write(
         "router_decision",
         decision=kind,
         skill=skill,
         scores=scores,
+        hint=hint,
+        source=source,
     )
     return result
 
 
 __all__ = [
     "DEFAULT_MODEL",
+    "HINT_THRESHOLD",
     "PLAY_THRESHOLD",
+    "PUBLIC_EXCLUDE",
     "WRITE_THRESHOLD",
     "Route",
     "decide",
+    "public_skills",
     "question_text",
     "route",
 ]

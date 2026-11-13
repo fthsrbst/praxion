@@ -389,6 +389,95 @@ def build_command(
     ]
 
 
+# -- launching --------------------------------------------------------------
+
+
+def client_command(
+    *,
+    name: str,
+    host: str,
+    port: int,
+    paths: ClientPaths | None = None,
+    version: dict | None = None,
+    java: Path | None = None,
+    platform_: Platform | None = None,
+) -> tuple[list[str], ClientPaths]:
+    """The full client command and the paths it was built for.
+
+    Resolves and checks the machine-local client exactly as the CLI always did
+    (version json, Java major version), then builds the argument list without
+    starting anything. ``launch_client`` and the dry run share it.
+    """
+    paths = paths or ClientPaths(repo_root() / CLIENT_ROOT)
+    version = version or load_version(paths)
+    java = java or resolve_java()
+    expected = expected_java_major(version)
+    found = java_major_version(java)
+    if found != expected:
+        raise LaunchError(
+            f"{java} is Java {found} but client {VERSION_ID} needs Java {expected}; "
+            f"fix 'java' in {repo_root() / 'local' / 'paths.toml'}"
+        )
+    command = build_command(
+        java=java,
+        version=version,
+        paths=paths,
+        name=name,
+        host=host,
+        port=port,
+        platform_=platform_,
+    )
+    return command, paths
+
+
+def spawn_client(command: Sequence[str], paths: ClientPaths) -> subprocess.Popen:
+    """Start one already prepared client command; the caller keeps the process.
+
+    Split from :func:`launch_client` so a caller that must not hold its own
+    lock during the slow preparation can revalidate its state after
+    :func:`client_command` and only then spawn.
+    """
+    try:
+        return subprocess.Popen(
+            list(command),
+            cwd=paths.game,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise LaunchError(f"cannot start the Minecraft client: {error}") from error
+
+
+def launch_client(
+    *,
+    host: str = "127.0.0.1",
+    port: int,
+    name: str = "Watcher",
+    paths: ClientPaths | None = None,
+    version: dict | None = None,
+    java: Path | None = None,
+    platform_: Platform | None = None,
+) -> subprocess.Popen:
+    """Start the local client on ``host:port`` and return the running process.
+
+    The owner keeps the returned process (it is the player's client: never kill
+    it when a session stops). Its output is discarded and it runs detached from
+    the caller's terminal, exactly like the CLI's launcher. No argument or
+    placeholder differs from :func:`build_command`.
+    """
+    command, paths = client_command(
+        name=name,
+        host=host,
+        port=port,
+        paths=paths,
+        version=version,
+        java=java,
+        platform_=platform_,
+    )
+    return spawn_client(command, paths)
+
+
 # -- cli --------------------------------------------------------------------
 
 
@@ -402,40 +491,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    paths = ClientPaths(repo_root() / CLIENT_ROOT)
     try:
-        paths = ClientPaths(repo_root() / CLIENT_ROOT)
-        version = load_version(paths)
-        java = resolve_java()
-        expected = expected_java_major(version)
-        found = java_major_version(java)
-        if found != expected:
-            raise LaunchError(
-                f"{java} is Java {found} but client {VERSION_ID} needs Java {expected}; "
-                f"fix 'java' in {repo_root() / 'local' / 'paths.toml'}"
+        if args.dry_run:
+            command, _ = client_command(
+                name=args.name,
+                host=args.host,
+                port=args.port,
+                paths=paths,
             )
-        command = build_command(
-            java=java,
-            version=version,
-            paths=paths,
+            print("\n".join(command), flush=True)
+            return 0
+        process = launch_client(
             name=args.name,
             host=args.host,
             port=args.port,
+            paths=paths,
         )
     except (LaunchError, PathResolutionError) as error:
         print(f"error: {error}", file=sys.stderr, flush=True)
         return 2
 
-    if args.dry_run:
-        print("\n".join(command), flush=True)
-        return 0
-
-    process = subprocess.Popen(
-        command,
-        cwd=paths.game,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
     print(f"client pid {process.pid}", flush=True)
     print(f"log {paths.log}", flush=True)
     return 0
@@ -454,12 +530,15 @@ __all__ = [
     "VERSION_ID",
     "build_classpath",
     "build_command",
+    "client_command",
     "evaluate_arguments",
     "expected_java_major",
     "java_major_version",
+    "launch_client",
     "load_version",
     "main",
     "offline_uuid",
     "rule_allows",
+    "spawn_client",
     "substitute",
 ]

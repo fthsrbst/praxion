@@ -800,3 +800,313 @@ def test_get_wood_crafts_an_axe_from_surplus_planks_and_chops_with_it() -> None:
         assert crafts, "the axe was not crafted by `craft`\n" + context
         assert mines, "nothing was mined\n" + context
         assert crafts[0]["seq"] < mines[0]["seq"], "the axe came after the first chop\n" + context
+
+
+#: The furnace rungs of 2026-11-12: furnace, coal, raw iron, iron pickaxe,
+#: torches, chest and the camp. Each setup gives the items the rung would
+#: otherwise gather, so the test watches the new skill's own rule order, not
+#: the wood chain underneath it.
+FURNACE_TIMEOUT = 240.0
+TORCH_TIMEOUT = 120.0
+CAMP_TIMEOUT = 120.0
+#: One exposed ore in reach: `get_coal` and `get_raw_iron` mine it instead of
+#: calling `find_ore`, so a failure is the skill's and not the search's.
+ORE_TIMEOUT = 180.0
+#: Three cooks are 600 ticks plus the walks and the menu round trips.
+IRON_PICKAXE_TIMEOUT = 420.0
+
+
+def _exposed_ore(block: str, pickaxe: str) -> Callable:
+    """Peaceful daytime, the pickaxe in hand, one ``block`` three cells east.
+
+    ``near`` is answered from the perception known map, so the cells between
+    the eye and the ore must be air for the view scan to record it; the ore is
+    then both in reach of the crosshair and inside the five-block radius.
+    """
+
+    def setup(fixture, referee, run: BodyRun) -> None:
+        fixture.advance_time(False)
+        fixture.spawn_mobs(False)
+        fixture.time_set(1000)
+        fixture.give(BODY, pickaxe, 1)
+        px, py, pz = _feet_cell(referee)
+        fixture.fill(px + 1, py, pz, px + 2, py + 1, pz, "air")
+        fixture.setblock(px + 3, py, pz, block)
+
+    return setup
+
+
+def test_get_coal_mines_the_exposed_coal_ore() -> None:
+    """`get_coal` mines the ore in reach and holds the coal.
+
+    A stone pickaxe and one coal ore three cells east: the goal is one coal, so
+    the body mines the ore it can see rather than searching. The referee, not
+    the body, decides that coal is in the inventory. Written for the
+    orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "get_coal",
+        ["1"],
+        setup=_exposed_ore("coal_ore", "stone_pickaxe"),
+        max_ticks=6000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(ORE_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["skill"] == "get_coal", context
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "coal") >= 1, "the referee must see the coal\n" + context
+        assert _intent_starts(events, "mine"), "nothing was mined\n" + context
+        assert not _intent_starts(events, "explore"), (
+            "the ore was in reach, so the skill must not search for one\n" + context
+        )
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def test_get_raw_iron_mines_the_exposed_iron_ore() -> None:
+    """`get_raw_iron` mines the ore with the stone pickaxe it requires.
+
+    A wooden pickaxe cannot harvest iron, so the setup gives the stone one and
+    one iron ore three cells east; the skill's `needs_tool` guard is satisfied
+    and the mine rule fires. Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "get_raw_iron",
+        ["1"],
+        setup=_exposed_ore("iron_ore", "stone_pickaxe"),
+        max_ticks=6000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(ORE_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["skill"] == "get_raw_iron", context
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "raw_iron") >= 1, (
+            "the referee must see the raw iron\n" + context
+        )
+        assert _intent_starts(events, "mine"), "nothing was mined\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def _given_items(items: Dict[str, int], table: bool = False) -> Callable:
+    """Peaceful daytime with the given items, and optionally a table east."""
+
+    def setup(fixture, referee, run: BodyRun) -> None:
+        fixture.advance_time(False)
+        fixture.spawn_mobs(False)
+        fixture.time_set(1000)
+        for item, count in items.items():
+            fixture.give(BODY, item, count)
+        if table:
+            px, py, pz = _feet_cell(referee)
+            fixture.fill(px + 1, py, pz, px + 2, py + 1, pz, "air")
+            fixture.setblock(px + 2, py, pz, "crafting_table")
+
+    return setup
+
+
+def test_get_furnace_crafts_from_given_cobblestone() -> None:
+    """Eight cobblestone beside a placed table make the furnace.
+
+    The draft this skill was promoted from (`get_furnace` in the candidate
+    directory) asked for the same three steps; the goal is verified by the
+    referee's inventory. Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "get_furnace",
+        setup=_given_items({"cobblestone": 8}, table=True),
+        max_ticks=6000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(FURNACE_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "furnace") >= 1, "the referee must see the furnace\n" + context
+        crafts = [
+            event
+            for event in _intent_starts(events, "craft")
+            if _first_arg(event) == "furnace"
+        ]
+        assert crafts, "the furnace was not crafted by `craft`\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def test_get_chest_crafts_from_given_planks() -> None:
+    """Eight planks beside a placed table make the chest."""
+    with start_body(
+        101,
+        "get_chest",
+        setup=_given_items({"oak_planks": 8}, table=True),
+        max_ticks=6000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(FURNACE_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "chest") >= 1, "the referee must see the chest\n" + context
+        crafts = [
+            event for event in _intent_starts(events, "craft") if _first_arg(event) == "chest"
+        ]
+        assert crafts, "the chest was not crafted by `craft`\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def _setup_iron_pickaxe(fixture, referee, run: BodyRun) -> None:
+    """Peaceful daytime; three raw iron, three coal, two sticks, a furnace east
+    and a table west, both cleared and in reach.
+
+    Three coal: `smelt` loads one fuel item per call and the skill smelts three
+    ingots. The table is on the other side of the body so the walk to the
+    furnace never stands on the crafting cell.
+    """
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(1000)
+    fixture.give(BODY, "raw_iron", 3)
+    fixture.give(BODY, "coal", 3)
+    fixture.give(BODY, "stick", 2)
+    px, py, pz = _feet_cell(referee)
+    fixture.fill(px + 1, py, pz, px + 2, py + 1, pz, "air")
+    fixture.setblock(px + 2, py, pz, "furnace")
+    fixture.fill(px - 2, py, pz, px - 1, py + 1, pz, "air")
+    fixture.setblock(px - 2, py, pz, "crafting_table")
+
+
+def test_get_iron_pickaxe_from_given_raw_iron_coal_and_furnace() -> None:
+    """The iron rung end to end: smelt three ingots, then craft the pickaxe.
+
+    `get_iron_pickaxe` calls `get_iron_ingot(3)` for the ingots, so the test
+    gives the three raw iron and the three coal the furnace needs and keeps the
+    two sticks and the table; the referee checks the pickaxe in the inventory.
+    Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "get_iron_pickaxe",
+        setup=_setup_iron_pickaxe,
+        max_ticks=12000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(IRON_PICKAXE_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["skill"] == "get_iron_pickaxe", context
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "iron_pickaxe") >= 1, (
+            "the referee must see the iron pickaxe\n" + context
+        )
+        assert _count(inventory, "iron_ingot") == 0, "the three ingots were spent\n" + context
+        smelts = _intent_starts(events, "smelt")
+        assert smelts, "nothing was smelted\n" + context
+        crafts = [
+            event
+            for event in _intent_starts(events, "craft")
+            if _first_arg(event) == "iron_pickaxe"
+        ]
+        assert crafts, "the pickaxe was not crafted by `craft`\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+def test_get_torch_crafts_four_from_given_coal_and_sticks() -> None:
+    """One coal and one stick give four torches, and no table is needed.
+
+    The default is four, so the goal cannot be met by a single torch: the
+    referee must see a full craft's worth. Written for the orchestrator's live
+    run.
+    """
+    with start_body(
+        101,
+        "get_torch",
+        setup=_given_items({"coal": 1, "stick": 1}),
+        max_ticks=6000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(TORCH_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["outcome"] == "done", context
+        assert _count(inventory, "torch") >= 4, "the referee must see four torches\n" + context
+        assert _count(inventory, "coal") == 0, "the coal was not spent\n" + context
+        crafts = [
+            event for event in _intent_starts(events, "craft") if _first_arg(event) == "torch"
+        ]
+        assert crafts, "the torches were not crafted by `craft`\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context
+
+
+#: The camp's four blocks, in the order `make_camp` places them.
+CAMP_ITEMS = ["crafting_table", "furnace", "chest", "torch"]
+
+
+def _setup_camp_items(fixture, referee, run: BodyRun) -> None:
+    """Peaceful daytime, the four camp blocks carried, open ground all around.
+
+    The camp is the ladder's output, so the skill places from the inventory
+    (a missing block fails `no_item`). The ground is cleared on every side so
+    each `place` finds a support face and the four cells do not fight.
+    """
+    fixture.advance_time(False)
+    fixture.spawn_mobs(False)
+    fixture.time_set(1000)
+    px, py, pz = _feet_cell(referee)
+    fixture.fill(px - 3, py, pz - 3, px + 3, py + 1, pz + 3, "air")
+    fixture.fill(px - 3, py - 1, pz - 3, px + 3, py - 1, pz + 3, "grass_block")
+    for item in CAMP_ITEMS:
+        fixture.give(BODY, item, 1)
+
+
+def test_make_camp_places_the_four_blocks_in_order() -> None:
+    """`make_camp` places a table, a furnace, a chest and a torch.
+
+    The four are carried, so the skill's place rules fire in its order and the
+    goal is done only when the perception knows all four within six blocks. The
+    referee checks the goal and that every block went through `place`.
+    Written for the orchestrator's live run.
+    """
+    with start_body(
+        101,
+        "make_camp",
+        setup=_setup_camp_items,
+        max_ticks=6000,
+        start_delay_ticks=120,
+    ) as run:
+        summary = run.wait_for_outcome(CAMP_TIMEOUT)
+        inventory = run.referee.player_inventory(BODY)
+        events = run.events()
+        context = _context(run, summary, [f"inventory: {inventory}"])
+
+        assert summary["goal"]["outcome"] == "done", context
+        placed = [
+            _first_arg(event)
+            for event in _intent_starts(events, "place")
+            if _first_arg(event) in CAMP_ITEMS
+        ]
+        order: List[str] = []
+        for item in placed:
+            if item not in order:
+                order.append(item)
+        assert order == CAMP_ITEMS, (
+            f"the camp went up in {order}, not {CAMP_ITEMS}\n" + context
+        )
+        for item in CAMP_ITEMS:
+            assert _count(inventory, item) == 0, f"the {item} is still carried\n" + context
+        assert run.referee.player_health(BODY) > 0.0, context

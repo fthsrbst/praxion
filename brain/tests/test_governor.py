@@ -267,3 +267,15 @@ def test_budget_snapshot_reads_the_ledger(tmp_path) -> None:
     assert snapshot["spent"] == 0.10
     assert snapshot["last_hour"] == 0.10
     assert snapshot["budget"] == 9.00
+
+
+def test_default_rate_limits_fit_a_plan_queue_run() -> None:
+    from praxion_brain.governor import DEFAULT_RATE_LIMITS
+
+    # Decision 2026-11-12: 30 proposals an hour kept the loop in nothing_to_do
+    # for ninety minutes over 23 runs.
+    assert DEFAULT_RATE_LIMITS["propose"] == (240, 3600.0)
+    assert DEFAULT_RATE_LIMITS["route"] == (600, 3600.0)
+    assert DEFAULT_RATE_LIMITS["map"] == (240, 3600.0)
+    assert DEFAULT_RATE_LIMITS["write"] == (6, 3600.0)
+    assert DEFAULT_RATE_LIMITS["admission"] == (6, 3600.0)

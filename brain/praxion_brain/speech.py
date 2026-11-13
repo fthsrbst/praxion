@@ -42,8 +42,24 @@ FAILURES_TR = {
     "no_materials": "malzeme yetmedi",
     "no_tool": "alet yok",
     "unsafe": "güvenli değildi",
+    # The dig_down refusals (a drop beside the stair, water or lava behind a
+    # wall, the depth cap): the body steps aside first, so these mean the
+    # ground around is not diggable.
+    "unsafe_drop": "düşüş güvenli değildi",
+    "fluid": "su ya da lav vardı",
+    "too_deep": "çok derine inecekti",
+    "stuck": "takıldım",
+    # `climb_out` (go_to_surface): no stair up can be cut from here, or the
+    # climb ran out of ticks.
+    "no_way_up": "yukarı çıkış yolu bulamadım",
+    # The eyes are in water and the block outlasts the breath (`mine`, live
+    # run A 2026-11-12): the dig is refused instead of drowned.
+    "underwater": "su altındaydı",
     "out_of_reach": "erişemedim",
     "no_path": "yol bulamadım",
+    # A preempted action restarted without one success (MAX_PREEMPTIONS in the
+    # interpreter): the rule was digging the same block forever.
+    "no_progress": "ilerleme olmadı",
     "skill_wrong": "beceri yanlış çalıştı",
     "stale_generation": "durum değişmişti",
     "unknown_skill": "bu beceriyi bilmiyorum",
@@ -61,6 +77,7 @@ REFUSALS_TR = {
     # The autonomous path may still refuse a repeat; never leak the raw key.
     "same_as_last": "aynı görevi az önce istedim",
     "unknown_skill": "böyle bir becerim yok",
+    "bad_args": "argümanları anlayamadım",
     "unsupported": "henüz yapamıyorum",
 }
 
@@ -96,10 +113,21 @@ def goal_started(text: str, condition: str, *, reason: Optional[str] = None) -> 
     return clean(line)
 
 
+def plan_thought(thought: str) -> str:
+    """The planner's one-sentence thought, in its own first-person Turkish.
+
+    It is model prose, but it is the only line whose whole point is to say what
+    the bot intends (decision 2026-11-12 "Demo night"); ``clean`` bounds it.
+    """
+    return clean(thought)
+
+
 def task_accepted(text: str, condition: str, *, learning: bool = False) -> str:
-    """The operator's task was understood. ``condition`` is the validated one."""
+    """The operator's task was understood. ``condition`` is the validated one;
+    a skill task has none, so no empty parentheses appear."""
     tail = " Önce öğrenmem gerek." if learning else ""
-    return clean(f"tamam: {text} ({condition}).{tail}")
+    detail = f" ({condition})" if condition else ""
+    return clean(f"tamam: {text}{detail}.{tail}")
 
 
 def goal_done(text: str, ticks: Optional[int]) -> str:
@@ -150,8 +178,21 @@ def world_desync() -> str:
     return "dünyayı göremiyorum, duruyorum"
 
 
-def cannot_understand(text: str) -> str:
-    return clean(f"anlayamadım: {text}. {TRY_HINT}")
+def night_work() -> str:
+    """Night work starts for the first time in a night (decision 2026-11-13).
+
+    The facts behind it are code: ``survival.night_work`` (a pickaxe held, the
+    body healthy, night). Said once per night by the loop.
+    """
+    return "Gece oldu; kazmam var, yeraltında çalışmaya devam ediyorum."
+
+
+def cannot_understand(text: str, detail: Optional[str] = None) -> str:
+    """``detail`` is the map call's ``unsupported`` line, when it gave one."""
+    line = f"anlayamadım: {text}."
+    if detail:
+        line += f" {detail.strip().rstrip('.')}."
+    return clean(f"{line} {TRY_HINT}")
 
 
 def paused() -> str:
@@ -326,7 +367,9 @@ __all__ = [
     "goal_stopped",
     "learning_done",
     "learning_started",
+    "night_work",
     "paused",
+    "plan_thought",
     "refused",
     "resumed",
     "seconds",

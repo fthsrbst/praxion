@@ -23,10 +23,22 @@ records (dicts may carry derived ``attempts``, ``blocked_until`` and
 ``repairs``; newest first, as :meth:`~praxion_brain.memory.Memory.recent`
 returns them), the skill catalog and ledger totals.
 
+Three optional sections serve the planner (decision 2026-11-12 "Demo night"):
+``## Persona`` (the run's play style), ``## Surroundings`` (the snapshot's
+``nearby`` facts: entities, blocks, sounds) and ``## Knowledge`` (wiki snippets
+the loop looked up). The first two are absent when there is nothing to say.
+
+``## Night`` is the fourth optional section (decision 2026-11-13 "night
+mining"): present while the body works instead of sheltering (it holds a
+pickaxe and is healthy), it names the night-safe skills the loop allows and
+forbids surface gathering, hunting and exploring until morning. It sits right
+after ``## Now``, where a constraint belongs, and is never trimmed.
+
 The token cap is ``len(text) / 4`` and it is a hard bound. When the text is
 over it, the oldest recent goal lines are removed first; then skill lines, then
-the budget values, and a final tail truncation cuts the last non-``Now``
-section when a single line alone is too big. The ``Now`` section is never
+the knowledge snippets, then the surroundings, then the budget values, and a
+final tail truncation cuts the last non-``Now`` section when a single line
+alone is too big. The ``Now`` section is never
 trimmed; if it alone exceeds the cap, it is returned alone.
 
 The module also owns :func:`heartbeat_change`, the code diff over these facts
@@ -215,6 +227,49 @@ def _now_section(snapshot: Mapping[str, Any]) -> list[str]:
     return [header, facts_line, inventory_line]
 
 
+def _counts_line(label: str, counts: Any) -> Optional[str]:
+    """``label: name n, name n`` from a name -> count mapping; ``None`` when empty."""
+    if not isinstance(counts, Mapping):
+        return None
+    parts = []
+    for name in sorted(counts):
+        try:
+            amount = int(counts[name])
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            parts.append(f"{name} {amount}")
+    return f"{label}: " + ", ".join(parts) if parts else None
+
+
+def _surroundings_section(snapshot: Mapping[str, Any]) -> list[str]:
+    """The body's ``nearby`` facts; empty when the body sent none or all are empty."""
+    facts = snapshot.get("facts") or snapshot
+    nearby = facts.get("nearby")
+    if nearby is None:
+        return []
+    lines = [
+        _counts_line("entities", _get(nearby, "entities")),
+        _counts_line("blocks", _get(nearby, "blocks")),
+    ]
+    sounds = [str(sound) for sound in (_get(nearby, "sounds") or []) if sound]
+    if sounds:
+        lines.append("sounds: " + ", ".join(sounds))
+    body = [line for line in lines if line]
+    return ["## Surroundings  [body perception]", *body] if body else []
+
+
+def _night_section(skills: Sequence[str]) -> list[str]:
+    """The ``## Night`` constraint and the night-safe skills the catalog has."""
+    allowed = ", ".join(sorted(skills)) if skills else "(none available)"
+    return [
+        "## Night  [body facts + catalog]",
+        "it is night; work only underground or at the crafting table",
+        f"allowed skills: {allowed}",
+        "never plan surface gathering, hunting or exploring before morning",
+    ]
+
+
 def _ladder_section(ladder: Union[LadderProgress, Mapping[str, Any]]) -> list[str]:
     done = list(_get(ladder, "done", []) or [])
     following = _get(ladder, "next")
@@ -320,6 +375,9 @@ def build(
     max_tokens: int = BRIEFING_MAX_TOKENS,
     writing: Optional[str] = None,
     needs: Optional[str] = None,
+    persona: Optional[str] = None,
+    knowledge: Sequence[str] = (),
+    night: Optional[Sequence[str]] = None,
 ) -> str:
     """Render the briefing text, trimming it to ``max_tokens`` when possible.
 
@@ -328,12 +386,19 @@ def build(
     code fact, so the model never has to guess "enough" (decision 2026-11-09
     "Five next areas", smarter play slice 1). Absent without the gamedata export.
 
+    ``persona`` is the run's play style sentence (``## Persona``); ``knowledge``
+    holds one line per wiki snippet the loop looked up (``## Knowledge``).
+
+    ``night`` holds the sorted night-safe skills the catalog has and turns the
+    ``## Night`` constraint on (decision 2026-11-13); ``None`` leaves it out.
+
     ``writing`` names the skill a background admission job is writing. The line
     keeps the proposer off that goal: it cannot be played until the job ends,
     and a second write would be deferred anyway.
     """
     moment = time.time() if now is None else float(now)
     now_lines = _now_section(snapshot)
+    night_lines = _night_section(night) if night is not None else []
     writing_lines = (
         [
             "## Background job  [admission]",
@@ -342,6 +407,10 @@ def build(
         if writing
         else []
     )
+    persona_lines = ["## Persona  [this run]", persona] if persona else []
+    surroundings_lines = _surroundings_section(snapshot)
+    knowledge_items = [str(line) for line in knowledge if str(line).strip()]
+    knowledge_header = "## Knowledge  [wiki]"
     ladder_lines = _ladder_section(ladder)
     needs_lines = ["## Needs  [recipes + inventory]", needs] if needs else []
     records = list(memory)
@@ -355,6 +424,9 @@ def build(
 
     def render() -> str:
         lines = list(now_lines)
+        lines.extend(night_lines)
+        lines.extend(persona_lines)
+        lines.extend(surroundings_lines)
         lines.extend(writing_lines)
         lines.extend(ladder_lines)
         lines.append(recent_header)
@@ -363,20 +435,29 @@ def build(
         lines.extend(recent_items or ["(none)"])
         lines.append(skills_header)
         lines.extend(skills)
+        if knowledge_items:
+            lines.append(knowledge_header)
+            lines.extend(knowledge_items)
         lines.extend(needs_lines)
         lines.append(_budget_line(ledger, values=budget_values))
         return "\n".join(lines)
 
     text = render()
     # Lowest priority first: the oldest recent goals, then skill lines, then the
-    # budget values, then the tail of whatever section is last. The Now section
-    # is never touched.
+    # wiki snippets, then the surroundings, then the budget values, then the
+    # tail of whatever section is last. The Now section is never touched.
     has_goals = bool(records)
     while estimate_tokens(text) > max_tokens and has_goals and recent_items:
         recent_items.pop()
         text = render()
     while estimate_tokens(text) > max_tokens and len(skills) > 1:
         skills.pop()
+        text = render()
+    while estimate_tokens(text) > max_tokens and knowledge_items:
+        knowledge_items.pop()
+        text = render()
+    if estimate_tokens(text) > max_tokens and surroundings_lines:
+        surroundings_lines.clear()
         text = render()
     if estimate_tokens(text) > max_tokens and budget_values:
         budget_values = False

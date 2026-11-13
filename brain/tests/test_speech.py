@@ -51,6 +51,33 @@ def test_templates_are_turkish_and_filled_from_named_facts() -> None:
     assert speech.cannot_understand("blah").startswith("anlayamadım: blah.")
     assert speech.learning_started("get_furnace") == "öğreniyorum: get_furnace"
     assert speech.goal_stopped("x") == "durdurdum: x"
+    assert speech.night_work() == (
+        "Gece oldu; kazmam var, yeraltında çalışmaya devam ediyorum."
+    )
+
+
+def test_a_skill_task_is_accepted_without_empty_parentheses() -> None:
+    assert speech.task_accepted("köy bul", "") == "tamam: köy bul."
+    assert speech.task_accepted("köy bul", "", learning=True) == (
+        "tamam: köy bul. Önce öğrenmem gerek."
+    )
+    assert speech.task_accepted("8 taş topla", "count(cobblestone) >= 8") == (
+        "tamam: 8 taş topla (count(cobblestone) >= 8)."
+    )
+
+
+def test_cannot_understand_carries_the_models_unsupported_detail() -> None:
+    line = speech.cannot_understand("ev yap", "ev yapmayı bilmiyorum")
+    assert line == (
+        "anlayamadım: ev yap. ev yapmayı bilmiyorum. "
+        "Şunu dene: 8 taş getir, odun topla, durum, dur"
+    )
+    assert speech.cannot_understand("ev yap", "") == speech.cannot_understand("ev yap")
+
+
+def test_bad_args_has_a_turkish_refusal() -> None:
+    assert speech.REFUSALS_TR["bad_args"] == "argümanları anlayamadım"
+    assert speech.refused("bad_args") == "bunu yapmıyorum: argümanları anlayamadım"
 
 
 def test_a_line_is_one_clean_line_under_the_cap() -> None:
@@ -124,3 +151,10 @@ def test_a_port_error_is_recorded_not_raised() -> None:
     n, sink, _clock, _sent = narrator(fail=True)
     assert n.say("done", "bitti: x") == "dropped"
     assert "narrate_failed" in sink.kinds()
+
+
+def test_plan_thought_is_the_planners_sentence_bounded_to_one_line() -> None:
+    assert speech.plan_thought("Önce odun toplayacağım.") == "Önce odun toplayacağım."
+    long = speech.plan_thought("Odun toplayacağım, " * 40)
+    assert len(long) <= speech.MAX_LINE_CHARS and long.endswith("…")
+    assert speech.plan_thought("iki\nsatır\x07") == "iki satır"

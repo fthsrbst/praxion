@@ -3,7 +3,7 @@
 A small state machine over one :class:`~praxion_brain.session.BodySession`:
 
 ```
-IDLE --wake--> PICKING --proposal--> ROUTING --play----------> PLAYING
+IDLE --wake--> PICKING --plan step--> ROUTING --play----------> PLAYING
                                        \\--write--> admission job (background)
                                                        \\--> IDLE at once
 job admitted --> the next pick plays that goal
@@ -34,11 +34,27 @@ cancels one still running (killing its practice stack; nothing goes active) and
 records that goal interrupted; the final state is published so the console
 drops the learning badge.
 
-A failed goal is not retried at once: the pick waits
-:data:`FAILURE_GAP_TICKS` body ticks (or :data:`FAILURE_STREAK_GAP_TICKS`
-after :data:`FAILURE_STREAK` failures in a row) while the loop stays IDLE.
-Code-only picks obey the same failure memory as proposals, so a blocked goal
-waits instead of spinning. A pick that ends with no goal at all backs off as
+The pick plays a plan queue (decision 2026-11-12 "Demo night"): one planner
+call returns 1 to 5 goals and the loop plays them one by one, validating each in
+code when its turn comes. The queue is dropped (evidence ``plan_dropped``) after a
+failed or interrupted goal, a death, a survival goal, an operator task, a skill
+write or a world desync, and the next pick plans again; a goal that finishes
+``done`` keeps it.
+
+At night a body that holds a pickaxe and is healthy above
+``survival.SHELTER_HEALTH`` keeps working instead of sheltering (decision
+2026-11-13 "night mining", run B): the survival module starts no night goal, the
+pick plans again, and only ``survival.NIGHT_WORK_SKILLS`` pass the turn-time
+validation (``night_unsafe`` otherwise, also for the skill Jev finally routed
+to). Dusk drops the daytime plan and dawn drops the night one; when health falls
+to ``survival.SHELTER_HEALTH`` the ordinary survival path interrupts the work.
+
+A first failed goal does not delay the next pick (a new plan is the answer); the
+second in a row waits :data:`FAILURE_GAP_TICKS` body ticks (or
+:data:`FAILURE_STREAK_GAP_TICKS` after :data:`FAILURE_STREAK` failures in a row)
+while the loop stays IDLE, so a broken world cannot spin. Code-only picks obey
+the same failure memory as plan steps, so a blocked goal waits instead of
+spinning. A pick that ends with no goal at all backs off as
 ``nothing_to_do`` (:data:`NOTHING_TO_DO_GAP_TICKS`, doubling) and picks again;
 so does a route or a play that ends without a goal (router timeout or error, no
 skill, no snapshot, a failed send); none leaves the loop IDLE with nothing to
@@ -48,19 +64,21 @@ wake it (run 8). A ``world_desync`` wake from the body stops picking for good; a
 count in the failure streak and is not narrated twice.
 
 Every expensive step is injectable so the loop is tested against
-:class:`FakeBody` with fake proposal, router and admission callables.
+:class:`FakeBody` with fake planner, router and admission callables.
 
 Spec: ``docs/proposals/2026-11-08-demo2-loop.md`` sections 3.1-3.7.
 """
 
 from __future__ import annotations
 
+import importlib
+import re
 import time
 from collections import deque
 from enum import Enum
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
-from . import commands, config, speech
+from . import commands, config, persona as personas, speech
 from .admission import (
     AdmissionReport,
     admit,
@@ -73,19 +91,20 @@ from .conditions import ConditionError, count_of_condition, evaluate, item_of_co
 from .console.hub import Console
 from .briefing import heartbeat_change
 from . import survival
-from .curriculum import TYPED_REJECTIONS, GoalProposal, Validation, goal_of, validate
+from .curriculum import GoalProposal, Validation, goal_of, validate
 from .evidence import Evidence
 from .goal import Goal
 from .governor import CallTimeout, Governor
 from .ladder import RUNGS, code_only_goal, first_unmet, progress as ladder_progress
 from .ledger import Ledger, estimate_cost
 from .memory import NOT_FAILURE_KINDS, GoalRecord, Memory, normalize_condition
-from .needs import Gamedata, Gate, need_line, rung_need
+from .needs import Gamedata, need_line, rung_need
+from .planner import MAX_GOALS, Plan, PlannedGoal, estimate as plan_estimate, plan as make_plan, shape_problem
 from .port import EventMessage, PortClient, PortError, Snapshot
-from .proposer import DEFAULT_MODEL, estimate as propose_estimate, propose
+from .proposer import DEFAULT_MODEL
 from .records import GoalRecords, OpenGoal, PendingGoal, settled_status
 from .router import DEFAULT_MODEL as ROUTER_MODEL
-from .router import Route
+from .router import PUBLIC_EXCLUDE, Route
 from .router import route as router_route
 from .session import COMMAND_BUDGET_TICKS, BodySession
 from .skills import SkillCatalog, load_catalog
@@ -99,20 +118,26 @@ BODY_WAKE_LIMIT_SECONDS = 30.0
 MAX_PROPOSALS = 3
 #: Consecutive step errors before the loop stops cleanly (A6).
 MAX_STEP_ERRORS = 5
-#: Minimum body ticks between a failed goal and the next pick (5 s at 20 TPS):
-#: an always-failing goal must not spin the loop (autonomous run 2, 2026-11-08).
+#: Minimum body ticks between a failed goal and the next pick (5 s at 20 TPS)
+#: from the second failure in a row on: an always-failing goal must not spin the
+#: loop (autonomous run 2, 2026-11-08). The first failure waits for nothing: a
+#: fresh plan is the answer and the body must not idle (decision 2026-11-12).
 FAILURE_GAP_TICKS = 100
-#: The longer gap after :data:`FAILURE_STREAK` consecutive failures (30 s).
-FAILURE_STREAK_GAP_TICKS = 600
+#: The longer gap after :data:`FAILURE_STREAK` consecutive failures (10 s). It
+#: was 30 s; in run B (2026-11-12) the body stood still for half a minute after
+#: its fourth failed goal, which reads as a freeze. The governor's rate limit
+#: and budget already bound the paid calls, so this gap only has to stop a
+#: tight spin.
+FAILURE_STREAK_GAP_TICKS = 200
 #: Consecutive failed goals after which the longer gap applies.
 FAILURE_STREAK = 3
-#: Body ticks the pick waits after ending as ``nothing_to_do`` (30 s at 20 TPS).
+#: Body ticks the pick waits after ending as ``nothing_to_do`` (10 s at 20 TPS).
 #: It doubles with each consecutive one up to :data:`NOTHING_TO_DO_MAX_GAP_TICKS`
 #: and is lifted at once by an admitted skill or a changed world (critique
 #: finding 12), so waiting is quiet but not deaf.
-NOTHING_TO_DO_GAP_TICKS = 600
-#: The longest back-off after repeated ``nothing_to_do`` picks (2 min).
-NOTHING_TO_DO_MAX_GAP_TICKS = 2400
+NOTHING_TO_DO_GAP_TICKS = 200
+#: The longest back-off after repeated ``nothing_to_do`` picks (1 min).
+NOTHING_TO_DO_MAX_GAP_TICKS = 1200
 #: The console state is republished at most this often (seconds).
 PUBLISH_SECONDS = 0.25
 
@@ -137,6 +162,15 @@ class WakeCause(str, Enum):
     DIED = "died"
 
 
+def skill_goal_text(skill: str, args: Sequence[str] = ()) -> str:
+    """The text of a goal a skill's own ``done`` verifies: ``find_village()``.
+
+    It is the goal's failure-memory key (it has no inventory condition) and what
+    the records and the console show as its condition.
+    """
+    return f"{skill}({', '.join(str(arg) for arg in args)})"
+
+
 # --------------------------------------------------------------------------- #
 # The loop
 # --------------------------------------------------------------------------- #
@@ -147,9 +181,7 @@ class Loop:
     #: a partially built loop in a test reads False).
     _nothing_gap = False
     #: The last remembered proposal and what it replaced (``_forget_proposal``).
-    _before_remember: Optional[
-        tuple[GoalProposal, Optional[GoalProposal], tuple[str, ...]]
-    ] = None
+    _before_remember: Optional[tuple[GoalProposal, Optional[GoalProposal]]] = None
     #: The body's world desync reason; while set no new goal is picked.
     _world_desync: Optional[str] = None
     #: Set in ``__init__``; a class default so a partly built loop in a test
@@ -166,7 +198,7 @@ class Loop:
         ledger: Ledger | None = None,
         evidence: Evidence | None = None,
         governor: Governor | None = None,
-        propose_fn: Callable[..., GoalProposal] = propose,
+        plan_fn: Callable[..., Plan] = make_plan,
         route_fn: Callable[..., Route] = router_route,
         admission_options: Optional[dict[str, Any]] = None,
         catalog_loader: Callable[[], SkillCatalog] = load_catalog,
@@ -192,7 +224,7 @@ class Loop:
             if governor is not None
             else Governor(self.ledger, evidence=self.evidence)
         )
-        self._propose_fn = propose_fn
+        self._plan_fn = plan_fn
         self._route_fn = route_fn
         self._admission_options = dict(admission_options or {})
         self._catalog_loader = catalog_loader
@@ -212,16 +244,19 @@ class Loop:
         self._pending: Optional[PendingGoal] = None
         self._open_goal: Optional[OpenGoal] = None
         self._last_proposal: Optional[GoalProposal] = None
-        #: Items of the last two accepted proposals, newest first (check 7).
-        self._recent_items: deque[str] = deque(maxlen=2)
         self._before_remember = None
         self._world_desync = None
-        #: The recipe export; ``None`` switches checks 6 and 7 and the brake off.
+        #: The recipe export; ``None`` leaves the ``## Needs`` line out.
         self.gamedata = gamedata
-        #: The drift brake: armed by the first five flat goals; only goals that
-        #: serve the next rung pass until a rung is met past its baseline.
-        self._brake_armed = False
-        self._brake_met: Optional[int] = None
+        #: The plan queue: goals the planner named and the loop has not played
+        #: yet, in order (decision 2026-11-12 "Demo night").
+        self._plan: deque[PlannedGoal] = deque()
+        #: The newest plan's spoken thought, for the console.
+        self._plan_thought: Optional[str] = None
+        #: The body died since the last plan: the next plan escalates.
+        self._after_death = False
+        #: The run's play style, drawn once from the world id.
+        self.persona = personas.pick(world_id)
         #: Consecutive ``nothing_to_do`` picks, and whether the gap is theirs.
         self._nothing_streak = 0
         self._nothing_gap = False
@@ -241,6 +276,12 @@ class Loop:
         self._survival_backoff: dict[str, int] = {}
         #: Consecutive failures per survival skill (the back-off doubles).
         self._survival_failures: dict[str, int] = {}
+        #: Whether the body works instead of sheltering at night (decision
+        #: 2026-11-13): ``None`` until the first snapshot says either way, so
+        #: the first night of a run drops no plan.
+        self._night_working: Optional[bool] = None
+        #: Whether this night's night-work line has been said already.
+        self._night_spoken = False
         #: The one admission job in flight; the loop starts no second one.
         self._job: Optional[AdmissionJob] = None
         #: An admitted skill whose goal waits for the next pick.
@@ -255,6 +296,9 @@ class Loop:
         #: operator asking again (true, played again) or the console's explicit
         #: ``new_goal`` (false, still checked against the last one).
         self._user_repeatable: list[bool] = []
+        #: Parallel to ``_user_goals``: the known skill and explicit arguments
+        #: the operator's sentence named (``None`` when it named none).
+        self._user_routes: list[tuple[Optional[str], Optional[list[str]]]] = []
         self._last_route: Optional[dict[str, Any]] = None
         self._last_publish = -float("inf")
         #: Goals a newer command preempted, oldest first; the body resumes the
@@ -287,7 +331,6 @@ class Loop:
             self.evidence,
             inventory=self._inventory,
             on_finished=self._goal_finished,
-            on_drift=self._drift_brake,
         )
 
     # -- lifecycle ------------------------------------------------------ #
@@ -302,6 +345,7 @@ class Loop:
             world_id=self.world_id,
             port=self.session.port_number,
         )
+        self.evidence.write("persona", id=self.persona.id, style=self.persona.style)
         return self
 
     def close(self) -> None:
@@ -322,6 +366,11 @@ class Loop:
     def stop(self) -> None:
         self._stopped = True
 
+    @property
+    def stopped(self) -> bool:
+        """Whether the loop ended (stop, terminal bye or too many step errors)."""
+        return self._stopped
+
     def run(self, timeout: float = 0.25) -> None:
         """Run until :meth:`stop`, a terminal bye, or repeated step errors.
 
@@ -330,10 +379,20 @@ class Loop:
         :data:`MAX_STEP_ERRORS` consecutive errors end the run.
         """
         while not self._stopped:
-            try:
-                self.step(timeout)
-            except Exception as error:  # noqa: BLE001 - one step must not kill the loop
-                self._on_step_error(error)
+            self.run_once(timeout)
+
+    def run_once(self, timeout: float = 0.25) -> LoopState:
+        """One step through the same error handling :meth:`run` uses.
+
+        A lifecycle owner that must also watch its body process and a stop
+        event drives the loop with this instead of :meth:`run`, which owns its
+        thread until the loop ends. One bad step is recorded and survived (A6).
+        """
+        try:
+            return self.step(timeout)
+        except Exception as error:  # noqa: BLE001 - one step must not kill the loop
+            self._on_step_error(error)
+            return self.state
 
     # -- one step ------------------------------------------------------- #
     def step(self, timeout: float = 0.0) -> LoopState:
@@ -362,6 +421,7 @@ class Loop:
             self.session.try_reconnect()
 
         self._reap_job()
+        self._sync_night_work()
         self._advance()
         self._survival_check()
         if self.narrator is not None:
@@ -618,6 +678,10 @@ class Loop:
         """
         detail = str(event.get("detail") or "") or None
         self.evidence.write("died", detail=detail, tick=self.session.tick, state=self.state.value)
+        # The inventory is gone and so is the plan built on it; the next plan
+        # is the first one after a death and escalates to the stronger model.
+        self._drop_plan("died")
+        self._after_death = True
         self._say("died", speech.died(detail), priority="urgent")
         if self._nothing_gap:
             self._next_pick_tick = 0
@@ -635,6 +699,7 @@ class Loop:
         if self._world_desync is not None:
             return
         self._world_desync = reason or "unknown"
+        self._drop_plan("world_desync")
         self.evidence.write(
             "world_desync", reason=self._world_desync, tick=self.session.tick, state=self.state.value
         )
@@ -736,7 +801,10 @@ class Loop:
     def _retry_stale(self, open_goal: OpenGoal) -> None:
         try:
             command_id = self._send_goal(
-                open_goal.skill, open_goal.proposal.condition, open_goal.budget_ticks
+                open_goal.skill,
+                open_goal.proposal.condition,
+                open_goal.budget_ticks,
+                open_goal.args,
             )
         except PortError as error:
             self.records.finish(
@@ -826,6 +894,11 @@ class Loop:
                 self._stop_requested = False
             return
         self._open_goal = None
+        if record.status in ("failed", "interrupted"):
+            # The steps behind a goal that did not finish were planned for a
+            # world where it had; the next pick plans again. A goal that ends
+            # ``done`` keeps the queue.
+            self._drop_plan(f"goal_{record.status}")
         stopped = (
             self._stop_requested
             and record.status == "interrupted"
@@ -873,13 +946,18 @@ class Loop:
         )
 
     def _note_failure(self, failure_kind: Optional[str]) -> None:
-        """One failed goal: count the streak and hold the pick for the gap."""
+        """One failed goal: count the streak and hold the pick for the gap.
+
+        The first failure in a row holds nothing: the next pick plans again at
+        once. The gap starts with the second, so a broken world cannot spin.
+        """
         self._consecutive_failures += 1
-        gap = (
-            FAILURE_STREAK_GAP_TICKS
-            if self._consecutive_failures >= FAILURE_STREAK
-            else FAILURE_GAP_TICKS
-        )
+        if self._consecutive_failures >= FAILURE_STREAK:
+            gap = FAILURE_STREAK_GAP_TICKS
+        elif self._consecutive_failures >= 2:
+            gap = FAILURE_GAP_TICKS
+        else:
+            gap = 0
         now = int(self.session.tick or 0)
         self._next_pick_tick = now + gap
         self.evidence.write(
@@ -918,6 +996,7 @@ class Loop:
             self._on_world_desync(None)
             self._transition(LoopState.IDLE, reason="world_desync")
             return
+        self._sync_night_work()
         inventory = self._inventory()
         # The user's goal first, then survival, then the rest: the user's
         # projects come before Praxion's own ideas (architecture §1), so a
@@ -949,228 +1028,327 @@ class Loop:
             self._end_pick_without_goal("governor_code_only")
             return
 
-        gate = self._needs_gate(inventory)
-        briefing = self._briefing(
-            need_line(gate.need, inventory, gate.data) if gate is not None else None
-        )
+        self._pick_planned(inventory)
+
+    # -- the plan queue (decision 2026-11-12 "Demo night") ---------------- #
+    def _pick_planned(self, inventory: dict[str, int]) -> None:
+        """Play the next queued goal, or plan again when the queue is empty.
+
+        A queued goal costs no model call: only its turn-time validation. An
+        empty queue is one planner call (through the governor, so the budget and
+        the breaker still apply) whose goals fill it. A plan with no valid goal
+        counts as an invalid plan and is asked again, up to
+        :attr:`max_proposals` times, then the pick ends as ``plans_invalid``.
+        """
+        if self._next_plan_step(inventory)[0]:
+            return
+        briefing = self._briefing(self._needs_line(inventory), knowledge=self._knowledge())
         excluded = False
         for _ in range(max(1, self.max_proposals)):
-            denied = self._gate("propose", propose_estimate(self._invalid_proposals))
+            denied = self._gate(
+                "propose", plan_estimate(self._invalid_proposals, self._after_death)
+            )
             if denied:
                 self._end_pick_without_goal(denied)
                 return
-            proposal, failure = self._proposal_call(briefing)
-            if proposal is None:
+            fresh, failure = self._plan_call(briefing)
+            if fresh is None:
                 self._end_pick_without_goal(failure)
                 return
-
-            result = validate(
-                proposal, inventory, self.memory, self._last_proposal, gate=gate
-            )
-            if self._excluded_by_job(proposal):
-                # The skill being written is not ready: ask for another goal.
-                # Not counted invalid, so the repeat of the goal that started
-                # the job does not escalate to the dearer model (run 5).
-                excluded = True
-                self.evidence.write(
-                    "proposal_writing_excluded",
-                    proposal=proposal.model_dump(),
-                    condition=proposal.condition,
-                    validation_reason=result.reason,
-                    writing=self._writing_skill(),
-                )
-                if gate is not None and gate.need is not None and gate.need.covered:
-                    # The rung's goal is the one being written and everything it
-                    # needs is held: another proposal can only be a stock goal.
-                    # Wait instead of paying for it (critique finding 1).
-                    self._end_pick_without_goal(
-                        "writing_covered",
-                        f"{gate.need.goal} is being written and its needs are covered",
-                    )
-                    return
+            problem = shape_problem(fresh)
+            if problem is not None:
+                self._invalid_plan(problem)
                 continue
+            self._plan = deque(fresh.goals[:MAX_GOALS])
+            self._plan_thought = fresh.thought.strip() or None
             self.evidence.write(
-                "proposal_result",
+                "plan",
+                thought=fresh.thought,
+                goals=[goal.model_dump() for goal in fresh.goals],
+                kept=len(self._plan),
+            )
+            if self._plan_thought is not None:
+                self._say("plan", speech.plan_thought(self._plan_thought), key="plan")
+            played, reasons = self._next_plan_step(inventory)
+            if played:
+                return
+            if reasons and set(reasons) == {"writing"}:
+                # Every goal is the one being written: not the planner's
+                # mistake, so no escalation to the dearer model (run 5).
+                excluded = True
+                continue
+            self._invalid_plan("no_valid_step", reasons=reasons)
+
+        self._end_pick_without_goal("plans_excluded" if excluded else "plans_invalid")
+
+    def _invalid_plan(self, reason: str, **fields: Any) -> None:
+        """One plan the code cannot use: count it (two in a row escalate)."""
+        self._invalid_proposals += 1
+        self.evidence.write(
+            "plan_invalid",
+            reason=reason,
+            invalid_count=self._invalid_proposals,
+            **fields,
+        )
+
+    def _next_plan_step(self, inventory: dict[str, int]) -> tuple[bool, list[str]]:
+        """Pop queued goals until one validates and send it to the router.
+
+        Returns whether a goal was started and the reason of every dropped one
+        (each is also an evidence line ``plan_step_skipped``). ``same_as_last``
+        does not apply: a plan may legitimately repeat a condition (more wood
+        for the pickaxe after the planks). While the body works at night only
+        ``survival.NIGHT_WORK_SKILLS`` pass (``night_unsafe``, decision
+        2026-11-13); a step without a named skill is one of them.
+        """
+        reasons: list[str] = []
+        night = self._night_work()
+        while self._plan:
+            step = self._plan.popleft()
+            proposal, result = self._validate_step(step, inventory)
+            reason = result.reason if not result.ok else None
+            detail = result.detail
+            if reason is None and night and not self._night_safe(step.skill):
+                reason = "night_unsafe"
+                detail = f"{step.skill or 'no skill'} is not a night skill"
+            if reason is None and self._excluded_by_job(proposal):
+                # The skill being written is not ready: this goal cannot play.
+                reason = "writing"
+            if reason is not None:
+                reasons.append(reason)
+                self.evidence.write(
+                    "plan_step_skipped",
+                    step=step.model_dump(),
+                    reason=reason,
+                    detail=detail,
+                    remaining=len(self._plan),
+                )
+                continue
+            verified = self._skill_verified(step)
+            skill = step.skill if self._public_skill(step.skill) else None
+            self._pending = PendingGoal(
+                proposal=proposal,
+                validation=result,
+                goal=goal_of(proposal, result),
+                source="skill_goal" if verified else "plan",
+                forced_skill=skill if verified else None,
+                args=list(step.args) or None,
+                hint=None if verified else skill,
+            )
+            self._remember_proposal(proposal)
+            self._invalid_proposals = 0
+            self.evidence.write(
+                "plan_step",
                 proposal=proposal.model_dump(),
                 validation=result.model_dump(),
-                invalid_count=self._invalid_proposals,
+                skill=skill,
+                args=step.args,
+                remaining=len(self._plan),
             )
-            if result.ok:
-                self._pending = PendingGoal(
-                    proposal=proposal,
-                    validation=result,
-                    goal=goal_of(proposal, result),
-                )
-                self._remember_proposal(proposal)
-                self._invalid_proposals = 0
-                self._transition(LoopState.ROUTING, reason="proposal")
-                return
+            self._transition(LoopState.ROUTING, reason="plan_step")
+            return True, reasons
+        return False, reasons
 
-            if result.reason in TYPED_REJECTIONS:
-                # A code-rejected proposal is a verdict about the world, not a
-                # model mistake: no re-ask, no escalation to the dearer model.
-                self._end_pick_without_goal(str(result.reason), result.detail)
-                return
+    def _skill_verified(self, step: PlannedGoal) -> bool:
+        """A goal with no condition whose known public skill's own ``done`` settles it."""
+        return not step.condition.strip() and self._public_skill(step.skill)
 
-            if self._rung_goal_unplayable(gate, proposal, result):
-                # The next rung's own goal is refused and its needs are held:
-                # another proposal can only be stock (design A6 step 3).
-                self._end_pick_without_goal(str(result.reason), result.detail)
-                return
+    def _public_skill(self, name: Optional[str]) -> bool:
+        """Whether ``name`` is a known skill that is not a helper (``PUBLIC_EXCLUDE``)."""
+        return (
+            bool(name)
+            and name not in PUBLIC_EXCLUDE
+            and self.catalog.by_name(str(name)) is not None
+        )
 
-            self._invalid_proposals += 1
-            self.evidence.write(
-                "proposal_invalid",
-                reason=result.reason,
-                detail=result.detail,
-                invalid_count=self._invalid_proposals,
-            )
+    def _validate_step(
+        self, step: PlannedGoal, inventory: dict[str, int]
+    ) -> tuple[GoalProposal, Validation]:
+        """The goal of one plan step and the code's verdict on it.
 
-        self._end_pick_without_goal("proposals_excluded" if excluded else "proposals_invalid")
-
-    def _rung_goal_unplayable(
-        self, gate: Optional[Gate], proposal: GoalProposal, result: Validation
-    ) -> bool:
-        """Whether the code refused the next rung's own goal (design A6 step 3).
-
-        Failure memory blocks it, or it is the goal just played, and the rung's
-        needs are covered: the rung cannot be played now and every other goal is
-        stock, so the pick ends instead of buying a second proposal. When the
-        needs are *not* covered the model still has the missing input to name
-        (the ``## Needs`` line), so the pick goes on and counts the refusal.
+        A skill-verified step has no inventory condition, so its condition is the
+        skill call text (``find_village()``): it keys failure memory, and the body
+        gets no condition (it is not verifiable), so the skill's own ``done``
+        settles the goal. Every other step is validated like any goal.
         """
-        if gate is None or gate.need is None or not gate.need.covered:
-            return False
-        if result.reason not in {"blocked", "same_as_last"}:
-            return False
-        try:
-            item = item_of_condition(proposal.condition)
-        except Exception:  # noqa: BLE001 - a compound condition names no item
-            return False
-        return item == gate.need.goal
+        rationale = step.rationale[:200]
+        problem = self._args_problem(step)
+        if self._skill_verified(step):
+            proposal = GoalProposal(
+                text=step.text,
+                condition=skill_goal_text(str(step.skill), step.args),
+                rationale=rationale,
+            )
+            if problem is not None:
+                return proposal, Validation(
+                    ok=False, reason="bad_args", detail=problem, unverifiable=True
+                )
+            result = validate(proposal, inventory, self.memory, None)
+            return proposal, result.model_copy(update={"skill_name": step.skill})
+        proposal = GoalProposal(
+            text=step.text,
+            condition=step.condition,
+            rung=self._rung_of(step.condition),
+            rationale=rationale,
+        )
+        if not step.condition.strip() and step.skill:
+            return proposal, Validation(
+                ok=False, reason="unknown_skill", detail=str(step.skill)
+            )
+        if problem is not None:
+            return proposal, Validation(ok=False, reason="bad_args", detail=problem)
+        return proposal, validate(proposal, inventory, self.memory, None)
+
+    def _args_problem(self, step: PlannedGoal) -> Optional[str]:
+        """Why the step's ``args`` cannot be the named skill's arguments.
+
+        The planner names the skill its arguments were written for; code types
+        them the way the body does (``body/crates/body/src/cli.rs``), so a bad
+        argument skips the step here instead of reaching the body and recording
+        a false failure under the goal's condition (review finding 2).
+        """
+        if not step.args:
+            return None
+        info = self.catalog.by_name(str(step.skill)) if self._public_skill(step.skill) else None
+        if info is None:
+            return f"the arguments {list(step.args)!r} name no public skill"
+        params = [str(param) for param in info.params]
+        if len(step.args) > len(params):
+            return (
+                f"{info.name} takes at most {len(params)} arguments, "
+                f"got {len(step.args)}"
+            )
+        for arg, param in zip(step.args, params):
+            name, _, spec = param.partition(":")
+            kind = spec.split("=")[0].strip().lower()
+            if kind == "int" and not re.fullmatch(r"[+-]?\d+", str(arg)):
+                return f"{name.strip() or 'argument'} wants an int, got {arg!r}"
+        return None
+
+    @staticmethod
+    def _rung_of(condition: str) -> Optional[str]:
+        """The ladder rung whose condition this is, for the speech and the record."""
+        key = normalize_condition(condition)
+        for rung in RUNGS:
+            if normalize_condition(rung.condition) == key:
+                return rung.id
+        return None
 
     def _remember_proposal(self, proposal: GoalProposal) -> None:
-        """The newest accepted proposal; its item joins the last-two list (check 7).
+        """The newest accepted goal; what it replaced is kept.
 
-        What it replaced is kept, so a goal that is never played (a deferred
-        write) can be forgotten again by :meth:`_forget_proposal`.
+        A goal that is never played (a deferred write) can be forgotten again by
+        :meth:`_forget_proposal`.
         """
-        self._before_remember = (proposal, self._last_proposal, tuple(self._recent_items))
+        self._before_remember = (proposal, self._last_proposal)
         self._last_proposal = proposal
-        try:
-            item = item_of_condition(proposal.condition)
-        except Exception:  # noqa: BLE001 - a compound or odd condition names no item
-            item = None
-        if item is not None and (
-            not self._recent_items or self._recent_items[0] != item
-        ):
-            self._recent_items.appendleft(item)
 
     def _forget_proposal(self, proposal: GoalProposal) -> None:
         """Undo :meth:`_remember_proposal` for a goal that was never played.
 
         A write deferred while another skill is written plays nothing, so it
-        must not become the "last" goal: the model naming it again was refused
-        ``same_as_last`` three times in a row and the pick ended idle (run 8,
-        05:02 and 05:25 UTC). Only the matching, most recent remember is undone.
+        must not become the "last" goal. Only the matching, most recent remember
+        is undone.
         """
         before = self._before_remember
         if before is None or before[0] is not proposal or self._last_proposal is not proposal:
             return
         self._before_remember = None
-        _, self._last_proposal, recent = before
-        self._recent_items.clear()
-        self._recent_items.extend(recent)
+        self._last_proposal = before[1]
 
-    def _drift_brake(self, record: GoalRecord, rungs_met: int) -> None:
-        """Five goals moved no rung: only goals that serve the next rung pass.
+    def _drop_plan(self, reason: str) -> None:
+        """Forget the queued goals; the next pick plans again.
 
-        The brake lasts until a rung is met beyond the count it started from
-        (decision 2026-11-09 "Five next areas": drift is acted on, not just
-        logged). ``rungs_met`` comes from the settle-time inventory, which the
-        design (§7, "a stale ladder reading") saw report a count two rungs
-        behind; it is logged as the reading it is, never used as the baseline.
+        Called when the world the plan was made for is gone: a goal that did not
+        finish, a death, a survival goal, an operator task, a skill write, a
+        world desync, or night falling (``night``) and morning coming
+        (``morning``). Silent when the queue is already empty.
         """
-        self._brake_armed = True
-        self._brake_met = None
+        if not self._plan:
+            return
         self.evidence.write(
-            "drift_brake",
-            goal_id=record.goal_id,
-            rungs_met=rungs_met,
+            "plan_dropped",
+            reason=reason,
+            goals=[goal.text for goal in self._plan],
         )
+        self._plan.clear()
 
-    def _brake_active(self, inventory: dict[str, int]) -> bool:
-        """Whether the brake blocks this pick; it measures from a fresh read.
-
-        The baseline is the ladder count of the first pick after the brake went
-        on. ``_needs_gate`` calls this after ``_pick`` refreshed the snapshot, so
-        a stale settle-time count cannot release the brake before it ever bit.
-        """
-        if not self._brake_armed:
-            return False
-        met = ladder_progress(inventory).met
-        if self._brake_met is None:
-            self._brake_met = met
-            self.evidence.write("drift_brake_armed", rungs_met=met)
-            return True
-        if met > self._brake_met:
-            self.evidence.write(
-                "drift_brake_released", rungs_met=met, was=self._brake_met
-            )
-            self._brake_armed = False
-            self._brake_met = None
-            return False
-        return True
-
-    def _needs_gate(self, inventory: dict[str, int]) -> Optional[Gate]:
-        """Checks 6 and 7 for this pick; ``None`` without the recipe export.
-
-        Writes one ``needs_gate`` line per pick naming the mode the next rung
-        took (``recipe``, ``smelting``, ``inert`` or ``unknown``), so an inert
-        gate is visible rather than silent (critique finding 7).
-        """
+    def _needs_line(self, inventory: dict[str, int]) -> Optional[str]:
+        """The ``## Needs`` fact for the next ladder rung; ``None`` without the export."""
         if self.gamedata is None:
             return None
         rung = first_unmet(inventory)
-        need = (
-            rung_need(rung.id, rung.condition, inventory, self.gamedata)
-            if rung is not None
-            else None
+        if rung is None:
+            return None
+        return need_line(
+            rung_need(rung.id, rung.condition, inventory, self.gamedata),
+            inventory,
+            self.gamedata,
         )
-        brake = self._brake_active(inventory)
-        waiting = False
-        later: set[str] = set()
-        if rung is not None and need is not None:
-            # A covered rung whose own goal is being written cannot be played:
-            # the rest of the pick may only name a later rung's goal.
-            waiting = need.covered and self._excluded_by_job(
-                GoalProposal(text=rung.id, condition=rung.condition)
+
+    def _knowledge(self) -> list[str]:
+        """Wiki lines about the next ladder rung's item, when the wiki exists.
+
+        The wiki package is optional: without it, or without an index, the
+        planner simply gets no ``## Knowledge`` section. A search error is
+        evidence (``wiki_error``) and never stops the pick.
+        """
+        rung = first_unmet(self._inventory())
+        if rung is None:
+            return []
+        item = item_of_condition(rung.condition)
+        name = rung.id if item is None or item.startswith("#") else item
+        query = f"how to get {name.replace('_', ' ')} in Minecraft survival"
+        try:
+            search = importlib.import_module(".wiki", __package__).search
+        except (ImportError, AttributeError):
+            return []
+        try:
+            snippets = search(query, k=2)
+        except Exception as error:  # noqa: BLE001 - the wiki is a bonus, never a stop
+            self.evidence.write(
+                "wiki_error", query=query, error=f"{type(error).__name__}: {error}"
             )
-            for later_rung in RUNGS[RUNGS.index(rung) + 1 :]:
-                item = item_of_condition(later_rung.condition)
-                if item is not None:
-                    later.add(item)
-        self.evidence.write(
-            "needs_gate",
-            rung=rung.id if rung is not None else None,
-            mode=need.mode if need is not None else None,
-            covered=need.covered if need is not None else None,
-            unmet=(
-                [row.model_dump() for row in need.plan.unmet]
-                if need is not None
-                else []
-            ),
-            brake=brake,
-            waiting=waiting,
-        )
-        return Gate(
-            data=self.gamedata,
-            need=need,
-            recent_items=tuple(self._recent_items),
-            brake=brake,
-            waiting=waiting,
-            later_items=frozenset(later),
-        )
+            return []
+        return [
+            f"{snippet.title}: {' '.join(str(snippet.text).split())[:300]}"
+            for snippet in snippets
+        ]
+
+    def _plan_call(self, briefing: str) -> tuple[Optional[Plan], str]:
+        """One planner call with its deadline; ``(None, reason)`` when it fails."""
+        try:
+            fresh = self.governor.call(
+                "propose",
+                lambda: self._plan_fn(
+                    briefing=briefing,
+                    catalog=self.catalog,
+                    invalid_count=self._invalid_proposals,
+                    after_death=self._after_death,
+                    ledger=self.ledger,
+                    evidence=self.evidence,
+                ),
+            )
+        except CallTimeout as error:
+            self.governor.record_error()
+            self.evidence.write(
+                "plan_timeout",
+                seconds=error.seconds,
+                invalid_count=self._invalid_proposals,
+            )
+            return None, "plan_timeout"
+        except Exception as error:  # noqa: BLE001 - provider errors feed the breaker
+            self.governor.record_error()
+            self.evidence.write(
+                "plan_error",
+                error=f"{type(error).__name__}: {error}",
+                invalid_count=self._invalid_proposals,
+            )
+            return None, "plan_error"
+        self.governor.record_success()
+        # The first plan after a death is the escalated one; the next is not.
+        self._after_death = False
+        return fresh, ""
 
     def _end_pick_without_goal(self, reason: str, detail: Optional[str] = None) -> bool:
         """The pick found no goal to play: play the rung's known skill, else wait.
@@ -1220,10 +1398,13 @@ class Loop:
         no failure gap; but IDLE with no wake and no gap would wait for the
         world to change (run 8). The caller writes its own evidence line first.
         """
-        if self._pending is not None:
+        pending, self._pending = self._pending, None
+        if pending is not None:
             # Nothing was played, so the proposal must not become the "last"
-            # goal: re-proposing it after the gap is not `same_as_last`.
-            self._forget_proposal(self._pending.proposal)
+            # goal: re-proposing it after the gap is not `same_as_last`. The
+            # pending goal is gone too: a console Stop in the idle window must
+            # not report a goal that was already abandoned (review finding 3).
+            self._forget_proposal(pending.proposal)
         self._transition(LoopState.IDLE, reason=reason)
         gap = self._nothing_backoff()
         self.evidence.write(
@@ -1236,6 +1417,63 @@ class Loop:
     # -- survival (decision 2026-11-09 "Five next areas") ------------------ #
     def _facts(self) -> dict[str, Any]:
         return dict((self.session.snapshot or {}).get("facts") or {})
+
+    def _night_work(self) -> bool:
+        """Whether the body works underground instead of sheltering now.
+
+        Decision 2026-11-13 "night mining": a pickaxe and health above
+        ``survival.SHELTER_HEALTH`` at night. The planner keeps planning then,
+        restricted to ``survival.NIGHT_WORK_SKILLS``.
+        """
+        return survival.night_work(self._facts(), self._inventory())
+
+    @staticmethod
+    def _night_safe(skill: Optional[str]) -> bool:
+        """Whether ``skill`` may play at night while the body works.
+
+        A step without a named skill is never safe: the loop would have to write
+        a skill first, and nothing is written in the dark (decision 2026-11-13).
+        """
+        return bool(skill) and str(skill) in survival.NIGHT_WORK_SKILLS
+
+    def _safe_to_play(self, skill: Optional[str]) -> bool:
+        """Whether the skill finally routed may play now: any skill by day, a
+        night skill while the body works at night (decision 2026-11-13)."""
+        return not self._night_work() or self._night_safe(skill)
+
+    def _sync_night_work(self) -> None:
+        """Track night work across the night; drop the plan when it turns.
+
+        Dusk drops the daytime plan (evidence ``plan_dropped`` reason ``night``)
+        so the next plan is made for the night, and dawn drops the night plan
+        (reason ``morning``) the same way. The first sighting of a night says
+        one line, once per night (decision 2026-11-13): a body hurt and healed
+        again during the same night does not repeat it.
+        """
+        facts = self._facts()
+        if facts.get("world_valid") is False:
+            # Stale facts decide nothing; a desync drops the plan itself.
+            return
+        working = survival.night_work(facts, self._inventory())
+        if facts.get("is_night") is not True:
+            self._night_spoken = False
+        if working != self._night_working:
+            if self._night_working is not None:
+                self._drop_plan("night" if working else "morning")
+            self._night_working = working
+        if working and not self._night_spoken:
+            self._night_spoken = True
+            self._say("night_work", speech.night_work(), key="night_work")
+
+    def _night_allowed(self) -> Optional[list[str]]:
+        """The ``## Night`` skills the catalog has, or ``None`` off night work."""
+        if not self._night_work():
+            return None
+        return sorted(
+            name
+            for name in survival.NIGHT_WORK_SKILLS
+            if self.catalog.by_name(name) is not None
+        )
 
     def _due_survival(self) -> Optional["survival.SurvivalGoal"]:
         return survival.choose(
@@ -1295,6 +1533,7 @@ class Loop:
         if due is None:
             return False
         validation = due.validation()
+        self._drop_plan("survival")
         self._pending = PendingGoal(
             proposal=due.proposal,
             validation=validation,
@@ -1447,6 +1686,10 @@ class Loop:
         while self._user_goals:
             proposal = self._user_goals.pop(0)
             repeatable = self._user_repeatable.pop(0) if self._user_repeatable else False
+            skill, args = self._user_routes.pop(0) if self._user_routes else (None, None)
+            verified = skill is not None and proposal.condition == skill_goal_text(
+                skill, args or ()
+            )
             # Same-as-last does not apply to the operator's own sentence, who
             # may repeat a request (the command path already decided that);
             # checking it again here refused the repeat with a raw key (review
@@ -1468,46 +1711,20 @@ class Loop:
             if result.ok:
                 self._pending = PendingGoal(
                     proposal=proposal,
-                    validation=result,
+                    validation=(
+                        result.model_copy(update={"skill_name": skill}) if verified else result
+                    ),
                     goal=goal_of(proposal, result),
+                    source="skill_goal" if verified else "llm",
+                    forced_skill=skill if verified else None,
                     origin="user",
+                    args=args,
+                    hint=None if verified else skill,
                 )
                 self._remember_proposal(proposal)
                 self._transition(LoopState.ROUTING, reason="user_goal")
                 return True
         return False
-
-    def _proposal_call(self, briefing: str) -> tuple[Optional[GoalProposal], str]:
-        """One proposal call with its deadline; ``(None, reason)`` when it fails."""
-        try:
-            proposal = self.governor.call(
-                "propose",
-                lambda: self._propose_fn(
-                    briefing=briefing,
-                    catalog=self.catalog,
-                    invalid_count=self._invalid_proposals,
-                    ledger=self.ledger,
-                    evidence=self.evidence,
-                ),
-            )
-        except CallTimeout as error:
-            self.governor.record_error()
-            self.evidence.write(
-                "proposal_timeout",
-                seconds=error.seconds,
-                invalid_count=self._invalid_proposals,
-            )
-            return None, "proposal_timeout"
-        except Exception as error:  # noqa: BLE001 - provider errors feed the breaker
-            self.governor.record_error()
-            self.evidence.write(
-                "proposal_error",
-                error=f"{type(error).__name__}: {error}",
-                invalid_count=self._invalid_proposals,
-            )
-            return None, "proposal_error"
-        self.governor.record_success()
-        return proposal, ""
 
     def _pick_code_only(self, reason: str) -> bool:
         """Route the rung's known skill, or say why not and go IDLE (``False``).
@@ -1527,6 +1744,18 @@ class Loop:
             self._transition(LoopState.IDLE, reason="code_only_idle")
             return False
         proposal = fallback.goal
+        if not self._safe_to_play(fallback.skill):
+            # The rung's skill gathers on the surface; at night the work is
+            # underground (decision 2026-11-13), so the fallback idles instead.
+            self.evidence.write(
+                "code_only_idle",
+                reason="night_unsafe",
+                detail=f"{fallback.skill} is not a night skill",
+                requested=reason,
+                inventory=inventory,
+            )
+            self._transition(LoopState.IDLE, reason="code_only_idle")
+            return False
         if self._excluded_by_job(proposal):
             # The same goal is being written; a second command would preempt
             # the skill the loop is about to admit.
@@ -1572,7 +1801,9 @@ class Loop:
         self._transition(LoopState.ROUTING, reason=f"code_only:{reason}")
         return True
 
-    def _briefing(self, needs: Optional[str] = None) -> str:
+    def _briefing(
+        self, needs: Optional[str] = None, knowledge: Sequence[str] = ()
+    ) -> str:
         snapshot = self.session.snapshot or {"facts": {"inventory": {}}}
         failures = self.memory.failures()
         records = []
@@ -1592,6 +1823,9 @@ class Loop:
             now=self._wall_clock(),
             writing=self._writing_skill(),
             needs=needs,
+            persona=self.persona.style,
+            knowledge=knowledge,
+            night=self._night_allowed(),
         )
 
     # -- ROUTING -------------------------------------------------------- #
@@ -1601,7 +1835,7 @@ class Loop:
             self._idle_backoff("route_without_goal")
             return
 
-        if pending.source in ("code_only", "survival") and pending.forced_skill:
+        if pending.source in ("code_only", "survival", "skill_goal") and pending.forced_skill:
             self.evidence.write(
                 "route_code_only",
                 skill=pending.forced_skill,
@@ -1631,6 +1865,7 @@ class Loop:
                     self.catalog,
                     ledger=self.ledger,
                     evidence=self.evidence,
+                    hint=pending.hint,
                 ),
             )
         except CallTimeout as error:
@@ -1654,6 +1889,7 @@ class Loop:
             skill=routed.skill,
             scores=routed.scores,
             condition=pending.proposal.condition,
+            hint=pending.hint,
         )
         self._last_route = {
             "decision": routed.kind,
@@ -1666,6 +1902,26 @@ class Loop:
             if not skill:
                 self.evidence.write("route_no_skill", condition=pending.proposal.condition)
                 self._idle_backoff("route_no_skill")
+                return
+            if pending.origin != "user" and not self._safe_to_play(skill):
+                # The router named a surface skill for this step; at night the
+                # step is skipped exactly like a planner-named one (decision
+                # 2026-11-13). Nothing is played and the goal is not a failure.
+                # An operator task is the user's: it still plays.
+                self.evidence.write(
+                    "plan_step_skipped",
+                    step=PlannedGoal(
+                        text=pending.proposal.text,
+                        condition=pending.proposal.condition,
+                        skill=str(skill),
+                        args=list(pending.args or []),
+                        rationale=pending.proposal.rationale[:200],
+                    ).model_dump(),
+                    reason="night_unsafe",
+                    detail=f"{skill} is not a night skill",
+                    remaining=len(self._plan),
+                )
+                self._idle_backoff("night_unsafe")
                 return
             pending.forced_skill = skill
             self._play()
@@ -1682,6 +1938,8 @@ class Loop:
         runs is deferred: the skill is not ready and a second admission would
         spend money twice for the same wait.
         """
+        # The goals behind this one were planned for a world with its skill.
+        self._drop_plan("skill_write")
         if self._job is not None:
             self._defer_write(pending)
             return
@@ -1952,6 +2210,10 @@ class Loop:
         return admit(goal, **options)
 
     # -- PLAYING -------------------------------------------------------- #
+    def _args_skill(self, pending: PendingGoal) -> Optional[str]:
+        """The skill the pending goal's explicit arguments were written for."""
+        return pending.hint or pending.validation.skill_name
+
     def _play(self) -> None:
         pending = self._pending
         if pending is None:
@@ -1973,9 +2235,22 @@ class Loop:
             self._idle_backoff("no_snapshot")
             return
 
+        # Explicit arguments belong to the skill they were written for: a skill
+        # Jev routed to instead takes its own shape, never another skill's
+        # arguments (review finding 2).
+        args = pending.args
+        if args is not None and skill != self._args_skill(pending):
+            self.evidence.write(
+                "args_dropped",
+                skill=skill,
+                written_for=self._args_skill(pending),
+                args=list(args),
+            )
+            args = None
+
         try:
             command_id = self._send_goal(
-                skill, pending.proposal.condition, pending.budget_ticks
+                skill, pending.proposal.condition, pending.budget_ticks, args
             )
         except PortError as error:
             self.evidence.write("command_send_failed", error=str(error), skill=skill)
@@ -2021,6 +2296,7 @@ class Loop:
             sent_tick=int(self.session.tick or 0),
             survival=pending.source == "survival",
             budget_ticks=pending.budget_ticks,
+            args=args,
         )
         if pending.origin != "user":
             rung = pending.proposal.rung
@@ -2175,8 +2451,7 @@ class Loop:
             job.stop_requested = True
         self._pending = None
         self._wake = None
-        self._user_goals.clear()
-        self._user_repeatable.clear()
+        self._clear_user_goals()
         self._transition(LoopState.IDLE, reason="stop_goal")
         extra = {}
         if pending is not None:
@@ -2225,12 +2500,27 @@ class Loop:
             self._set_wake(WakeCause.USER)
         return "queued"
 
-    def _enqueue_user(self, proposal: GoalProposal, *, repeatable: bool) -> None:
+    def _enqueue_user(
+        self,
+        proposal: GoalProposal,
+        *,
+        repeatable: bool,
+        skill: Optional[str] = None,
+        args: Optional[list[str]] = None,
+    ) -> None:
         """Queue one operator goal; ``repeatable`` says a repeat may be played
         again (a chat/console sentence) or is still checked against the last
-        goal (the console's explicit ``new_goal``)."""
+        goal (the console's explicit ``new_goal``). ``skill`` and ``args`` are
+        what the sentence named. A queued operator task drops the plan."""
         self._user_goals.append(proposal)
         self._user_repeatable.append(repeatable)
+        self._user_routes.append((skill, args))
+        self._drop_plan("user_task")
+
+    def _clear_user_goals(self) -> None:
+        self._user_goals.clear()
+        self._user_repeatable.clear()
+        self._user_routes.clear()
 
     # -- talking ---------------------------------------------------------- #
     def _say(
@@ -2294,8 +2584,7 @@ class Loop:
         stop, popped the suspended ones); from the console the brain pops.
         """
         if control == "stop":
-            self._user_goals.clear()
-            self._user_repeatable.clear()
+            self._clear_user_goals()
             self._paused = True
             # Chat: the body has already popped every command. Console: the stop
             # below pops. Either way no suspended goal survives to be resumed,
@@ -2385,26 +2674,44 @@ class Loop:
         if resolved.kind == "control":
             return self._apply_control_word(str(resolved.control), source=source)
         if resolved.kind == "unsupported":
-            self._reply(speech.cannot_understand(text), topic="cannot_understand")
+            self._reply(
+                speech.cannot_understand(text, resolved.detail),
+                topic="cannot_understand",
+            )
             return "unsupported"
         if resolved.kind == "refused":
             self._reply(speech.refused(str(resolved.reason), resolved.detail), topic="refused")
             return f"refused:{resolved.reason}"
         proposal = resolved.proposal
-        assert proposal is not None and resolved.validation is not None
+        validation = resolved.validation
+        assert proposal is not None and validation is not None
         known = resolved.skill is not None and self.catalog.by_name(resolved.skill) is not None
+        # The arguments the sentence named (`commands.Resolution.args`, when the
+        # command map has them); ``None`` derives the count from the condition.
+        args = list(getattr(resolved, "args", None) or []) or None
+        if known and not proposal.condition.strip():
+            # A skill-verified task: no inventory condition, the skill's own
+            # `done` settles it (same shape as a plan step).
+            proposal = proposal.model_copy(
+                update={"condition": skill_goal_text(str(resolved.skill), args or ())}
+            )
+            validation = Validation(
+                ok=True, skill_name=resolved.skill, unverifiable=True
+            )
         self._reply(
             speech.task_accepted(proposal.text, proposal.condition, learning=not known),
             topic="task_accepted",
         )
         if self.state == LoopState.PLAYING and self._open_goal is not None and known:
+            self._drop_plan("user_task")
             self._pending = PendingGoal(
                 proposal=proposal,
-                validation=resolved.validation,
-                goal=goal_of(proposal, resolved.validation),
+                validation=validation,
+                goal=goal_of(proposal, validation),
                 source="user",
                 forced_skill=resolved.skill,
                 origin="user",
+                args=args,
             )
             self._last_route = {
                 "decision": "play",
@@ -2417,7 +2724,12 @@ class Loop:
             self._play()
             return "preempted"
         # A sentence from the operator may repeat a request (review finding 5).
-        self._enqueue_user(proposal, repeatable=True)
+        self._enqueue_user(
+            proposal,
+            repeatable=True,
+            skill=resolved.skill if known else None,
+            args=args,
+        )
         if self.state == LoopState.IDLE:
             self._set_wake(WakeCause.USER)
         return "queued"
@@ -2485,6 +2797,12 @@ class Loop:
                     "hard_stop_usd": self.governor.hard_stop_usd,
                     "spent_session": self.governor.spent_session(),
                 },
+                "persona": {"id": self.persona.id, "style": self.persona.style},
+                "plan": [
+                    {"text": goal.text, "condition": goal.condition, "skill": goal.skill}
+                    for goal in self._plan
+                ],
+                "thought": self._plan_thought,
                 "user_goals": len(self._user_goals),
                 "suspended": len(self._suspended),
                 "reply": self._last_reply,
@@ -2494,19 +2812,24 @@ class Loop:
 
     # -- helpers -------------------------------------------------------- #
     def _send_goal(
-        self, skill: str, condition: str, budget_ticks: Optional[int] = None
+        self,
+        skill: str,
+        condition: str,
+        budget_ticks: Optional[int] = None,
+        args: Optional[list[str]] = None,
     ) -> str:
         """Send one command; the one send path, so the count always travels.
 
-        Code-only, proposal, survival and stale-retry sends all come through
+        Code-only, plan, survival and stale-retry sends all come through
         here, which is why :meth:`_goal_args` cannot be forgotten on one of
-        them. ``budget_ticks`` overrides the default per-goal budget: a night
-        goal needs longer than the default or the body fails it mid-night.
+        them. Explicit ``args`` (a plan step, an operator task) win over the
+        derived count. ``budget_ticks`` overrides the default per-goal budget: a
+        night goal needs longer than the default or the body fails it mid-night.
         """
         return self.session.send_goal(
             skill,
             condition,
-            self._goal_args(skill, condition),
+            self._goal_args(skill, condition) if args is None else list(args),
             budget_ticks=budget_ticks,
         )
 

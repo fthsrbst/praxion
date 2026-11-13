@@ -62,6 +62,16 @@ const ICONS = {
   user: '<circle cx="12" cy="8" r="3.500"/><path d="M5 20c.5-4 3.500-6 7-6s6.500 2 7 6"/>',
   box: '<path d="M4 8l8-4 8 4v8l-8 4-8-4V8Z"/><path d="M4 8l8 4 8-4M12 12v8"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  skull: '<path d="M12 3.500c-4 0-7 2.800-7 6.600 0 2.200 1 3.800 2.500 4.800V18h9v-3.100c1.500-1 2.500-2.600 2.500-4.800 0-3.800-3-6.600-7-6.600Z"/><circle cx="9.200" cy="10.500" r="1.300"/><circle cx="14.800" cy="10.500" r="1.300"/><path d="M10 18v2.500M14 18v2.500"/>',
+  shield: '<path d="M12 3.500l7 2.500v5.500c0 4.200-3 7.600-7 9-4-1.400-7-4.800-7-9V6l7-2.500Z"/><path d="M9 12l2.200 2.200L15.500 10"/>',
+  moon: '<path d="M19 14.500A7.500 7.500 0 0 1 9.500 5 7.500 7.500 0 1 0 19 14.500Z"/>',
+  chat: '<path d="M4.500 5h15a1.500 1.500 0 0 1 1.500 1.500v9a1.500 1.500 0 0 1-1.500 1.500H11l-4.500 3.500V17H4.500A1.500 1.500 0 0 1 3 15.500v-9A1.500 1.500 0 0 1 4.500 5Z"/>',
+  search: '<circle cx="11" cy="11" r="6.500"/><path d="M16 16l4.500 4.500"/>',
+  eye: '<path d="M2.500 12S6 5.500 12 5.500 21.500 12 21.500 12 18 18.500 12 18.500 2.500 12 2.500 12Z"/><circle cx="12" cy="12" r="2.800"/>',
+  clock: '<circle cx="12" cy="12" r="8.500"/><path d="M12 7v5l3 2"/>',
+  arrow: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  chevron: '<path d="M9 6l6 6-6 6"/>',
+  bolt: '<path d="M13 3L5 13.500h6L10 21l8-10.500h-6L13 3Z"/>',
 };
 
 export function icon(name, className) {
@@ -125,4 +135,92 @@ export function itemGlyph(id) {
   let hash = 0;
   for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
   return { text, hue: hash % 360 };
+}
+
+/** An ISO timestamp as POSIX seconds, or ``null``. */
+export function epoch(iso) {
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t / 1000;
+}
+
+/** Seconds as "12s", "3m 05s" or "1h 02m". */
+export function span(seconds) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "-";
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
+  return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+}
+
+/** "12s ago" style label for a POSIX time; the feed refreshes it on a timer. */
+export function relative(epochSeconds, now = Date.now() / 1000) {
+  if (!epochSeconds) return "";
+  const s = Math.max(0, now - epochSeconds);
+  if (s < 5) return "just now";
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+export function words(snake) {
+  return String(snake || "").replace(/^minecraft:/, "").replace(/_/g, " ").trim();
+}
+
+/** Why a goal failed, in plain words. Unknown kinds fall back to the kind itself. */
+const FAILURES = {
+  no_block: "found no block of that kind nearby",
+  no_blocks: "found no matching blocks around",
+  out_of_reach: "the target was out of reach",
+  no_sight: "had no line of sight to the target",
+  not_found: "could not find what it was looking for",
+  unreachable: "found no path to the target",
+  unconfirmed: "the body never confirmed the result",
+  inconclusive_body: "the body gave no clear answer",
+  loop_error: "an internal error stopped the loop",
+  died: "the bot died",
+  needs_table: "it needs a crafting table first",
+  needs_tool: "it needs a better tool first",
+  no_raw_iron: "there was no raw iron to smelt",
+  no_fuel: "there was no fuel",
+  no_furnace: "there was no furnace",
+  no_item: "an ingredient was missing",
+  unsafe_drop: "the drop was not safe",
+  fluid: "water or lava was in the way",
+  too_deep: "the stair would have gone too deep",
+  underwater: "the eyes were under water and the breath would not last",
+  no_progress: "the same step kept restarting without progress",
+  timeout: "it ran out of time",
+  budget: "it ran out of its tick budget",
+  stuck: "the bot got stuck",
+  no_way_up: "no way up to the surface could be cut",
+  skill_wrong: "the skill did not fit the goal",
+  bad_args: "the skill got bad arguments",
+  preempted_by_survival: "survival took over",
+  health_low: "health was too low",
+  not_huntable: "that mob cannot be hunted",
+  desync: "the client and the server drifted apart",
+};
+
+export function failureWords(kind) {
+  if (!kind) return "";
+  return FAILURES[kind] || words(kind);
+}
+
+/** Per-viewer preferences: never required, so every access is guarded. */
+export function recall(key, fallback) {
+  try {
+    const value = localStorage.getItem("praxion.console." + key);
+    return value === null ? fallback : value;
+  } catch {
+    return fallback;
+  }
+}
+
+export function remember(key, value) {
+  try {
+    localStorage.setItem("praxion.console." + key, value);
+  } catch {
+    /* private mode: the choice lasts for this page only */
+  }
 }

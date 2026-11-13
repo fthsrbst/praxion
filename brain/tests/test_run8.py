@@ -70,9 +70,9 @@ def test_a_pick_without_a_code_only_goal_backs_off_and_picks_again(tmp_path) -> 
             pump(loop, lambda: evidence_entries(loop, "nothing_to_do"), what="the back-off")
             # The old behaviour (the run 8 bug): code_only_idle and IDLE with no
             # wake and no gap, so nothing ever picked again.
-            assert evidence_entries(loop, "code_only_idle")[0]["reason"] == "proposal_error"
+            assert evidence_entries(loop, "code_only_idle")[0]["reason"] == "plan_error"
             first = evidence_entries(loop, "nothing_to_do")[0]
-            assert first["reason"] == "proposal_error"
+            assert first["reason"] == "plan_error"
             assert first["gap_ticks"] == NOTHING_TO_DO_GAP_TICKS
             assert loop.state == LoopState.IDLE and loop._nothing_gap
             assert len(calls) == 1
@@ -119,8 +119,9 @@ def test_a_deferred_write_can_be_proposed_again(tmp_path) -> None:
             loop.start()
             pump(loop, lambda: loop._job is not None, what="admission job")
             pump(loop, lambda: evidence_entries(loop, "write_deferred"), what="the first deferral")
-            assert loop._last_proposal is furnace, "the deferred coal goal is forgotten"
-            assert tuple(loop._recent_items) == ("furnace",)
+            assert (
+                loop._last_proposal.condition == furnace.condition
+            ), "the deferred coal goal is forgotten"
 
             set_tick(loop, body, loop._next_pick_tick)
             pump(
@@ -130,8 +131,8 @@ def test_a_deferred_write_can_be_proposed_again(tmp_path) -> None:
             )
             refused = [
                 entry
-                for entry in evidence_entries(loop, "proposal_result")
-                if entry["validation"]["reason"] == "same_as_last"
+                for entry in evidence_entries(loop, "plan_step_skipped")
+                if entry["reason"] == "same_as_last"
             ]
             assert not refused, refused
             assert [e["condition"] for e in evidence_entries(loop, "write_deferred")][:2] == [
@@ -152,10 +153,8 @@ def test_forget_undoes_only_the_matching_remember(tmp_path) -> None:
         loop._remember_proposal(b)
         loop._forget_proposal(a)  # not the newest: nothing changes
         assert loop._last_proposal is b
-        assert tuple(loop._recent_items) == ("cobblestone", "oak_log")
         loop._forget_proposal(b)
         assert loop._last_proposal is a
-        assert tuple(loop._recent_items) == ("oak_log",)
         loop._forget_proposal(b)  # twice is harmless
         assert loop._last_proposal is a
 

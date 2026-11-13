@@ -177,3 +177,121 @@ def test_a_variant_item_plays_the_skill_for_its_last_word(tmp_path) -> None:
     )
     assert (result.kind, result.skill) == ("play", "get_planks")
     assert fake.calls == []
+
+
+def _decision(tmp_path) -> dict:
+    lines = (tmp_path / "evidence" / "brain.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if json.loads(line)["kind"] == "router_decision"][-1]
+
+
+def test_helper_skills_are_hidden_from_the_jev_questions(tmp_path) -> None:
+    catalog = _catalog("get_wood", "cut_log", "hunt_food", "find_stone", "get_planks")
+    fake = FakeClient({"get_wood": 0.1, "get_planks": 0.2})
+
+    result = route(
+        _goal(),
+        catalog,
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+    )
+
+    assert set(fake.calls[0]["questions"]) == {"get_wood", "get_planks"}
+    assert set(fake.calls[0]["state"]["skills"]) == {"get_wood", "get_planks"}
+    assert result.kind == "write"
+
+
+def test_a_helper_is_not_played_by_the_exact_name_path(tmp_path) -> None:
+    fake = FakeClient({"get_wood": 0.1})
+    goal = Goal(text="get a crafting table near", item="crafting_table_near")
+    result = route(
+        goal,
+        _catalog("get_wood", "get_crafting_table_near"),
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+    )
+    assert result.skill is None
+    assert fake.calls, "Jev was asked: the helper is no exact-name shortcut"
+
+
+def test_the_hint_plays_at_half_a_point_even_when_another_skill_wins(tmp_path) -> None:
+    catalog = _catalog("get_wood", "get_planks")
+    fake = FakeClient({"get_wood": 0.5, "get_planks": 0.95})
+
+    result = route(
+        _goal(),
+        catalog,
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+        hint="get_wood",
+    )
+
+    assert (result.kind, result.skill) == ("play", "get_wood")
+    decision = _decision(tmp_path)
+    assert decision["hint"] == "get_wood" and decision["source"] == "hint"
+
+
+def test_a_hint_jev_rejects_falls_back_to_the_normal_decision(tmp_path) -> None:
+    catalog = _catalog("get_wood", "get_planks")
+    fake = FakeClient({"get_wood": 0.29, "get_planks": 0.95})
+
+    result = route(
+        _goal(),
+        catalog,
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+        hint="get_wood",
+    )
+
+    assert (result.kind, result.skill) == ("play", "get_planks")
+    decision = _decision(tmp_path)
+    assert decision["hint"] == "get_wood" and decision["source"] == "jev"
+
+
+def test_a_hint_that_is_not_a_public_skill_is_ignored(tmp_path) -> None:
+    fake = FakeClient({"get_wood": 0.1})
+    result = route(
+        _goal(),
+        _catalog("get_wood", "cut_log"),
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+        hint="cut_log",
+    )
+    assert result.kind == "write"
+
+
+def test_the_exact_name_path_still_comes_first_with_a_hint(tmp_path) -> None:
+    fake = FakeClient({})
+    result = route(
+        _goal(),
+        _catalog("get_wood", "get_furnace"),
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+        hint="get_wood",
+    )
+    assert (result.kind, result.skill) == ("play", "get_furnace")
+    assert fake.calls == []
+    assert _decision(tmp_path)["source"] == "exact_name"
+
+
+def test_a_hint_jev_does_not_reject_plays_even_when_it_is_not_the_best(tmp_path) -> None:
+    # Run B, 2026-11-12: `hunt` scored 0.49 for a porkchop goal and was dropped.
+    catalog = _catalog("hunt", "get_food")
+    fake = FakeClient({"hunt": 0.49, "get_food": 0.38})
+
+    result = route(
+        _goal(),
+        catalog,
+        client=fake,
+        ledger=Ledger(tmp_path / "ledger.jsonl"),
+        evidence=Evidence(tmp_path / "evidence"),
+        hint="hunt",
+    )
+
+    assert (result.kind, result.skill) == ("play", "hunt")
+    assert _decision(tmp_path)["source"] == "hint"

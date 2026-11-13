@@ -13,7 +13,7 @@ import time
 import pytest
 
 from fake_body import FakeBody
-from praxion_brain import survival
+from praxion_brain import survival, speech
 from praxion_brain.conditions import evaluate, is_verifiable
 from praxion_brain.console.hub import Console
 from praxion_brain.evidence import Evidence
@@ -1044,5 +1044,97 @@ def test_the_survival_back_off_doubles_and_a_success_resets_it(tmp_path) -> None
             assert last == now + survival.SURVIVAL_BACKOFF_MAX_TICKS
             finish("done")
             assert "get_food" not in loop._survival_failures
+        finally:
+            loop.close()
+
+
+# -- night work: a pickaxe body mines instead of sheltering (decision
+# 2026-11-13 "night mining", run B) ----------------------------------------- #
+PICK = {"stone_pickaxe": 1}
+#: A pickaxe and a sword: the body is armed *and* able to work, which is the
+#: case that used to start ``night_watch`` over a running shelter.
+PICK_AND_SWORD = {"stone_pickaxe": 1, "stone_sword": 1}
+
+
+def test_night_work_is_a_pickaxe_healthy_body_at_night() -> None:
+    assert survival.night_work(NIGHT, PICK) is True
+    assert survival.night_work(NIGHT, {"wooden_pickaxe": 1}) is True
+    assert survival.night_work(NIGHT, {"minecraft:iron_pickaxe": 1}) is True
+    # No pickaxe, or none left.
+    assert survival.night_work(NIGHT, {}) is False
+    assert survival.night_work(NIGHT, SWORD) is False
+    assert survival.night_work(NIGHT, {"stone_pickaxe": 0}) is False
+    # Day, or a body without a clock.
+    assert survival.night_work({**NIGHT, "is_night": False}, PICK) is False
+    assert survival.night_work({**NIGHT, "is_night": None}, PICK) is False
+    # Hurt at or below the shelter threshold, or no health fact at all.
+    assert survival.night_work({**NIGHT, "health": survival.SHELTER_HEALTH}, PICK) is False
+    assert survival.night_work({**NIGHT, "health": survival.SHELTER_HEALTH - 1}, PICK) is False
+    assert survival.night_work({**NIGHT, "health": survival.SHELTER_HEALTH + 1}, PICK) is True
+    assert survival.night_work({**NIGHT, "health": None}, PICK) is False
+    # A desynchronised world has stale facts: no decision.
+    assert survival.night_work({**NIGHT, "world_valid": False}, PICK) is False
+    assert survival.night_work(None, PICK) is False
+    # The set is the work that needs no surface light.
+    assert {"get_cobblestone", "get_coal", "find_ore", "make_camp", "cook_food"} <= (
+        survival.NIGHT_WORK_SKILLS
+    )
+    assert "get_wood" not in survival.NIGHT_WORK_SKILLS
+    assert "find_village" not in survival.NIGHT_WORK_SKILLS
+    assert survival.SHELTER_SKILL not in survival.NIGHT_WORK_SKILLS
+
+
+def test_a_pickaxe_body_works_at_night_instead_of_sheltering() -> None:
+    assert survival.choose(NIGHT, PICK, CAT) is None, "night work: the planner keeps planning"
+    assert survival.night_hold(NIGHT, PICK) is None, "and nothing holds the pick"
+    # Without a pickaxe today's night is unchanged.
+    due = survival.choose(NIGHT, SWORD, CAT)
+    assert due is not None and due.skill == "night_watch"
+    assert survival.night_hold(NIGHT, {}) == "unarmed at night"
+    # Hurt: the shelter, exactly as before (the world check comes first).
+    hurt = {**NIGHT, "health": survival.SHELTER_HEALTH}
+    due = survival.choose(hurt, PICK, CAT)
+    assert due is not None and due.skill == "take_shelter"
+    # Hunger is unchanged: critical food still starts get_food.
+    due = survival.choose({**NIGHT, "food": survival.CRITICAL_FOOD_AT}, PICK, CAT)
+    assert due is not None and due.kind == "food"
+
+
+def test_a_live_shelter_goal_is_not_interrupted_by_night_work() -> None:
+    """The body healed (or the pickaxe arrived) mid-night: it is already sealed
+    in and its running shelter goal keeps the night."""
+    live = [
+        {"intent_id": 4, "tier": "survival", "skill": "take_shelter", "args": [], "state": "running"}
+    ]
+    facts = {**NIGHT, "sheltered": True}
+    assert survival.choose(facts, PICK_AND_SWORD, CAT, stack=live) is None
+    # Without night work the same snapshot names the armed night watch, which
+    # only the pickaxe rule keeps away from the running shelter.
+    due = survival.choose(facts, SWORD, CAT, stack=live)
+    assert due is not None and due.skill == "night_watch"
+
+
+def test_the_loop_works_at_night_and_says_it_once(tmp_path) -> None:
+    """The pickaxe body plans instead of sheltering; the night line is said once."""
+    facts = {"health": 20, "food": 20, "is_night": True, "inventory": dict(PICK)}
+    with FakeBody(skills=SKILLS, facts=facts) as body:
+        loop = _loop(tmp_path, body)  # its proposer raises: night work must plan
+        loop._paused = True
+        try:
+            loop.start()
+
+            def lines():
+                return [
+                    entry
+                    for entry in evidence_entries(loop, "narrate")
+                    if entry.get("topic") == "night_work"
+                ]
+
+            pump(loop, lines, what="the night line")
+            for _ in range(20):
+                loop.step(0.02)
+            assert len(lines()) == 1, "once per night"
+            assert lines()[0]["text"] == speech.night_work()
+            assert not evidence_entries(loop, "survival_goal"), "no shelter goal at night"
         finally:
             loop.close()

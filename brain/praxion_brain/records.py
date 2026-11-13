@@ -68,6 +68,11 @@ class PendingGoal:
     budget_ticks: Optional[int] = None
     #: The record a background admission opened; the play reuses it.
     record: Optional[GoalRecord] = None
+    #: Explicit skill arguments (a plan step, an operator task); they win over
+    #: the count the loop derives from the condition. ``None`` derives them.
+    args: Optional[list[str]] = None
+    #: The skill the planner named: Jev plays it when it scores it well enough.
+    hint: Optional[str] = None
 
 
 @dataclass
@@ -95,6 +100,9 @@ class OpenGoal:
     #: The per-goal body ticks the command was sent with; ``None`` was the
     #: loop's default. A stale-generation retry resends with the same budget.
     budget_ticks: Optional[int] = None
+    #: The explicit arguments the command was sent with (``None`` derived them);
+    #: a stale-generation retry resends the same ones.
+    args: Optional[list[str]] = None
 
     def ticks_since(self, tick: Optional[int]) -> Optional[int]:
         """Body ticks since the command was sent; ``None`` without a snapshot."""

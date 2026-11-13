@@ -1,0 +1,366 @@
+# Minecraft Wiki pages indexed by the local RAG (brain/praxion_brain/wiki/).
+# One English article title per line; `#` lines are comments (group headers).
+# Fetched by `python -m praxion_brain wiki fetch`; titles that do not resolve
+# with HTTP 200 are dropped and reported (local/wiki/fetch_report.json).
+#
+# Chosen for a survival agent: ores and their distribution, tools/armor/weapons,
+# smelting and fuel, crafting basics, light and shelter, hunger and food,
+# farming and breeding, hostile and passive mobs, villages and trading,
+# overworld structures and biomes, day-night and spawn mechanics, mining and
+# shelter tutorials, the Nether and the End.
+
+# --- Core mechanics -------------------------------------------------------
+Daylight cycle
+Difficulty
+Health
+Hunger
+Damage
+Explosion
+Light
+Mob spawning
+World spawn
+Survival
+Breaking
+Crafting
+Smelting
+Durability
+Experience
+Tiers
+Enchanting
+Enchantment
+Enchanting table
+Anvil
+Brewing
+Bartering
+
+# --- Ores and their distribution -----------------------------------------
+Ore
+Ore vein
+Coal Ore
+Iron Ore
+Copper Ore
+Gold Ore
+Redstone Ore
+Lapis Lazuli Ore
+Diamond Ore
+Emerald Ore
+Nether Quartz Ore
+Nether Gold Ore
+Ancient Debris
+Deepslate
+Coal
+Charcoal
+Raw Iron
+Raw Copper
+Raw Gold
+Iron Ingot
+Copper Ingot
+Gold Ingot
+Diamond
+Emerald
+Redstone Dust
+Lapis Lazuli
+Nether Quartz
+Netherite Ingot
+Netherite Scrap
+
+# --- Tools, weapons and armor --------------------------------------------
+Pickaxe
+Axe
+Shovel
+Hoe
+Sword
+Bow
+Crossbow
+Shield
+Arrow
+Armor
+Helmet
+Chestplate
+Leggings
+Boots
+Elytra
+Fishing Rod
+Shears
+Flint and Steel
+Bucket
+Water Bucket
+Lava Bucket
+Milk Bucket
+Compass
+Lodestone
+Totem of Undying
+
+# --- Crafting, smelting and the base -------------------------------------
+Crafting Table
+Furnace
+Blast Furnace
+Smoker
+Campfire
+Torch
+Lantern
+Chest
+Barrel
+Bed
+Bookshelf
+Glass
+Ladder
+Boat
+Minecart
+Grindstone
+Smithing Table
+Composter
+Cauldron
+Bell
+Hay Bale
+Obsidian
+Crying Obsidian
+
+# --- Food, farming and animals -------------------------------------------
+Food
+Apple
+Bread
+Carrot
+Potato
+Baked Potato
+Beetroot
+Wheat
+Wheat Seeds
+Farmland
+Sugar Cane
+Pumpkin
+Melon
+Bone Meal
+Cake
+Cookie
+Steak
+Cooked Porkchop
+Cooked Chicken
+Cooked Mutton
+Cooked Rabbit
+Cooked Cod
+Cooked Salmon
+Golden Apple
+Golden Carrot
+Rotten Flesh
+Dried Kelp
+Mushroom Stew
+Sweet Berries
+Egg
+Breeding
+Taming
+Animal
+
+# --- Hostile and neutral mobs --------------------------------------------
+Creeper
+Zombie
+Skeleton
+Spider
+Cave Spider
+Enderman
+Witch
+Slime
+Magma Cube
+Ghast
+Blaze
+Zombified Piglin
+Piglin
+Piglin Brute
+Hoglin
+Zoglin
+Wither Skeleton
+Wither
+Ender Dragon
+Shulker
+Endermite
+Silverfish
+Phantom
+Drowned
+Husk
+Stray
+Pillager
+Vindicator
+Evoker
+Vex
+Ravager
+Guardian
+Elder Guardian
+Warden
+Breeze
+Bogged
+Creaking
+Zombie Villager
+
+# --- Passive mobs ---------------------------------------------------------
+Cow
+Mooshroom
+Pig
+Sheep
+Chicken
+Rabbit
+Horse
+Donkey
+Wolf
+Cat
+Ocelot
+Fox
+Panda
+Polar Bear
+Turtle
+Axolotl
+Bee
+Squid
+Glow Squid
+Dolphin
+Cod
+Salmon
+Tropical Fish
+Pufferfish
+Bat
+Llama
+Goat
+Frog
+Allay
+Camel
+Sniffer
+Armadillo
+Strider
+
+# --- Villages and trading -------------------------------------------------
+Village
+Villager
+Village mechanics
+Trading
+Workstation
+Raid
+Pillager Outpost
+Woodland Mansion
+Iron Golem
+Snow Golem
+Wandering Trader
+
+# --- Overworld structures -------------------------------------------------
+Stronghold
+Mineshaft
+Desert Pyramid
+Jungle Pyramid
+Shipwreck
+Ruined Portal
+Buried Treasure
+Ocean Monument
+Ancient City
+Trial Chambers
+Trail Ruins
+Igloo
+Swamp Hut
+Monster Room
+Amethyst Geode
+Fossil
+Desert Well
+End Portal
+
+# --- Biomes ---------------------------------------------------------------
+Plains
+Forest
+Birch Forest
+Dark Forest
+Taiga
+Old Growth Pine Taiga
+Snowy Plains
+Snowy Taiga
+Desert
+Savanna
+Jungle
+Swamp
+Badlands
+Beach
+Ocean
+Deep Ocean
+Warm Ocean
+River
+Mushroom Fields
+Windswept Hills
+Meadow
+Cherry Grove
+Grove
+Mangrove Swamp
+Ice Spikes
+Flower Forest
+Sunflower Plains
+Lush Caves
+Dripstone Caves
+Deep Dark
+Pale Garden
+Nether Wastes
+Crimson Forest
+Warped Forest
+Soul Sand Valley
+Basalt Deltas
+The End (biome)
+
+# --- Nether and End essentials -------------------------------------------
+Nether
+The End
+Nether portal
+Netherrack
+Soul Sand
+Soul Soil
+Glowstone
+Blackstone
+Basalt
+Nether Wart
+Blaze Rod
+Ender Pearl
+Eye of Ender
+End Stone
+Chorus Fruit
+End Crystal
+Respawn Anchor
+Nether Fortress
+Bastion Remnant
+End City
+
+# --- Survival tutorials (Tutorial: namespace) ----------------------------
+Tutorial:Mining
+Tutorial:Mining/Diamonds
+Tutorial:Mining/Ancient debris
+Tutorial:Mining/Ore veins
+Tutorial:Exploring caves
+Tutorial:Shelters
+Tutorial:Shelter types
+Tutorial:Safe home
+Tutorial:Building micro shelters
+Tutorial:Settlement guide
+Tutorial:Your first 10 minutes
+Tutorial:Beginner's guide
+Tutorial:The second day
+Tutorial:Hunger management
+Tutorial:Gathering food
+Tutorial:Crop farming
+Tutorial:Animal farming
+Tutorial:Smelting
+Tutorial:Mob farm
+Tutorial:Mob grinder
+Tutorial:Iron golem farming
+Tutorial:Village survival
+Tutorial:Villager trading hall
+Tutorial:Trading
+Tutorial:Combat
+Tutorial:Navigation
+Tutorial:Nether portals
+Tutorial:Nether survival
+Tutorial:End survival
+Tutorial:Defeating the ender dragon
+Tutorial:Locating a stronghold
+Tutorial:Defeating a stronghold
+Tutorial:Exploring a mineshaft
+Tutorial:Looting temples
+Tutorial:Looting a shipwreck
+Tutorial:Exploring a woodland mansion
+Tutorial:Conquering a pillager outpost
+Tutorial:Exploring the deep dark and ancient city
+Tutorial:Defeating the wither
+Tutorial:Curing a zombie villager
+Tutorial:Zombie siege defense
+Tutorial:Best enchantments guide
+Tutorial:Time-saving tips

@@ -22,6 +22,7 @@ from praxion_brain.port import (
     FrameDecoder,
     FrameTooLarge,
     Hello,
+    Nearby,
     Ping,
     Pop,
     PortClient,
@@ -712,3 +713,42 @@ def test_resync_is_marked_before_the_request_is_sent(client: PortClient) -> None
     assert seen == [True]
     assert client.resync_count == 1
     wait_snapshot(client)
+
+
+def test_snapshot_nearby_is_additive_and_optional() -> None:
+    """``nearby`` is the body's perception (decision 2026-11-12 "Demo night")."""
+    plain = parse_body_message(
+        {"t": "snapshot", "seq": 0, "tick": 0, "generation": 0, "facts": {}}
+    )
+    assert plain.facts.nearby is None
+
+    found = parse_body_message(
+        {
+            "t": "snapshot",
+            "seq": 0,
+            "tick": 0,
+            "generation": 0,
+            "facts": {
+                "nearby": {
+                    "entities": {"cow": 2},
+                    "blocks": {"coal_ore": 3},
+                    "sounds": ["entity.creeper.primed"],
+                }
+            },
+        }
+    )
+    assert found.facts.nearby == Nearby(
+        entities={"cow": 2}, blocks={"coal_ore": 3}, sounds=["entity.creeper.primed"]
+    )
+
+    partial = parse_body_message(
+        {
+            "t": "snapshot",
+            "seq": 0,
+            "tick": 0,
+            "generation": 0,
+            "facts": {"nearby": {"sounds": ["block.stone.break"]}},
+        }
+    )
+    assert partial.facts.nearby == Nearby(sounds=["block.stone.break"])
+    assert partial.facts.nearby.entities == {} and partial.facts.nearby.blocks == {}

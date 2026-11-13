@@ -64,11 +64,11 @@ CALL_PROVIDERS: dict[str, str] = {
 }
 #: (calls allowed, window seconds) per call class.
 DEFAULT_RATE_LIMITS: dict[str, tuple[int, float]] = {
-    "propose": (30, 3600.0),
-    "route": (120, 3600.0),
+    "propose": (240, 3600.0),
+    "route": (600, 3600.0),
     "write": (6, 3600.0),
     "admission": (6, 3600.0),
-    "map": (60, 3600.0),
+    "map": (240, 3600.0),
 }
 #: Consecutive errors that open the breaker.
 BREAKER_THRESHOLD = 3

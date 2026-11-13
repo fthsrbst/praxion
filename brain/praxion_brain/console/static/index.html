@@ -7,41 +7,95 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 8a4 4 0 0 1 4-4h10a10 10 0 0 1 10 10v10a4 4 0 0 1-4 4H14A10 10 0 0 1 4 18Z' fill='%231f4d3a'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="inventory.css">
+  <link rel="stylesheet" href="voice.css">
 </head>
 <body>
   <header class="top">
     <div class="brand"><span class="mark" aria-hidden="true"></span>praxion</div>
+    <nav class="tabs" aria-label="Pages">
+      <a href="#live" data-page="live">Live</a>
+      <a href="#mind" data-page="mind">Mind</a>
+      <a href="#run" data-page="run">Run</a>
+      <a href="#skills" data-page="skills">Skills</a>
+      <a href="#wiki" data-page="wiki">Wiki</a>
+    </nav>
     <div class="top-meta">
       <span id="world" class="muted"></span>
       <span id="link" class="link" role="status"><i class="live-dot"></i><span>connecting</span></span>
     </div>
   </header>
 
-  <main class="bento">
-    <section id="hero" class="card hero" aria-label="Current mission"></section>
-    <section id="spend" class="card spend" aria-label="Spend"></section>
-    <section id="ladder" class="card wide" aria-label="Ladder"></section>
-    <section id="inventory" class="card wide inventory" aria-label="Inventory"></section>
-    <section id="feed" class="card feed" aria-label="Live feed"></section>
-    <section id="metrics" class="card metrics" aria-label="Metrics"></section>
-    <section id="skills" class="card wide" aria-label="Skills"></section>
+  <section id="run" class="run" aria-label="Run control" hidden>
+    <div class="run-head">
+      <span id="run-server" class="chip">Server: Idle</span>
+      <span id="run-bot" class="chip">Bot: Idle</span>
+      <span id="run-status" class="run-status" role="status" aria-live="polite"></span>
+    </div>
+    <div class="run-actions">
+      <div class="run-pair" role="group" aria-label="Server">
+        <button id="run-start-server" type="button" class="btn primary">Start server</button>
+        <button id="run-stop-server" type="button" class="btn danger">Stop server</button>
+      </div>
+      <div class="run-pair" role="group" aria-label="Bot">
+        <button id="run-start-bot" type="button" class="btn primary">Start bot</button>
+        <button id="run-stop-bot" type="button" class="btn danger">Stop bot</button>
+      </div>
+      <button id="run-join" type="button" class="btn">Join Minecraft</button>
+      <code id="run-address" class="run-address" hidden></code>
+    </div>
+  </section>
+
+  <main>
+    <section id="page-live" class="page" aria-label="Live">
+      <div class="bento">
+        <section id="hero" class="card hero" aria-label="Current mission"></section>
+        <section id="thought" class="card thought" aria-label="Thought"></section>
+        <section id="plan" class="card plan" aria-label="Plan"></section>
+        <section id="vitals" class="card vitals-card" aria-label="Body"></section>
+        <section id="surroundings" class="card surroundings" aria-label="Surroundings" hidden></section>
+        <section id="inventory" class="card inventory" aria-label="Inventory"></section>
+        <section id="feed" class="card feed" aria-label="Live feed"></section>
+      </div>
+    </section>
+    <section id="page-mind" class="page" aria-label="Mind" hidden></section>
+    <section id="page-run" class="page" aria-label="Run" hidden></section>
+    <section id="page-skills" class="page" aria-label="Skills" hidden></section>
+    <section id="page-wiki" class="page" aria-label="Wiki" hidden></section>
   </main>
 
-  <form id="dock" class="dock" autocomplete="off">
-    <label class="sr" for="goal-text">Goal</label>
-    <input id="goal-text" type="text" placeholder="What to do, e.g. get a furnace" maxlength="200">
-    <label class="sr" for="goal-cond">Condition (required)</label>
-    <input id="goal-cond" type="text" class="mono" required placeholder="e.g. has(furnace) or count(cobblestone) >= 16" maxlength="200">
-    <button type="submit" class="btn primary" id="give">Give goal</button>
-    <button type="button" class="btn" id="pause-btn">Pause</button>
-    <button type="button" class="btn danger" id="stop-btn">Stop goal</button>
-    <span id="dock-note" class="dock-note" role="status" aria-live="polite"></span>
-  </form>
+  <div id="dock" class="dock">
+    <div class="dock-lines" aria-live="polite">
+      <span id="dock-note" class="dock-note" role="status"></span>
+      <span id="dock-reply" class="dock-reply"></span>
+      <span id="dock-voice-lines" class="dock-voice-lines"></span>
+    </div>
+    <form id="goal-form" class="dock-adv" autocomplete="off" hidden>
+      <label class="sr" for="goal-text">Goal</label>
+      <input id="goal-text" type="text" placeholder="What to do, e.g. get a furnace" maxlength="200">
+      <label class="sr" for="goal-cond">Condition (required)</label>
+      <input id="goal-cond" type="text" class="mono" required placeholder="e.g. has(furnace) or count(cobblestone) >= 16" maxlength="200">
+      <button type="submit" class="btn primary" id="give">Give goal</button>
+    </form>
+    <div class="dock-row">
+      <div id="dock-voice" class="dock-voice"></div>
+      <form id="task-form" class="task-form" autocomplete="off">
+        <label class="sr" for="task-text">Task for Praxion</label>
+        <input id="task-text" type="text" placeholder="Tell Praxion what to do: e.g. köy bul, 8 taş getir, kamp kur" maxlength="400">
+        <button type="submit" class="btn primary" id="task-send">Send</button>
+      </form>
+      <button type="button" class="btn" id="adv-btn" aria-expanded="false" aria-controls="goal-form">Advanced</button>
+      <button type="button" class="btn" id="pause-btn">Pause</button>
+      <button type="button" class="btn danger" id="stop-btn">Stop goal</button>
+    </div>
+  </div>
 
   <div id="scrim" class="scrim" hidden></div>
   <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="Inspector" hidden tabindex="-1"></aside>
 
   <script type="module" src="app.js"></script>
+  <script type="module" src="voice.js"></script>
 </body>
 </html>

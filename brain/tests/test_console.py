@@ -399,9 +399,9 @@ def test_the_inventory_card_renders_slots_with_lettered_tiles() -> None:
 
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="inventory"' in index
-    app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    assert 'from "./inventory.js"' in app
-    assert "renderInventory(s.facts, s.snapshot_at)" in app
+    live = (STATIC_DIR / "pages" / "live.js").read_text(encoding="utf-8")
+    assert 'from "../inventory.js"' in live
+    assert "renderInventory(s.facts, s.snapshot_at)" in live
     panel = (STATIC_DIR / "inventory.js").read_text(encoding="utf-8")
     # The layout is the body's 46-slot one, written once here and pinned in the
     # Rust world test (critique finding 10).
@@ -966,3 +966,154 @@ def test_the_task_action_takes_free_text_without_a_condition(server, console) ->
     for bad in ({"action": "task"}, {"action": "task", "text": "   "}, {"action": "task", "text": "x" * 201}):
         status, _ = call(server, "POST", "/api/control", bad)
         assert status == 400
+
+
+# --------------------------------------------------------------------------- #
+# The redesigned pages: their endpoints and their static modules
+# --------------------------------------------------------------------------- #
+def test_exchanges_list_newest_first_with_a_summary_and_family_filter(server, console) -> None:
+    console.evidence.write("plan_request", provider="openai", model="m", briefing="b", system="s")
+    console.evidence.write(
+        "plan_response", provider="openai", model="m", parsed={"thought": "t", "goals": []},
+        input_tokens=100, output_tokens=20,
+    )
+    console.evidence.write("router_request", provider="typesafe", model="jev", state={}, questions={})
+    console.evidence.write("router_response", provider="typesafe", model="jev", scores={"get_wood": 0.9}, input_tokens=10, output_tokens=2)
+    status, body = call(server, "GET", "/api/exchanges")
+    assert status == 200
+    assert [row["kind"] for row in body["items"]] == ["router", "plan"]
+    assert body["summary"]["all"]["count"] == 2
+    assert set(body["summary"]["by_kind"]) == {"plan", "router"}
+    status, only = call(server, "GET", "/api/exchanges?kinds=plan")
+    assert status == 200
+    assert [row["kind"] for row in only["items"]] == ["plan"]
+
+
+def test_goals_timeline_without_evidence_is_empty_not_an_error(server) -> None:
+    status, body = call(server, "GET", "/api/goals/timeline")
+    assert status == 200
+    assert body["goals"] == []
+    assert body["idle"]["busy_s"] == 0
+
+
+def test_goals_timeline_places_a_goal_on_the_time_axis(server, console) -> None:
+    console.evidence.write("loop_started")
+    console.evidence.write("command_sent", command_id="c1", goal_id="g1", skill="get_wood", condition="has(#logs)", text="logs")
+    console.evidence.write("goal_finished", goal_id="g1", command_id="c1", status="done", ticks=40, rungs=1)
+    status, body = call(server, "GET", "/api/goals/timeline")
+    assert status == 200
+    assert [goal["skill"] for goal in body["goals"]] == ["get_wood"]
+    assert body["goals"][0]["status"] == "done"
+    assert body["goals"][0]["t1"] >= body["goals"][0]["t0"]
+
+
+def test_wiki_search_says_when_no_index_is_available(server, monkeypatch) -> None:
+    import praxion_brain.wiki as wiki
+
+    monkeypatch.setattr(wiki, "_state", lambda: None)
+    status, body = call(server, "GET", "/api/wiki/search?q=furnace")
+    assert status == 200
+    assert body == {"available": False, "results": []}
+
+
+def test_wiki_search_returns_cards_and_clamps_the_query(server, monkeypatch) -> None:
+    import praxion_brain.wiki as wiki
+
+    seen = []
+
+    def fake_search(query, k):
+        seen.append((query, k))
+        return [wiki.Snippet(title="Furnace", text="Smelts ore.", url="https://minecraft.wiki/w/Furnace", score=0.91234567)]
+
+    monkeypatch.setattr(wiki, "_state", lambda: object())
+    monkeypatch.setattr(wiki, "search", fake_search)
+    status, body = call(server, "GET", "/api/wiki/search?q=" + "f" * 500)
+    assert status == 200
+    assert body["available"] is True
+    assert body["results"] == [{"title": "Furnace", "text": "Smelts ore.", "url": "https://minecraft.wiki/w/Furnace", "score": 0.9123}]
+    assert len(seen[0][0]) == 200
+    # An empty query asks only whether an index exists: no search is run.
+    status, empty = call(server, "GET", "/api/wiki/search?q=")
+    assert empty == {"available": True, "results": []}
+    assert len(seen) == 1
+
+
+def test_state_carries_the_surroundings_only_when_the_body_sent_them(server, console) -> None:
+    console.publish({"world_id": "w", "state": "idle", "facts": {"nearby": {"entities": {"zombie": 2, "bad": 0}, "blocks": {}, "sounds": ["a", "", "b"]}}})
+    status, body = call(server, "GET", "/api/state")
+    assert body["nearby"] == {"entities": {"zombie": 2}, "blocks": {}, "sounds": ["a", "b"]}
+    console.publish({"world_id": "w", "state": "idle", "facts": {"inventory": {}}})
+    assert call(server, "GET", "/api/state")[1]["nearby"] is None
+
+
+STATIC = Path(__file__).resolve().parents[1] / "praxion_brain" / "console" / "static"
+PAGE_NAMES = ("live", "mind", "run", "skills", "wiki")
+
+
+def test_the_shell_has_a_tab_and_a_section_for_every_page() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    for name in PAGE_NAMES:
+        assert f'data-page="{name}"' in html
+        assert f'id="page-{name}"' in html
+        assert f"./pages/{name}.js" in app
+        assert (STATIC / "pages" / f"{name}.js").is_file()
+
+
+def test_every_element_id_the_modules_look_up_exists_in_the_shell() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    used = set()
+    for path in [*STATIC.glob("*.js"), *(STATIC / "pages").glob("*.js")]:
+        used |= set(re.findall(r'\bel\("([a-z0-9-]+)"\)', path.read_text(encoding="utf-8")))
+    # Built by a module itself, not by the shell.
+    assert used - ids == set()
+
+
+def test_relative_imports_resolve_to_real_files() -> None:
+    for path in [*STATIC.glob("*.js"), *(STATIC / "pages").glob("*.js")]:
+        for target in re.findall(r'(?:from |import\()\s*"(\.{1,2}/[^"]+)"', path.read_text(encoding="utf-8")):
+            assert (path.parent / target).resolve().is_file(), f"{path.name} imports {target}"
+
+
+def test_no_module_builds_a_tag_with_a_selector_the_helper_does_not_parse() -> None:
+    # h("input#id") would create an element literally named "input#id".
+    for path in [*STATIC.glob("*.js"), *(STATIC / "pages").glob("*.js")]:
+        assert not re.search(r'\bh\("[a-z0-9]*#', path.read_text(encoding="utf-8")), path.name
+
+
+def test_every_static_module_passes_node_check() -> None:
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    for path in [*STATIC.glob("*.js"), *(STATIC / "pages").glob("*.js")]:
+        result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{path.name}: {result.stderr}"
+
+
+def test_the_dock_is_one_task_box_with_the_goal_form_behind_advanced() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert 'id="task-text"' in html
+    assert 'placeholder="Tell Praxion what to do: e.g. köy bul, 8 taş getir, kamp kur"' in html
+    assert 'id="adv-btn"' in html and 'id="pause-btn"' in html and 'id="stop-btn"' in html
+    # The explicit goal form stays, hidden until Advanced is pressed.
+    assert re.search(r'<form id="goal-form"[^>]*\bhidden\b', html)
+    # The voice controls are part of the dock row, not a second fixed card.
+    row = html[html.index('class="dock-row"'):]
+    assert 'id="dock-voice"' in row.split("</div>")[0] + "</div>"
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert 'action: "task"' in app
+    assert "praxion:voice-task" in app and "VOICE_SEND_MS = 2500" in app
+    voice = (STATIC / "voice.js").read_text(encoding="utf-8")
+    assert 'new CustomEvent("praxion:voice-task"' in voice and "cancelable: true" in voice
+    # Without a handler voice.js keeps its direct request.
+    assert 'postJSON("/api/control", { action: "task", text })' in voice
+
+
+def test_the_run_page_counts_its_skill_bars_from_the_timeline_it_draws() -> None:
+    run = (STATIC / "pages" / "run.js").read_text(encoding="utf-8")
+    assert "countBySkill(timeline" in run
+    assert "metrics.goals_by_skill" not in run

@@ -1,0 +1,112 @@
+/* Minecraft-like inventory tiles. Loaded after app.css: it keeps the console's
+   colours and layout, and restyles only the slot border and the icon itself.
+   Icons are `data:` PNGs from the local 26.3 client, painted with
+   `image-rendering: pixelated` so 16x16 textures stay crisp. */
+
+.slot {
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, .14);
+  background: var(--card-2);
+  box-shadow:
+    inset 2px 2px 0 rgba(0, 0, 0, .18),
+    inset -2px -2px 0 rgba(255, 255, 255, .55);
+}
+.slot.empty { opacity: .5; padding: 0; }
+.slot:not(.empty) {
+  background: hsl(var(--tile-hue) 45% 88%);
+  color: hsl(var(--tile-hue) 45% 22%);
+}
+/* A real texture needs a neutral, Minecraft-grey interior: the monogram tint
+   would show through the transparent pixels of the sprite. Same specificity as
+   `.slot:not(.empty)` above, so this later rule is the one that wins. */
+.slot.has-icon {
+  background: color-mix(in srgb, #8b8b8b 82%, var(--card-2));
+  color: #fff;
+}
+.slot.selected {
+  border-color: var(--accent);
+  box-shadow:
+    inset 2px 2px 0 rgba(0, 0, 0, .18),
+    inset -2px -2px 0 rgba(255, 255, 255, .45),
+    0 0 0 2px var(--accent-soft);
+}
+
+.slot .glyph { font: 700 12px var(--mono); }
+.slot .count {
+  z-index: 2;
+  color: #fff;
+  text-shadow: 1px 1px 0 #3f3f3f, -1px 1px 0 #3f3f3f, 0 0 2px #000;
+}
+
+/* The icon covers the letter; the letter stays in the DOM (not `display:
+   none`) so the tile keeps its accessible text when a texture is present. */
+.inv-icon { position: absolute; inset: 4px; display: none; pointer-events: none; }
+.slot.has-icon .inv-icon { display: block; }
+.slot.has-icon .glyph {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.slot.loading .glyph { opacity: .55; }
+
+.inv-icon.sprite {
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  image-rendering: pixelated;
+}
+
+.inv-icon .face {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  image-rendering: pixelated;
+  transform-origin: 0 0;
+}
+/* Three 2D matrices project each whole face texture onto its rhombus: the
+   unit square maps to the quad instead of clipping a cropped part of it.
+   The face textures are the model's own up/north/east textures (server
+   side), so logs show end grain on top and bark at the sides. */
+.inv-icon .face.top {
+  transform: translate(50%, 0) matrix(.5, .25, -.5, .25, 0, 0);
+  filter: brightness(1.14);
+}
+.inv-icon .face.left {
+  transform: translate(0, 25%) matrix(.5, .25, 0, .5, 0, 0);
+  filter: brightness(.88);
+}
+.inv-icon .face.right {
+  transform: translate(50%, 50%) matrix(.5, -.25, 0, .5, 0, 0);
+  filter: brightness(.72);
+}
+
+@media (prefers-color-scheme: dark) {
+  .slot {
+    box-shadow:
+      inset 2px 2px 0 rgba(0, 0, 0, .5),
+      inset -2px -2px 0 rgba(255, 255, 255, .14);
+  }
+  .slot.selected {
+    box-shadow:
+      inset 2px 2px 0 rgba(0, 0, 0, .5),
+      inset -2px -2px 0 rgba(255, 255, 255, .12),
+      0 0 0 2px var(--accent-soft);
+  }
+}
+
+/* The grid tracks already shrink (minmax(0, 40px)); a tighter gap keeps nine
+   slots on one row on a phone-width browser. */
+@media (max-width: 480px) {
+  .slots, .armour { gap: 4px; }
+  .slot .count { font-size: 10px; }
+}

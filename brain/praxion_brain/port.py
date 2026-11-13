@@ -131,6 +131,21 @@ class Slot(_Message):
     count: int = Field(ge=0, le=U32_MAX)
 
 
+class Nearby(_Message):
+    """What the body perceives around it (decision 2026-11-12 "Demo night").
+
+    ``entities`` counts entity kinds within 32 blocks of the eyes, ``blocks``
+    counts notable known blocks within 16 blocks, ``sounds`` are the distinct
+    sound ids heard within 16 blocks lately, newest first. All three are
+    optional on the wire: a body that does not send ``nearby`` leaves
+    :attr:`Facts.nearby` at ``None``.
+    """
+
+    entities: Dict[str, int] = Field(default_factory=dict)
+    blocks: Dict[str, int] = Field(default_factory=dict)
+    sounds: list[str] = Field(default_factory=list)
+
+
 class Facts(_Message):
     """The body facts the brain reads from a snapshot."""
 
@@ -154,6 +169,8 @@ class Facts(_Message):
     #: The body is sealed in its shelter (decision 2026-11-10 "A sealed shelter
     #: now", ``praxion_facts::sheltered``). The body sends it only when true.
     sheltered: bool = False
+    #: The surroundings; the body omits the whole key when nothing is near.
+    nearby: Optional[Nearby] = None
 
 
 class Snapshot(_Message):
@@ -913,6 +930,7 @@ __all__ = [
     "Hello",
     "KEEPALIVE_INTERVAL_S",
     "MAX_FRAME_BYTES",
+    "Nearby",
     "Ping",
     "Pop",
     "PortClient",

@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
 from pathlib import Path
 
 from . import config, needs
 from .admission import admit
-from .console.hub import Console
+from .console.run import SessionManager, build_runtime
 from .console.server import DEFAULT_PORT, ConsoleServer
 from .evidence import Evidence
 from .goal import Goal
-from .governor import Governor
 from .ledger import BudgetExceeded, Ledger
-from .loop import Loop
 from .memory import Memory
-from .port import PortClient
 from .router import route
 from .skills import check as run_check
 from .skills import load_catalog
@@ -100,52 +99,100 @@ def _cmd_spent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_wiki(args: argparse.Namespace) -> int:
+    from .wiki import commands as wiki_commands
+
+    return wiki_commands.run(args.action, args.query, limit=args.limit)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
+    world_id = args.world or "default"
     ledger = Ledger()
     evidence = Evidence(config.local_brain_dir())
-    world_id = args.world or "default"
     memory = Memory(world_id, evidence=evidence)
     catalog = load_catalog()
     # The recipe export keeps the proposer from stocking what it already holds.
     # Absent: today's behaviour. From another jar: a startup error (regenerate
     # it with `praxion-body export-gamedata`).
     gamedata = needs.load()
+    runtime = build_runtime(
+        port=args.port,
+        host=args.host,
+        world_id=world_id,
+        evidence=evidence,
+        ledger=ledger,
+        memory=memory,
+        catalog=catalog,
+        gamedata=gamedata,
+    )
     print(
         "gamedata: "
         + (f"jar {gamedata.jar_sha256[:12]}" if gamedata else "no export (need checks off)"),
         flush=True,
     )
-    governor = Governor(ledger, evidence=evidence)
-    port = PortClient(args.port, host=args.host)
-    console = Console(evidence=evidence, ledger=ledger, memory=memory, world_id=world_id)
     server = None
     if args.console_port != 0:
-        server = ConsoleServer(console, args.console_port).start()
+        server = ConsoleServer(runtime.console, args.console_port).start()
         print(f"console: {server.url}", flush=True)
-    loop = Loop(
-        port,
-        world_id=world_id,
-        memory=memory,
-        catalog=catalog,
-        ledger=ledger,
-        evidence=evidence,
-        governor=governor,
-        console=console,
-        gamedata=gamedata,
-    )
     print(
         f"loop: world {world_id}, port {args.host}:{args.port}, "
-        f"hard stop ${governor.hard_stop_usd:.2f}"
+        f"hard stop ${runtime.governor.hard_stop_usd:.2f}"
     )
-    loop.start()
+    runtime.loop.start()
     try:
-        loop.run()
+        runtime.loop.run()
     except KeyboardInterrupt:
         print("loop: interrupted")
     finally:
-        loop.close()
+        runtime.loop.close()
         if server is not None:
             server.shutdown()
+    return 0
+
+
+def _cmd_console(args: argparse.Namespace) -> int:
+    """Serve the console; Start server and Start bot own the local stack."""
+    manager = SessionManager(
+        seed=args.seed,
+        operator=args.operator,
+        peaceful=args.peaceful,
+    )
+    server = ConsoleServer(
+        port=args.console_port,
+        manager=manager,
+        ledger=manager.ledger,
+    ).start()
+    manager.attach_server(server)
+    print(
+        f"console: {server.url}\n"
+        f"run control: Start server opens seed {args.seed} "
+        f"({'peaceful' if args.peaceful else 'survival'}, operator {args.operator}); "
+        f"Start bot joins it; Join Minecraft works as soon as the server is ready",
+        flush=True,
+    )
+    done = threading.Event()
+
+    def stop(*_signal: object) -> None:
+        done.set()
+
+    previous_int = signal.signal(signal.SIGINT, stop)
+    previous_term = signal.signal(signal.SIGTERM, stop)
+    try:
+        # The HTTP threads do all the work; this thread is only the lifetime.
+        while not done.wait(0.5):
+            pass
+    finally:
+        # The handlers stay installed until teardown ends, so a signal that
+        # arrives while the session stops cannot surface as an exception. The
+        # HTTP server is closed even if the session cleanup raises.
+        try:
+            manager.shutdown()
+        finally:
+            try:
+                server.shutdown()
+            finally:
+                signal.signal(signal.SIGINT, previous_int)
+                signal.signal(signal.SIGTERM, previous_term)
     return 0
 
 
@@ -177,6 +224,20 @@ def build_parser() -> argparse.ArgumentParser:
     spent_parser = commands.add_parser("spent", help="print the ledger totals")
     spent_parser.set_defaults(func=_cmd_spent)
 
+    wiki_parser = commands.add_parser(
+        "wiki", help="local Minecraft Wiki RAG: fetch, build, search, eval"
+    )
+    wiki_parser.add_argument(
+        "action", choices=["fetch", "build", "search", "eval"], help="what to do"
+    )
+    wiki_parser.add_argument(
+        "query", nargs="?", default="", help="the question for `wiki search`"
+    )
+    wiki_parser.add_argument(
+        "--limit", type=int, default=None, help="fetch only the first N titles"
+    )
+    wiki_parser.set_defaults(func=_cmd_wiki)
+
     run_parser = commands.add_parser(
         "run", help="run the autonomous loop against a body port"
     )
@@ -194,6 +255,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="web console port on 127.0.0.1 (default: 8765; 0 disables it)",
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    console_parser = commands.add_parser(
+        "console",
+        help="serve the web console that starts and stops the local server and bot",
+    )
+    console_parser.add_argument(
+        "--console-port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="web console port on 127.0.0.1 (default: 8765; 0 picks an ephemeral port)",
+    )
+    console_parser.add_argument("--seed", type=int, default=303, help="the server seed")
+    console_parser.add_argument(
+        "--operator",
+        default="Fatih",
+        help="the player the bot obeys and Join starts the client as",
+    )
+    console_parser.add_argument(
+        "--peaceful",
+        action="store_true",
+        help="the old frozen daytime with no mobs (for debugging)",
+    )
+    console_parser.set_defaults(func=_cmd_console)
 
     return parser
 
