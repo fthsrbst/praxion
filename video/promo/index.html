@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Praxion promo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #0b100d; --ink: #f2f5f1; --mint: #6fcf97; --mint-deep: #1f4d3a; --paper: #f7f6f1; --paper-ink: #17201b; --warn: #e2a25a; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); color: var(--ink); font-family: Inter, system-ui, sans-serif; }
+  .stage { position: absolute; inset: 0; overflow: hidden; }
+  .layer { position: absolute; inset: 0; opacity: 0; will-change: opacity, transform; }
+  .fill { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(5,8,6,.25) 0%, rgba(5,8,6,.05) 40%, rgba(5,8,6,.82) 100%); }
+  .display { font-family: "Bricolage Grotesque", Inter, sans-serif; font-weight: 800; letter-spacing: -0.02em; }
+  .mark { display: inline-block; width: 1em; height: 1em; background: var(--mint); border-radius: 58% 42% 55% 45% / 52% 60% 40% 48%; }
+
+  /* title */
+  #title .lockup { position: absolute; left: 120px; top: 150px; display: flex; align-items: center; gap: 36px; font-size: 190px; }
+  #title .tag { position: absolute; left: 128px; top: 400px; font-size: 44px; font-weight: 500; max-width: 900px; line-height: 1.25; color: #dfe7e1; }
+
+  /* chat bubble + status card (the source video's two recurring devices, redrawn) */
+  .chat { position: absolute; left: 110px; top: 110px; background: rgba(12,18,14,.82); border: 2px solid rgba(255,255,255,.14); border-radius: 26px; padding: 26px 34px; font: 500 44px/1.2 "JetBrains Mono", monospace; backdrop-filter: blur(6px); min-width: 300px; }
+  .chat small { display: block; font: 600 22px Inter, sans-serif; color: var(--mint); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 10px; }
+  .caret { display: inline-block; width: .55em; height: 1em; background: var(--mint); vertical-align: -0.12em; margin-left: 4px; }
+  .card { position: absolute; inset: 0; background: var(--paper); color: var(--paper-ink); display: flex; align-items: center; justify-content: center; }
+  .card .line { display: flex; align-items: center; gap: 34px; font-size: 76px; font-weight: 600; letter-spacing: -0.015em; }
+  .card .mark { font-size: 70px; background: var(--mint-deep); }
+
+  /* plan */
+  #plan .thought { position: absolute; left: 150px; top: 150px; max-width: 1500px; font-size: 62px; line-height: 1.2; }
+  #plan .label, .eyebrow { font: 600 26px Inter, sans-serif; letter-spacing: .14em; text-transform: uppercase; color: var(--mint); margin-bottom: 22px; }
+  #plan .steps { position: absolute; left: 150px; right: 150px; bottom: 170px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 26px; }
+  .step { border-radius: 28px; padding: 30px 32px; background: rgba(255,255,255,.06); border: 2px solid rgba(255,255,255,.1); font-size: 40px; font-weight: 600; }
+  .step span { display: block; font: 500 24px "JetBrains Mono", monospace; color: #9fb3a6; margin-top: 10px; }
+  .step.on { background: var(--mint); color: #08110c; border-color: var(--mint); }
+  .step.on span { color: #173d2c; }
+  .step.done { border-color: var(--mint); color: var(--mint); }
+
+  /* senses */
+  .chips { position: absolute; left: 110px; bottom: 210px; display: flex; flex-direction: column; gap: 18px; }
+  .chips .row { display: flex; gap: 16px; align-items: center; }
+  .chips .k { font: 600 24px Inter, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: #cfd9d2; width: 190px; }
+  .chip { padding: 14px 26px; border-radius: 999px; background: rgba(12,18,14,.85); border: 2px solid rgba(255,255,255,.16); font-size: 34px; font-weight: 600; }
+  .chip.hot { background: var(--warn); color: #1d1206; border-color: var(--warn); }
+
+  /* skill */
+  #skill { background: radial-gradient(1200px 700px at 30% 20%, #14241b, var(--bg)); }
+  #skill .code { position: absolute; left: 150px; top: 230px; width: 1120px; border-radius: 28px; background: #0f1713; border: 2px solid rgba(255,255,255,.1); padding: 44px 50px; font: 500 34px/1.55 "JetBrains Mono", monospace; white-space: pre; color: #d7e2da; min-height: 560px; }
+  #skill .code b { color: var(--mint); font-weight: 500; }
+  #skill .side { position: absolute; left: 1340px; top: 230px; right: 120px; display: flex; flex-direction: column; gap: 22px; }
+  .badge { border-radius: 24px; padding: 26px 30px; font-size: 34px; font-weight: 600; background: rgba(255,255,255,.06); border: 2px solid rgba(255,255,255,.1); }
+  .badge.ok { background: var(--mint); color: #08110c; border-color: var(--mint); }
+  #skill .eyebrow { position: absolute; left: 150px; top: 150px; }
+
+  /* dashboard */
+  #dash { background: var(--bg); }
+  #dash .frame { position: absolute; left: 170px; top: 90px; width: 1580px; height: 889px; border-radius: 28px; overflow: hidden; border: 2px solid rgba(255,255,255,.14); box-shadow: 0 50px 140px rgba(0,0,0,.6); }
+  #dash .frame img { position: absolute; left: 0; top: 0; width: 150%; transform-origin: 0 0; }
+
+  /* progress */
+  .rungs { position: absolute; left: 110px; right: 110px; bottom: 210px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
+  .rung { border-radius: 26px; padding: 26px 30px; font-size: 46px; font-weight: 700; background: rgba(12,18,14,.85); border: 2px solid rgba(255,255,255,.16); font-family: "Bricolage Grotesque", sans-serif; }
+  .rung.on { background: var(--mint); color: #08110c; border-color: var(--mint); }
+
+  /* cta */
+  #cta .center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px; }
+  #cta .lockup { display: flex; align-items: center; gap: 32px; font-size: 170px; }
+  #cta .line { font-size: 60px; font-weight: 500; color: #e6ede8; }
+  #cta .stack { font: 500 28px "JetBrains Mono", monospace; color: #9fb3a6; letter-spacing: .04em; margin-top: 26px; }
+
+  /* captions */
+  #caption { position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; opacity: 0; }
+  #caption span { display: inline-block; max-width: 1500px; padding: 16px 30px; border-radius: 18px; background: rgba(6,10,8,.78); font-size: 38px; font-weight: 500; line-height: 1.3; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="layer" id="title">
+    <img class="fill bg" src="art/keyart.png" alt="">
+    <div class="shade" style="background: linear-gradient(90deg, rgba(5,8,6,.88) 0%, rgba(5,8,6,.45) 45%, rgba(5,8,6,0) 75%)"></div>
+    <div class="lockup display"><i class="mark"></i><span>Praxion</span></div>
+    <div class="tag" data-tr="Minecraft'ı insan gibi oynayan, oynarken kendi becerilerini yazan ajan." data-en="The agent that plays Minecraft like a person and writes its own skills while it plays."></div>
+  </div>
+
+  <div class="layer" id="brief">
+    <img class="fill footage" data-clip="a" src="art/keyart.png" alt="">
+    <div class="shade"></div>
+    <div class="chat"><small data-tr="Sen, oyun sohbetinde" data-en="You, in game chat"></small><span class="typed" data-text="p: 8 taş getir"></span><i class="caret"></i></div>
+  </div>
+  <div class="layer card" id="card1"><div class="line"><i class="mark"></i><span data-tr="Anlaşıldı. Hedef: 8 kırıktaş." data-en="Understood. Goal: 8 cobblestone."></span></div></div>
+
+  <div class="layer" id="plan">
+    <img class="fill bg" src="art/mind.png" alt="" style="opacity:.55">
+    <div class="thought display"><div class="label" data-tr="Praxion düşünüyor" data-en="Praxion is thinking"></div><span class="typed" data-tr="Gece yaklaşıyor ve elim boş: önce odun, sonra kazma, sonra taş ve fırın." data-en="Night is close and my hands are empty: wood first, then a pickaxe, then stone and a furnace."></span></div>
+    <div class="steps">
+      <div class="step" data-i="0"><b data-tr="Odun topla" data-en="Get wood"></b><span>get_wood(4)</span></div>
+      <div class="step" data-i="1"><b data-tr="Kazma yap" data-en="Make a pickaxe"></b><span>get_wooden_pickaxe()</span></div>
+      <div class="step" data-i="2"><b data-tr="Taş çıkar" data-en="Mine stone"></b><span>get_cobblestone(8)</span></div>
+      <div class="step" data-i="3"><b data-tr="Fırın kur" data-en="Build a furnace"></b><span>get_furnace()</span></div>
+    </div>
+  </div>
+
+  <div class="layer" id="senses">
+    <img class="fill footage" data-clip="b" src="art/keyart.png" alt="">
+    <div class="shade"></div>
+    <div class="chips">
+      <div class="row"><span class="k" data-tr="Görüyor" data-en="Sees"></span><span class="chip" data-i="0" data-tr="koyun ×3" data-en="sheep ×3"></span><span class="chip" data-i="1" data-tr="meşe kütüğü ×14" data-en="oak log ×14"></span><span class="chip" data-i="2" data-tr="kömür cevheri ×2" data-en="coal ore ×2"></span></div>
+      <div class="row"><span class="k" data-tr="Duyuyor" data-en="Hears"></span><span class="chip hot" data-i="3" data-tr="creeper fitili" data-en="creeper fuse"></span></div>
+    </div>
+  </div>
+  <div class="layer card" id="card2"><div class="line"><i class="mark"></i><span data-tr="Duydum: creeper. Uzaklaşıyorum." data-en="Heard: creeper. Moving away."></span></div></div>
+
+  <div class="layer" id="skill">
+    <div class="eyebrow" data-tr="Beceri yok. Kendi yazıyor." data-en="No skill for this. It writes one."></div>
+    <div class="code"><span class="typed" data-html="1" data-text="skill <b>get_furnace</b>()&#10;  doc &quot;Have a furnace in the inventory.&quot;&#10;  rules:&#10;    count(furnace) >= 1 <b>-> done</b>&#10;    count(cobblestone) >= 8 and near(crafting_table, 4)&#10;        <b>-> craft(furnace)</b>&#10;    count(cobblestone) < 8 <b>-> do get_cobblestone(8)</b>&#10;    true <b>-> do get_crafting_table_near()</b>"></span><i class="caret"></i></div>
+    <div class="side">
+      <div class="badge" data-i="0" data-tr="Kurallar denetlendi" data-en="Rules checked"></div>
+      <div class="badge" data-i="1" data-tr="4 farklı dünyada denendi" data-en="Practised in 4 worlds"></div>
+      <div class="badge" data-i="2" data-tr="Hakem doğruladı" data-en="Verified by a referee"></div>
+      <div class="badge ok" data-i="3" data-tr="Beceri kabul edildi" data-en="Skill admitted"></div>
+    </div>
+  </div>
+
+  <div class="layer" id="dash">
+    <div class="frame"><img class="shot" data-i="0" src="shots/live.png" alt=""><img class="shot" data-i="1" src="shots/mind.png" alt=""><img class="shot" data-i="2" src="shots/run.png" alt=""></div>
+  </div>
+
+  <div class="layer" id="progress">
+    <img class="fill footage" data-clip="c" src="art/keyart.png" alt="">
+    <div class="shade"></div>
+    <div class="rungs">
+      <div class="rung" data-i="0" data-tr="Odun" data-en="Wood"></div>
+      <div class="rung" data-i="1" data-tr="Taş" data-en="Stone"></div>
+      <div class="rung" data-i="2" data-tr="Kömür" data-en="Coal"></div>
+      <div class="rung" data-i="3" data-tr="Demir" data-en="Iron"></div>
+    </div>
+  </div>
+
+  <div class="layer" id="cta">
+    <img class="fill bg" src="art/keyart.png" alt="">
+    <div class="shade" style="background: rgba(5,8,6,.74)"></div>
+    <div class="center">
+      <div class="lockup display"><i class="mark"></i><span>Praxion</span></div>
+      <div class="line" data-tr="Oynarken öğrenir." data-en="It learns while it plays."></div>
+      <div class="stack">LLM planner · TypeSafe Jev · ElevenLabs voice · self-written skills</div>
+    </div>
+  </div>
+
+  <div id="caption"><span></span></div>
+</div>
+
+<script>
+// One deterministic function of time: seek(t) sets every element from t alone,
+// so a frame renderer can step through the video without real-time playback.
+const params = new URLSearchParams(location.search);
+const LANG = params.get("lang") === "en" ? "en" : "tr";
+const CAPTIONS = params.get("captions") !== "0";
+let TIMELINE = null;   // filled from timeline.json: scene starts, VO windows, footage frame counts
+
+for (const node of document.querySelectorAll("[data-tr]")) node.textContent = node.dataset[LANG];
+
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const ease = (v) => { v = clamp(v); return v * v * (3 - 2 * v); };
+const span = (t, a, b) => clamp((t - a) / (b - a));
+const $ = (s, root = document) => root.querySelector(s);
+const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+
+function show(id, t, a, b, fade = 0.35) {
+  const node = document.getElementById(id);
+  const o = Math.min(ease(span(t, a, a + fade)), 1 - ease(span(t, b - fade, b)));
+  node.style.opacity = t < a || t > b ? 0 : o;
+  return node;
+}
+function typed(node, progress) {
+  const full = node.dataset.text || node.dataset[LANG] || "";
+  if (node.dataset.html) {
+    // Type by visible characters, keeping the markup of what is already shown.
+    const total = full.replace(/<[^>]+>/g, "").length;
+    let left = Math.round(total * clamp(progress)), out = "", open = false;
+    for (let i = 0; i < full.length && (left > 0 || open); i++) {
+      const ch = full[i];
+      if (ch === "<") open = true;
+      out += ch;
+      if (ch === ">") { open = false; continue; }
+      if (!open) left--;
+    }
+    node.innerHTML = out.replace(/<b>([^<]*)$/, "<b>$1</b>");
+  } else {
+    node.textContent = full.slice(0, Math.round(full.length * clamp(progress)));
+  }
+}
+function footage(img, t, a) {
+  const clip = TIMELINE.clips[img.dataset.clip];
+  if (!clip || !clip.frames) return;                       // no footage yet: the key art stays
+  const index = Math.min(clip.frames, 1 + Math.floor((t - a) * clip.fps));
+  const src = `footage/${img.dataset.clip}/${String(Math.max(1, index)).padStart(5, "0")}.jpg`;
+  if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+}
+function kenburns(img, t, a, b, from = 1.0, to = 1.08, dx = 0) {
+  const p = span(t, a, b);
+  img.style.transform = `scale(${from + (to - from) * p}) translateX(${dx * p}px)`;
+}
+
+function seek(t) {
+  const S = TIMELINE.scenes;   // {id: [start, end]}
+  let s;
+
+  s = S.s1; { const n = show("title", t, s[0], s[1]);
+    kenburns($(".bg", n), t, s[0], s[1], 1.02, 1.1, -18);
+    const p = ease(span(t, s[0] + 0.3, s[0] + 1.3));
+    $(".lockup", n).style.cssText = `opacity:${p};transform:translateY(${(1 - p) * 40}px)`;
+    const q = ease(span(t, s[0] + 1.4, s[0] + 2.4));
+    $(".tag", n).style.cssText = `opacity:${q};transform:translateY(${(1 - q) * 24}px)`; }
+
+  s = S.s2; { const cardAt = s[1] - 2.2; const n = show("brief", t, s[0], cardAt + 0.2, 0.25);
+    footage($(".footage", n), t, s[0]); kenburns($(".footage", n), t, s[0], s[1], 1.04, 1.1);
+    typed($(".typed", n), span(t, s[0] + 0.5, s[0] + 1.9));
+    $(".caret", n).style.opacity = Math.floor(t * 2.5) % 2 ? 1 : 0.15;
+    const c = show("card1", t, cardAt, s[1], 0.14); c.firstElementChild.style.transform = `scale(${0.96 + 0.04 * ease(span(t, cardAt, cardAt + 0.4))})`; }
+
+  s = S.s3; { const n = show("plan", t, s[0], s[1]);
+    kenburns($(".bg", n), t, s[0], s[1], 1.0, 1.06);
+    typed($(".typed", n), span(t, s[0] + 0.4, s[0] + 2.6));
+    const steps = $$(".step", n), dur = (s[1] - s[0] - 3.0) / steps.length;
+    steps.forEach((node, i) => { const at = s[0] + 2.6 + i * dur;
+      node.style.opacity = ease(span(t, s[0] + 1.6 + i * 0.18, s[0] + 2.0 + i * 0.18));
+      node.className = "step" + (t >= at + dur ? " done" : t >= at ? " on" : ""); }); }
+
+  s = S.s4; { const cardAt = s[1] - 2.2; const n = show("senses", t, s[0], cardAt + 0.2, 0.25);
+    footage($(".footage", n), t, s[0]); kenburns($(".footage", n), t, s[0], s[1], 1.03, 1.09);
+    $$(".chip", n).forEach((node) => { const i = +node.dataset.i, at = s[0] + 0.6 + i * 0.55, p = ease(span(t, at, at + 0.35));
+      node.style.cssText = `opacity:${p};transform:translateY(${(1 - p) * 18}px)`; });
+    const c = show("card2", t, cardAt, s[1], 0.14); c.firstElementChild.style.transform = `scale(${0.96 + 0.04 * ease(span(t, cardAt, cardAt + 0.4))})`; }
+
+  s = S.s5; { const n = show("skill", t, s[0], s[1]);
+    typed($(".typed", n), span(t, s[0] + 0.4, s[0] + 4.2));
+    $(".caret", n).style.opacity = Math.floor(t * 2.5) % 2 ? 1 : 0.15;
+    $$(".badge", n).forEach((node) => { const i = +node.dataset.i, at = s[0] + 4.0 + i * 0.7, p = ease(span(t, at, at + 0.35));
+      node.style.cssText = `opacity:${p};transform:translateX(${(1 - p) * 30}px)`; }); }
+
+  s = S.s6; { const n = show("dash", t, s[0], s[1]);
+    const shots = $$(".shot", n), each = (s[1] - s[0]) / shots.length;
+    shots.forEach((img, i) => { const a = s[0] + i * each, b = a + each;
+      img.style.opacity = i === 0 && t < b ? 1 : Math.min(ease(span(t, a - 0.3, a + 0.3)), i === shots.length - 1 ? 1 : 1 - ease(span(t, b - 0.3, b + 0.3)));
+      img.style.transform = `translate(${-250 - 120 * span(t, a, b)}px, ${-40 - 90 * span(t, a, b)}px)`; });
+    $(".frame", n).style.transform = `scale(${0.97 + 0.03 * ease(span(t, s[0], s[0] + 1.2))})`; }
+
+  s = S.s7; { const n = show("progress", t, s[0], s[1]);
+    footage($(".footage", n), t, s[0]); kenburns($(".footage", n), t, s[0], s[1], 1.03, 1.1);
+    const rungs = $$(".rung", n), each = (s[1] - s[0] - 1.6) / rungs.length;
+    rungs.forEach((node, i) => { const at = s[0] + 0.5 + i * each; const p = ease(span(t, s[0] + 0.2 + i * 0.12, s[0] + 0.6 + i * 0.12));
+      node.style.cssText = `opacity:${p}`; node.className = "rung" + (t >= at ? " on" : ""); }); }
+
+  s = S.s8; { const n = show("cta", t, s[0], s[1] + 1, 0.4);
+    kenburns($(".bg", n), t, s[0], s[1], 1.08, 1.02);
+    const p = ease(span(t, s[0] + 0.3, s[0] + 1.1));
+    $(".lockup", n).style.cssText = `opacity:${p};transform:scale(${0.94 + 0.06 * p})`;
+    const q = ease(span(t, s[0] + 1.0, s[0] + 1.8));
+    $(".line", n).style.opacity = q; $(".stack", n).style.opacity = ease(span(t, s[0] + 1.8, s[0] + 2.6)); }
+
+  const cap = document.getElementById("caption"); let text = "";
+  if (CAPTIONS) for (const line of TIMELINE.captions[LANG]) if (t >= line.start && t <= line.end) text = line.text;
+  cap.style.opacity = text ? 1 : 0; if (text) cap.firstElementChild.textContent = text;
+}
+
+window.ready = fetch("timeline.json").then((r) => r.json()).then(async (data) => {
+  TIMELINE = data;
+  await document.fonts.ready;
+  seek(0);
+});
+window.seek = seek;
+if (params.get("play")) window.ready.then(() => { const t0 = performance.now(); (function tick() { seek((performance.now() - t0) / 1000 % TIMELINE.duration); requestAnimationFrame(tick); })(); });
+</script>
+</body>
+</html>

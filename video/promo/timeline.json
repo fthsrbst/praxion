@@ -1,0 +1,208 @@
+{
+ "fps": 30,
+ "duration": 54.375,
+ "scenes": {
+  "s1": [
+   0.0,
+   8.055
+  ],
+  "s2": [
+   8.055,
+   13.42
+  ],
+  "s3": [
+   13.42,
+   19.574
+  ],
+  "s4": [
+   19.574,
+   27.293
+  ],
+  "s5": [
+   27.293,
+   35.216
+  ],
+  "s6": [
+   35.216,
+   42.935
+  ],
+  "s7": [
+   42.935,
+   49.039
+  ],
+  "s8": [
+   49.039,
+   54.375
+  ]
+ },
+ "captions": {
+  "tr": [
+   {
+    "start": 0.45,
+    "end": 7.08,
+    "text": "Bu, Praxion. Minecraft'ı insan gibi oynayan ve oynarken kendi becerilerini yazan bir yapay zekâ ajanı."
+   },
+   {
+    "start": 8.505,
+    "end": 10.77,
+    "text": "Ona tek bir cümle söylemen yeter."
+   },
+   {
+    "start": 13.87,
+    "end": 16.924,
+    "text": "Önce plan yapar, nedenini söyler, sonra oynar."
+   },
+   {
+    "start": 20.024,
+    "end": 23.543,
+    "text": "Etrafını görür, sesleri duyar, tehlikeden kaçar."
+   },
+   {
+    "start": 27.743,
+    "end": 32.655,
+    "text": "Bilmediği bir işle karşılaşınca becerisini kendi yazar, dener ve doğrular."
+   },
+   {
+    "start": 35.666,
+    "end": 39.834,
+    "text": "Her kararı görürsün: ne düşündü, neyi seçti, ne kadar sürdü."
+   },
+   {
+    "start": 43.385,
+    "end": 45.789,
+    "text": "Odundan demire. Tek başına."
+   },
+   {
+    "start": 49.489,
+    "end": 51.985,
+    "text": "Praxion. Oynarken öğrenir."
+   }
+  ],
+  "en": [
+   {
+    "start": 0.45,
+    "end": 7.405,
+    "text": "This is Praxion. An AI agent that plays Minecraft like a person, and writes its own skills while it plays."
+   },
+   {
+    "start": 8.505,
+    "end": 10.677,
+    "text": "One sentence is all it needs."
+   },
+   {
+    "start": 13.87,
+    "end": 16.46,
+    "text": "It plans first, says why, then plays."
+   },
+   {
+    "start": 20.024,
+    "end": 24.843,
+    "text": "It sees what is around, hears what is coming, and gets out of the way."
+   },
+   {
+    "start": 27.743,
+    "end": 33.166,
+    "text": "When it meets a job it cannot do, it writes the skill, practises it, and proves it works."
+   },
+   {
+    "start": 35.666,
+    "end": 40.485,
+    "text": "You see every decision: what it thought, what it chose, how long it took."
+   },
+   {
+    "start": 43.385,
+    "end": 45.742,
+    "text": "From wood to iron. On its own."
+   },
+   {
+    "start": 49.489,
+    "end": 52.125,
+    "text": "Praxion. It learns while it plays."
+   }
+  ]
+ },
+ "vo": {
+  "tr": [
+   {
+    "file": "vo/s1_tr.mp3",
+    "start": 0.45
+   },
+   {
+    "file": "vo/s2_tr.mp3",
+    "start": 8.505
+   },
+   {
+    "file": "vo/s3_tr.mp3",
+    "start": 13.87
+   },
+   {
+    "file": "vo/s4_tr.mp3",
+    "start": 20.024
+   },
+   {
+    "file": "vo/s5_tr.mp3",
+    "start": 27.743
+   },
+   {
+    "file": "vo/s6_tr.mp3",
+    "start": 35.666
+   },
+   {
+    "file": "vo/s7_tr.mp3",
+    "start": 43.385
+   },
+   {
+    "file": "vo/s8_tr.mp3",
+    "start": 49.489
+   }
+  ],
+  "en": [
+   {
+    "file": "vo/s1_en.mp3",
+    "start": 0.45
+   },
+   {
+    "file": "vo/s2_en.mp3",
+    "start": 8.505
+   },
+   {
+    "file": "vo/s3_en.mp3",
+    "start": 13.87
+   },
+   {
+    "file": "vo/s4_en.mp3",
+    "start": 20.024
+   },
+   {
+    "file": "vo/s5_en.mp3",
+    "start": 27.743
+   },
+   {
+    "file": "vo/s6_en.mp3",
+    "start": 35.666
+   },
+   {
+    "file": "vo/s7_en.mp3",
+    "start": 43.385
+   },
+   {
+    "file": "vo/s8_en.mp3",
+    "start": 49.489
+   }
+  ]
+ },
+ "clips": {
+  "a": {
+   "frames": 270,
+   "fps": 30
+  },
+  "b": {
+   "frames": 300,
+   "fps": 30
+  },
+  "c": {
+   "frames": 270,
+   "fps": 30
+  }
+ }
+}
