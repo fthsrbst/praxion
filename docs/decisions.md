@@ -3,6 +3,103 @@
 Agreed decisions, newest first. Each entry: date, decision, reason, what it rules out.
 Proposals and ideas stay in `notes.md` until they are decided here.
 
+## 2026-11-12
+
+- **Demo night: plan queue, models, wiki source, camp (user, four choices).** Contract and
+  measurements: `docs/proposals/2026-11-12-demo-night.md`. (1) The planner returns 1 to 5 goals and
+  one spoken thought per call and the loop plays the queue; the ladder is a yardstick, no longer the
+  required order; each run draws a persona. Reason: on 23 recorded runs the body waited a median
+  7.7 s before every goal and spent about 90 minutes in `nothing_to_do` back-off, and every run
+  played the same order. Rules out: one proposal call per goal, the needs gate and the drift brake
+  in the loop (deleted). (2) Planner `gpt-6.1-terra`, `gpt-6.1-sol` after two invalid plans or a
+  death; reasoning effort `none` for the default call (measured 4.6 s against 9.6 s with `low`).
+  (3) Wiki RAG from a fixed list of article pages fetched slowly, local index only
+  (`brain/praxion_brain/wiki/`, 328 articles, hit@3 0.90 on 20 questions, local multilingual
+  embeddings through `fastembed`). Rules out: the wiki API, `Special:Export`, distributing the index.
+  (4) A camp is placed from the inventory (`make_camp`); no build primitive yet.
+- **Operator tasks may be skill tasks (user request, same day).** A sentence such as "köy bul" maps
+  to a known public skill with arguments and no inventory condition; the skill's own `done` settles
+  it. Rules out: refusing every request that is not an inventory result.
+- **Jev vetoes the planner's skill, it does not have to prefer it (measured in run B).** A skill the
+  planner named plays unless Jev scores it under the write threshold (0.3). At 0.5 the correct
+  `hunt(pig, porkchop)` scored 0.49 and the loop wrote a duplicate skill.
+- **Voice runs in the web console (user request).** ElevenLabs speaks the narration lines and a held
+  key (V) or button records a task, transcribed and sent down the task path
+  (`brain/praxion_brain/voice.py`). Not built: a hotkey while the Minecraft window has focus.
+
+- **S3 hands design accepted (user).** `docs/proposals/2026-11-12-s3-hands.md`: a Swift helper
+  process (`hands/macos/`, grown from the spike) owns every OS input call and talks to the body over
+  a line protocol on a pipe; the body translates `ControlFrame`s in pure Rust (key set, closed-loop
+  look in pixels from the client's `mouseSensitivity`, held buttons, hotbar taps); receipts are
+  filled from the client's own serverbound packets seen on the tee; `--hands` arms in S3 (the
+  console button is S5); the helper releases everything when its stdin closes and the body runs a
+  release-all when the helper dies. Not in S3: menus, chat, sneak and sprint (modifier keys).
+  Rules out for now: CoreGraphics through Rust FFI, OS input inside the body process.
+
+- **Demo-1 product code is allowed on macOS (user).** The gate "no Demo-1 code until E8, E10, E11,
+  E12, E15 and E16 pass" now holds for the Windows path only (SendInput). On macOS the equivalent
+  evidence is the hands spike: keyboard hold and physical takeover, and mouse button, held button,
+  right click, yaw, pitch and gain measured live (`logs/mac-mouse-probe-s1/result.txt`). Reason: the
+  user wants to watch Praxion play their own player in first person now, and the macOS input path
+  has been measured. Rules out: writing the Windows SendInput actuator before its experiments.
+
+- **The macOS real-client body design is accepted (user).** `docs/proposals/2026-11-12-macos-real-client-body.md`:
+  a body host that does not log in and reads the world and the player's pose from the forwarder tee,
+  a Quartz hands actuator that consumes `ControlFrame`s (session-tap posts, tagged events, frontmost
+  and cursor-in-window checks before every post), takeover on any untagged physical input, a
+  watchdog that releases keys, and the build order S1 to S5, each step verified live before the
+  next. The section 5 open points stay open until their step measures them.
+
+- **Mouse input is posted at the session event tap (Claude, measured).** A PID-targeted left click
+  does not reach the game; session-tap and HID-tap clicks do. The HID tap lost 10 to 40 px of a
+  300 px camera move in both runs; the session tap lost none and gave exactly 0.15 degrees per
+  pixel at sensitivity 0.5 across 50 to 800 px and both directions. Rules out: `postToPid` for
+  mouse buttons; the HID tap for camera moves.
+
+- **Offer same-player control at server start, with explicit handoff (user).** Add a
+  "Bot controls my player" mode beside the server start controls. Keep the existing separate bot
+  mode. In same-player mode the operator joins with the vanilla client, then uses a separate
+  "Give Praxion control" action. Physical input returns control to the operator. Joining by
+  itself does not arm input or start a second player.
+
+- **Start same-player control on macOS with the vanilla client (user).** First verify that a bounded
+  keyboard action moves the existing Minecraft player in a disposable local world and that the
+  player can take control back without reconnecting. Keep the spike separate from the product path
+  until the real client accepts the input and the handoff is observed. A client mod is out of scope.
+
+## 2026-11-11
+
+- **The console starts the server and the bot separately (user).** The standalone page has fixed actions
+  `start_server`, `start_bot`, `stop_bot`, `stop_server` and `join`. Start server opens one managed
+  `TestServer` world and applies the survival or peaceful setup once, as soon as Java and RCON are ready;
+  the server is joinable and **Join Minecraft** works before any bot exists. Start bot starts only the
+  forwarder and body on that server (`start_session(..., server=...)`, a borrowed-server mode in the
+  harness) in a unique attempt directory under the same world. Stop bot keeps the server and world alive;
+  Stop server stops the bot first and then the server. A bot restart reuses the same world and brain
+  memory with a fresh console and queue, and does not rerun the clock or spawn setup. A failed bot start
+  or crash leaves the healthy server available for retry; a failed server start leaves no half-started
+  stack. Reason: the demo needs to join and look at the world without paying for a bot, and a bot crash
+  must not throw away the world it was playing in. Rules out for now: an all-or-nothing Start/Stop
+  session, and any browser-supplied seed, port, operator or path in the lifecycle endpoint.
+
+- **The demo runs from one standalone loopback web console (user).** `python -m praxion_brain console` serves the page on
+  127.0.0.1 (default port 8765; `--console-port N` changes it, `0` picks an ephemeral port) and owns the run:
+  **Start server & bot** opens a fresh-seed harness session and the bot against it (the harness's existing
+  `start_session` and the same `run` loop, no second launcher), **Stop session** closes that session and its body while
+  the console stays up, and **Join Minecraft** launches the local Java 26.3 client straight into the running server
+  through the existing Quick Play launch of the watcher. The inventory panel keeps the real slot layout (9-35, 36-44,
+  5-8 and offhand 45) and shows item and block textures read at runtime from the user's local 26.3 client; the console
+  bundles no Mojang assets (amends 2026-11-09 "Console"). When the local client cannot supply a texture, that slot
+  falls back to the existing lettered tile. The console adds no new public network surface: console, body, server and
+  client stay on loopback. Reason: a demo must be operable from a browser without terminal process choreography, and
+  the tested harness session and client watcher should be reused instead of reimplemented. Rules out for now: a second
+  server or launcher path, and shipping Mojang textures with the console. Observed live 2026-11-11: Start server & bot
+  and Stop session work from the browser, the inventory draws visible item textures from the local client (known
+  special items fall back to lettered tiles), and Join Minecraft landed the client in the running server after one
+  retry. The first launch sometimes hangs at `SDL_GL_SwapWindow`; the retry succeeds and the cause is unknown
+  (`logs/web-run-1111/minecraft-join-threads.txt`). The combined Start/Stop session controls here are
+  superseded by the split server/bot decision above.
+
 ## 2026-11-10
 
 From run 9 (seed 606): the night watch now starts live, but the bot died three times at night. The melee reflex and

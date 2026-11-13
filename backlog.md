@@ -19,6 +19,135 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Open
 
+### Demo night leftovers (2026-11-13)
+- Source: Claude Fable 5.2 (orchestrator), session of 2026-11-12/13. Contract `docs/proposals/2026-11-12-demo-night.md`,
+  decisions 2026-11-12 and 2026-11-13, briefs and worker reports in `logs/demo1112/`.
+- State: built and unit-tested, nothing committed: plan queue (`brain/praxion_brain/planner.py`, `persona.py`, loop),
+  wider operator tasks (`commands.py`), nine new core skills (`body/skills/`: coal, raw iron, iron pickaxe, torch,
+  chest, furnace, camp, find_block, find_village), `nearby` snapshot facts, hearing reflex, stone/water and drop
+  fixes (`dig_down` steps aside, `mine` watches its drop, `explore(stone)` 300 ticks), night mining
+  (`survival.night_work`), ElevenLabs voice in the console (`voice.py`, `static/voice.js`), the five-page console,
+  the wiki RAG (`brain/praxion_brain/wiki/`, index in `local/wiki/`, hit@3 0.90). Brain 631 tests, body crates'
+  tests and the perception boundary test pass.
+- Verified live: plan queue without waits between goals, personas, `nearby`, "köy bul" as a task (runs B and D,
+  seeds 37960 and 131469); stone sword in 57 s in run D.
+- Remaining, in order:
+  (1) no live run has reached coal, iron ingot, torches or `make_camp` yet: play runs until one does, and fix what
+  stops it (run D: `get_furnace` failed `missing_ingredients` after 376 ticks; `find_ore(coal_ore)` went into a
+  long `branch_mine`);
+  (2) hearing reflex, night mining, `dig_down` step-aside and the drop pickup are unverified live;
+  (3) bad spawns still ruin a run (run C, seed in `logs/demo1112/runC.seed`: one death, no progress in 22 min);
+  (4) `Move::to_cell` radius 5 and two step-asides in `dig_down` are the writer's picks, unmeasured;
+  (5) a body at the bottom of its own dig cannot climb out to a log: needs a `reachable`-style fact (design);
+  (6) the planner sometimes names a helper skill (`hunt_food`, `search_surface`): the step is skipped, costing a
+  plan slot; consider listing helpers as forbidden in the prompt;
+  (7) GLM review of the night-mining change and of the body play-quality change has not been run (the writer never
+  reviews its own work): briefs to write from `logs/demo1112/f3-night-mining.md` and the Sonnet report in the
+  session log;
+  (8) the spectator client hangs at its first frame while the Mac's screen is locked, so no new gameplay footage was
+  recorded; the promo uses `runs/video/praxion-stone-pickaxe.mp4` (2026-11-03). Re-cut with fresh footage when
+  the screen is unlocked (`video/promo/build.py`, clips in `video/promo/footage/{a,b,c}`);
+  (9) voice: the microphone path was never tried on real hardware; no hotkey while Minecraft has focus;
+  (10) `local/skills/candidates/get_coal.skill` and `get_furnace.skill` duplicate core skills now (inspection
+  copies only; delete by hand);
+  (11) `.playwright-mcp/` holds four tracked files from 2026-11-09: decide whether it belongs in the repo.
+  (12) run D (seed 131469, 30 min, `runs/` dir in `logs/demo1112/runD.dir`): 0 deaths, night survived, six rungs
+  in three minutes, then `get_coal` tunnelled for its whole 6000-tick budget without coal (18 raw copper, 103
+  cobblestone) and left the body at Y=33 with no way up. The planner asked for "climb to the surface" four times
+  (`plan_step_skipped`: no skill, empty condition) and every wood, food and furnace goal failed `not_found` from
+  underground. Needed first: a core skill that returns the body to the surface (stairs or a pillar up to open
+  sky), and `branch_mine`/`find_ore` bounded well under the goal budget; then let a step without a known skill
+  and with no condition start a skill write instead of being skipped;
+  (13) the planner named helper skills (`cut_log`, `hunt_food`, `search_surface`) eight times in run D, each a
+  skipped step: name the helpers as forbidden in `planner.PLAN_RULES`, or hide them from the prompt's facts.
+
+### Same-player control with the vanilla client on macOS (2026-11-12)
+- Source: user decision, 2026-11-12.
+- State: one vanilla 26.3 player joined a disposable local world; a PID-targeted 500 ms Quartz W
+  hold moved Fatih 2.155 blocks. In the spike, a physical Space press cut a scheduled 1.5 s hold
+  to 996 ms, released W, and jumped; coordinates settled after landing. SIGTERM also released W.
+  The final build refused background input and walked 6.472 blocks with the sole vanilla player
+  joined through the product forwarder. Replay decoded 453 packets without failures or desync;
+  player position and inventory matched the server.
+- Remaining: the S1 leftovers below, then S2 to S5 of
+  `docs/proposals/2026-11-12-macos-real-client-body.md`; keep the headless mode available.
+- Evidence: `spikes/macos-hands/`, `logs/mac-hands-retry/physical.txt`,
+  `logs/mac-dashboard-proxy-walk/{result.txt,summary.json}`.
+- Mouse, measured live 2026-11-12 (`logs/mac-mouse-probe-s1/result.txt`, tools
+  `spikes/macos-hands/mouse_probe.swift` and `mouse_fixture.py`, GLM review fixed): session-tap left
+  click breaks a block, a 1.5 s hold mines survival dirt (a short click does not), right click
+  places a block, pitch moves, yaw gain is 0.15 deg/px exactly from 50 to 800 px in both
+  directions, five repeats identical. PID-targeted clicks fail; the HID tap loses 10-40 px.
+- S1 leftovers: takeover on physical mouse movement and on a mouse button (needs the operator's
+  hand and a listen tap that also sees `mouseMoved`; `main.swift` taps buttons and keys only);
+  mid-hold focus loss live; cleanup after a forced kill (watchdog); menu clicks at a cursor position.
+- S2 shadow mode is built, not yet run live: `praxion-body --real-client --tee ADDR --name NAME`
+  attaches to the tee only, drives the driver once per observed `client_tick_end` and drops every
+  frame (`body/crates/headless/src/shadow.rs`, `Body::observe`, `World::player_on_ground`,
+  `World::life`). Build, 200 tests (world, headless, body) and clippy pass; GLM review findings 1-5
+  and 7 fixed (`logs/orch1112/review-s2.answer.txt`, `s2-fix.answer.txt`).
+- S2 live check passed 2026-11-12 (`logs/mac-shadow/result.txt`): the port snapshot showed the 3
+  stone the server gave, the same block position as the server before and after a 1.5 s walk
+  (8,-60,8 to 8,-60,14), 412 ticks in 20.6 s (20.00 per second), `world_valid` throughout, and the
+  server listed one player. The first attempt failed on the fixture, not the body: it read an
+  older queued snapshot (the body sends one on every wake).
+- S2 remaining: the 10-minute 0-desync run with the operator really playing (the proposal's pass
+  mark); `summary.json` is not written when the shadow body is stopped by SIGTERM (macOS ignores
+  the interrupt, pre-existing), so `shadow_wanted` has not been read live; a death and respawn
+  inside one 5 ms poll can miss `Died`; the death message is always `None`.
+- For S3 (review finding 6): `Body::observe` leaves sprinting, crouching, pose and dimensions,
+  `last_input`, horizontal collision, attributes and abilities at their construction values;
+  the hands step must read them from packets or prove nothing needs them.
+- The fixture needed a 90 s join deadline under load (a parallel autonomy run); 45 s failed twice.
+
+### S3 hands: state at the usage-limit stop (2026-11-12)
+- Source: Claude Fable 5.2 (orchestrator), design `docs/proposals/2026-11-12-s3-hands.md` (accepted).
+- State: S3a helper `hands/macos/praxion_hands.swift` builds without warnings, 229 self-test checks pass, refuses
+  a non-Minecraft pid; never run live. S3b Rust side (`body/crates/headless/src/hands.rs`, `hands_link.rs`,
+  hands mode in `shadow.rs`, `report_grace_ticks` in `body/crates/body/src/driver.rs`, flags `--hands`,
+  `--client-pid`, `--client-options`) builds, 237 tests and clippy pass; never run live.
+- Remaining, in order: (1) apply the GLM review of the helper, `logs/orch1112/review-s3a-r2.answer.txt` (read,
+  not yet fixed); (2) rerun the GLM review of S3b from the brief `logs/orch1112/review-s3b.md`: the first run stalled
+  (exit 10) and left no findings, its session was reaped; check the worker's claim that the pinned azalea
+  enum mis-decodes destroy stop/abort in 26.3 (S3b matches raw ordinals 0 and 3) and the backlog-round double
+  look; (3) with the user's yes, run `hands/macos/live_check.py` (S3a live); (4) write the S3c fixture
+  (`move_to` 10 blocks, `mine` a log through `praxion-body --real-client --hands ...`) and measure the look
+  latency; (5) S3d takeover with the operator's hand.
+- Nothing is committed: the tree holds Codex's and this session's changes together.
+
+### Run 10 findings (2026-11-12, seed 1010, 30 min survival)
+- Source: Claude Fable 5.2, run `runs/test-body-47a67a453cc14951ad144088fe898fe3` (`metrics.md` inside), referee:
+  0 deaths, first night survived, no desync. Six rungs in the first 5 minutes, none in the next 25.
+- Verified live from the run 8/9 fixes: the world clock, the night goal (`night_watch` done after 9962 ticks), no
+  death, no desync halt. Not exercised: an explosion, a death, the sealed shelter exit (check the body log).
+- Remaining, by cost to the run:
+  (a) admission is the bottleneck of skill writing: `get_furnace` was written in 3 s, then practice took 278 s
+  (seed 101), 425 s (202) and 669 s (303, body failure `not_found`), and admission was still unfinished after
+  23 minutes. Options to decide: practice seeds in parallel, a tick cap per practice, a faster server tick rate in
+  the practice room.
+  (b) while one skill is in admission the loop has almost nothing to do: `nothing_to_do reason=proposals_excluded`
+  x4, `write_deferred` x2 (`has(raw_iron)`: only one write at a time), then `governor_denied rate_limit` x3.
+  (c) `has(raw_iron)` was routed to `write` and to `ask` although `find_ore` exists: the router does not map a
+  goal to a core skill that needs an argument.
+  (d) `has(crafting_table)` was proposed although a table stood in the world; `get_crafting_table` then failed
+  `not_found` after 1461 ticks (12 `explore:not_found`, 4760 ticks in the run, 31 % of primitive ticks wasted).
+  (e) `loop_error ConditionError: empty condition` at 316 s: a proposal with an empty condition reached the loop.
+  (f) `get_cobblestone >= 3` took 4105 ticks (204 s); find where in the body log.
+  (g) `local/skills/active` was empty at the start, so the `get_furnace` admitted in runs 3-4 was written again:
+  decide whether admitted skills persist across runs on this machine.
+- Tool: `python -m praxion_harness.metrics RUN_DIR [...] [--write]` (`harness/praxion_harness/metrics.py`, GLM review
+  `logs/orch1112/review-metrics.answer.txt` pending). The body log has no pose samples, so "stuck in place" cannot
+  be measured yet; needs a periodic pose event (decision owed).
+
+### Intermittent client first-launch hang at `SDL_GL_SwapWindow` (2026-11-11)
+- Source: live web console run, 2026-11-11
+- State: a first Join Minecraft launch can hang in the client's first `SDL_GL_SwapWindow`; a retry succeeds and the
+  client lands in the running server. Diagnosis unknown; this is not a permanent fix and the graphics issue remains.
+- Remaining: capture a fresh hang with debug logging and compare its thread dump against a successful launch before
+  changing anything.
+- Pointers: `logs/web-run-1111/minecraft-join-threads.txt`,
+  `runs/test-body-b5d74a85eda641279f2597c9c0c032bb/server/logs/latest.log`.
+
 ### Run 8 fix leftovers (2026-11-10)
 - Source: re-review of the run 8 fixes (Claude Opus 5.5 workflow), run 8 seed 808
 - State: the run 8 fixes are in (26.3 explode patch `versions/patches/azalea-8041a14-26.3-03-explode.patch`, vanilla
@@ -195,7 +324,11 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 ### Sealed shelter: live verification and leftovers
 - Source: survival slice 2 review (finding 5), 2026-11-09; built for run 9 (decisions 2026-11-10 "A sealed
   shelter now", "Shelter shape and exit"); run 9 review items 1-3, 2026-11-10
-- State: built and unit-tested, not yet run live. `sheltered()` (facts, feet cell rounded half a block up so
+- State: built and unit-tested; live on 2026-11-11 (main `75d7c87`) the two targeted harness tests ran:
+  `test_take_shelter_seals_the_body_in_at_night` passed, `test_take_shelter_climbs_out_in_the_morning` failed
+  because `leave_shelter` reported confirmed while the referee measured the feet at Y=71 against an initial
+  Y=72 (overhead air), run `runs/test-body-dcf89245a6a04e9bab11a32f4611cf85`.
+  `sheltered()` (facts, feet cell rounded half a block up so
   a dirt path or soul sand is not the feet cell), `shelter()` (dig three down and cover, else wall in; a dig
   starts only with a guaranteed cover and never through sand, gravel or concrete powder),
   `leave_shelter()` (mine the cover, then a door in a wall or pillar steps out of the hole),
@@ -204,8 +337,8 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
   (a hole it could not leave walls in instead; a box it could not leave fails `no_exit`, too few blocks
   `no_blocks`) and builds only with blocks it can mine back; `get_food` leaves a shelter before it hunts
   (`hunt_food` holds the hunt rules); the port snapshot carries `sheltered` (sent only when true).
-- Remaining: (1) run `harness/tests/test_body_smoke.py::test_take_shelter_seals_the_body_in_at_night` and
-  `::test_take_shelter_climbs_out_in_the_morning` live (written, never run); (2) `leave_shelter` leaves its
+- Remaining: (1) diagnose the early confirmation (a confirmed leave while the feet are one block below the
+  initial Y under overhead air) against the test premise, then rerun both cases live; (2) `leave_shelter` leaves its
   pillar column and the wall-in box's other seven walls standing (only the cover and the door come back);
   (3) `shelter()` no longer builds with a block it cannot mine back, but a cover that drops nothing with any
   carried tool for another reason (the pickaxe broke or was dropped during the night) still fails `no_exit`
@@ -471,4 +604,9 @@ and leave a one-line link. Split further (`backlog/<slug>/<part>.md`) the same w
 
 ## Done
 
+- Web console as the run front end (user, 2026-11-11). `python -m praxion_brain console` serves the page and owns the
+  run from the browser. Live checks 2026-11-11: Start server & bot and Stop session work, the inventory shows visible
+  actual local item textures (known special items fall back to letters), and Join Minecraft landed in the running
+  server after a retry. The first-launch graphics hang stays open above. Pointers:
+  `brain/praxion_brain/console/`, `docs/decisions.md` 2026-11-11.
 - Choose a license: Apache-2.0 for the open core, 2026-10-29 (session 15). Open: which parts are commercial.

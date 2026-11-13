@@ -19,8 +19,16 @@ two can never drift: **edit only `AGENTS.md`**. Never copy rules into `CLAUDE.md
   desync, the world clock, brain idling, the death event, fight ownership and the sealed shelter. Next: run 10 to
   verify them live, then Demo-3 building (decisions 2026-11-08), then the rest of Demo-1. The remaining hands
   experiments (E8, E10, E11, E12, E15, E16) gate Demo-1 only (`backlog.md`).
-- Demo-0 product code is allowed (decision 2026-11-01). Do not write Demo-1 code (SendInput actuator,
-  take-over, indicator) until E8, E10, E11, E12, E15 and E16 have passed. Experiment code in `spikes/`
+  On 2026-11-12, the user prioritized testing same-player control with the vanilla client on macOS.
+  The keyboard spike lives in `spikes/macos-hands/`; see the backlog for live evidence and the
+  remaining gates before connecting it to the product.
+  On 2026-11-12/13 the demo-night work landed uncommitted (plan queue, personas, wider tasks, new core skills,
+  hearing, night mining, voice, five-page console, wiki RAG): `docs/proposals/2026-11-12-demo-night.md`; what is
+  verified live and what is not is in `backlog.md` "Demo night leftovers".
+- Demo-0 product code is allowed (decision 2026-11-01). Demo-1 product code is allowed on macOS
+  (decision 2026-11-12): build it in the order S1 to S5 of
+  `docs/proposals/2026-11-12-macos-real-client-body.md`. Do not write the Windows Demo-1 code
+  (SendInput actuator) until E8, E10, E11, E12, E15 and E16 have passed. Experiment code in `spikes/`
   is allowed.
 - When this section is stale, fix it in the same change that makes it stale.
 

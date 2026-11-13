@@ -6,6 +6,92 @@ until it is recorded as one. Promote decisions out of this file when they are ma
 
 ---
 
+## 2026-11-13, Claude Fable 5.2: demo night orchestration notes
+- Measured on 23 recorded runs before the change: proposal call p50 7.7 s (`gpt-6-luna`), 108 600 ticks in
+  `nothing_to_do` back-off (rate limit 33 times). After: one planner call per 1-5 goals; `gpt-6.1-terra` answered one
+  briefing in 4.6 s with reasoning effort `none` and 9.6 s with `low` (single measurements, not a distribution).
+- Four Rust workers with their own `CARGO_TARGET_DIR` filled the disk (ENOSPC) and killed every worker and the
+  Bash tool. From then on all Rust workers shared `body/target` and waited on the cargo lock. Rule for briefs:
+  never a private target directory on this machine (19 GB each); serialise builds instead.
+- Workers that died mid-edit were resumed with a short preface ("partial edits are in the tree, read the diff,
+  finish") in front of the unchanged brief; all five finished correctly that way.
+- GLM 5.3 Flash reviews again found real defects every time (10 in the brain, 3 in the body), none invented.
+- A Jev score just under a threshold threw away a correct planner choice (`hunt` 0.49 against 0.5); the planner's
+  named skill now needs only to clear the write threshold.
+- Body behaviours that read as "not human" in live runs, all from skills and primitives rather than the model:
+  three 1200-tick surface explores for stone, mining the same block under water in a drowning loop, mining at a
+  log six blocks overhead from the bottom of a dig, a dropped crafting table never picked up, nine minutes sealed
+  in a shelter. The model layer was the smaller part of "it does not feel smart".
+- The promo video is built from one HTML composition stepped frame by frame in headless Chrome
+  (`video/promo/`): `python3 build.py render tr|en`, then `mux`. Voice-over and the ambient loop come from
+  ElevenLabs (the music API needs a paid plan; the sound-generation endpoint works on the free one).
+
+## 2026-11-12, Claude Fable 5.2: orchestration notes (metrics, run 10, S1, S2)
+- Workers this session: DeepSeek V4.1 Flash wrote `metrics.py` (+ fixes) and S2 shadow mode (+ fixes);
+  GLM 5.3 Flash reviewed the mouse probe, the metrics and S2. Every review found real defects
+  (z-order hole in the cursor check, a restart losing half a run, no death handling in shadow mode).
+  One DeepSeek run ended without the `FINAL_REPORT` marker (exit 12) although the work was complete:
+  briefs now say "your last message MUST end with a line that starts with the exact word".
+- `oc-reap.sh` after every worker exit stopped a live session each time: finished sessions do linger.
+- The practice room competes with the live run for CPU: a client launched during run 10's admission
+  needed more than 45 s to join. Admission practice time (278-669 s per seed) is the main cost of
+  skill writing, not the model (3 s).
+- Proposal: a scenario runner (`python -m praxion_harness.scenarios`) that plays a fixed list
+  (seed, minutes, peaceful/survival, optional operator task) one after another and writes the
+  compare table; first set: seeds 1010 (done), a forest spawn, a plains spawn, a pit spawn (808),
+  a night start, and a chat task run. Not built; needs the user's yes on the list.
+- Proposal: an LLM judge (GLM) that reads `metrics.json` plus the goal timeline and marks each
+  goal sensible / wasteful / silly with a reason; cheap, runs after each scenario. Not built.
+
+## 2026-11-12, Claude Fable 5.2: wiki RAG source check, mouse/camera hypotheses
+- Wiki RAG is not built: no index code in the repo, nothing for praxion in the hub RAG.
+- minecraft.wiki facts read today: text is CC BY-NC-SA 3.0 ("additional terms may apply", full
+  terms on the Weird Gloop meta Licensing page, not read). `robots.txt` for `User-agent: *`
+  disallows `/*api.php`, `/w/Special:` (so Special:Export), `?action=` and `rest_v1`; ordinary
+  article pages under `/w/` are not disallowed; no crawl-delay; a sitemap is published; named AI
+  crawlers (GPTBot, ClaudeBot, CCBot and others) are blocked site-wide. No official dump was found
+  (two searches; unknown, not proven absent).
+- Proposal (not decided): do not use the API or Special:Export. Exact game data (recipes, loot,
+  tags) comes from the game jar through `gamedata`, not from the wiki. For prose knowledge
+  (mechanics, mob behaviour, farms) either ask the wiki admins for a dump or permission, or fetch a
+  small fixed list of article pages (hundreds, not the whole site) slowly with an identifying
+  user agent, index locally and never distribute. The user decides.
+- Mouse on macOS (hypotheses, untested): the failed click was PID-targeted (`postToPid`). Mouse
+  events posted to a PID skip the window server's routing, and a client in relative-mouse mode
+  reads deltas, not positions. Next spike step: post at the HID tap (`CGEvent.post(tap:
+  .cghidEventTap)`) while Minecraft is frontmost, for buttons and for camera (`mouseMoved` with the
+  delta fields set), and tag own events (`eventSourceUserData`) so the listen tap can tell them from
+  the operator's physical input. Cost: a HID-level post is global, so the focus check becomes a
+  hard precondition. Keyboard-only fallback covers attack/use (rebound keys) but not the camera.
+
+## 2026-11-12, Codex: dashboard same-player route
+- The approved UI selects "Bot controls my player" beside server start. Joining leaves the user
+  in control; "Give Praxion control" is separate. Keep the server up after a failed join or a
+  release, and allow an explicit retry without spawning a headless login.
+- The existing dashboard cannot gain this behavior by relabeling Start bot:
+  `body/crates/body/src/main.rs` calls `praxion_headless::Session::connect_with`, which creates
+  a new Minecraft login and owns the tick loop. The real-client path needs to feed the existing
+  decision loop from the one joined client and apply its actions through native input.
+- On macOS the product forwarder tee was attached before the vanilla client joined. The final
+  keyboard spike walked 6.472 blocks with only that client connected. Offline decode of the live
+  capture matched server position and inventory (453 packets, 0 failures, 0 desync). This verifies
+  the traffic path, not the live tick loop or reconnect.
+- The fixture placed a stone block under the crosshair in Creative. PID-targeted Quartz mouse
+  down/up did not change the block, including with the main window ID and center. With attack
+  rebound to F in an isolated client profile, the keyboard spike broke the block and the
+  decoder saw a block acknowledgment. The cause of the mouse result is still unknown.
+
+## 2026-11-12, Codex: macOS same-player input
+- PID-targeted Quartz keyboard events reached vanilla 26.3/SDL Cocoa with just the local client
+  joined. A real Space press stopped a one-key hold and reached the game as a jump. This supports
+  testing a macOS input backend, with mouse and menus still unknown.
+- A terminal state released W but the original process hung: `RunLoop.main.run()` re-entered with
+  installed sources after `CFRunLoopStop`. Switching to `CFRunLoopRun()` returned to cleanup and
+  exited in the live timeout and interruption runs.
+- The first client launch stalled in the SDL/OpenGL render path; the isolated retry with the existing
+  watcher options joined. The test does not isolate the startup cause. Sample:
+  `logs/mac-hands-live/client.sample.txt`.
+
 ## 2026-11-09, OpenCode (DeepSeek V4.1 Flash): smarter slice 2 review fixes
 - The scaffolding set left `praxion-primitives` for `praxion_perception::scaffold`. The review's HIGH finding was
   that `mine`'s target search skipped the body's own scaffold log and the `near` fact did not, so `get_wood` could
